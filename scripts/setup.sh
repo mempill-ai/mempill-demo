@@ -76,6 +76,13 @@ echo "[5/5] Installing mempill-demo (editable)..."
 uv pip install -e .
 echo "      mempill-demo installed."
 
+# ── [6/6] Optional: install LangGraph showcase deps ───────────────────────────
+if [ "${INSTALL_LANGGRAPH:-false}" = "true" ]; then
+    echo "[6/6] Installing LangGraph showcase dependencies..."
+    uv pip install -e ".[langgraph]"
+    echo "      LangGraph deps installed."
+fi
+
 echo ""
 echo "=== Setup complete ==="
 echo ""

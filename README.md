@@ -230,6 +230,65 @@ See `console/GRAMMAR.md` for the full command grammar with SDK mappings.
 
 ---
 
+## LangGraph conversational agent
+
+A natural-language CHAT agent that uses mempill as long-term memory. The LLM replies naturally each turn while reading and writing the mempill memory store — multi-turn history, contested-belief surfacing, structured-output extraction (no `json.loads`).
+
+### Setup
+
+Install the LangGraph optional dependency group:
+
+```bash
+INSTALL_LANGGRAPH=true bash scripts/setup.sh
+# or directly:
+uv pip install -e ".[langgraph]"
+```
+
+Set your API key in `.env` or the environment:
+
+```bash
+# .env
+ANTHROPIC_API_KEY=sk-ant-...
+# Optional — override the default model
+MEMPILL_MODEL=claude-sonnet-4-6
+```
+
+### Run the agent
+
+```bash
+uv run python -m mempill_langgraph
+```
+
+If `ANTHROPIC_API_KEY` is not set:
+
+```
+ERROR: ANTHROPIC_API_KEY not set. Add it to .env or export it.
+# exits 1
+```
+
+### What it demonstrates
+
+- **Read before speak** — `retrieve_memory` queries mempill before the LLM replies.
+- **Contested surfacing** — if the queried belief is Contested, both claims are formatted into the system prompt. The LLM is instructed never to pick one and to suggest `/reconcile`.
+- **Write after speak** — `write_memory` uses `llm.with_structured_output(ClaimExtractResult)` (Claude tool-use API) to extract factual claims from the AI reply and ingest them into mempill with `ModelDerived` provenance. Greetings and questions produce an empty claim list — never an error.
+- **Amplification firewall** — if the AI reply merely restates a value already in memory (recall re-entry), the node detects it and skips the ingest to prevent self-amplification.
+- **Multi-turn history** — LangGraph's `MemorySaver` checkpointer restores the full message history on every turn via `thread_id`.
+
+### Offline tests (no API key)
+
+```bash
+uv run pytest tests/test_langgraph_graph.py -q
+# 4 offline assertions + 1 skipped (live smoke)
+```
+
+The offline tests use `FakeMessagesListChatModel` and an injectable extractor callable to bypass tool-calling in the fake model.
+
+### Architecture
+
+Graph: `START → retrieve_memory → respond → write_memory → END` (unconditional edges). Nodes import the `MemoryStore` Protocol only — never `mempill` directly. Only `__main__.py` constructs `MempillMemoryStore` and imports `mempill`.
+
+---
+
 ## Architecture notes
 
 - The mempill engine is a structural, bi-temporal memory store — no LLM, no embeddings.
