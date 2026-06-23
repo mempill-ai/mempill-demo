@@ -130,6 +130,98 @@ Logs: `~/Library/Logs/Claude/mcp*.log` (macOS)
 
 ---
 
+## Interactive Console Agent
+
+A mempill-aware REPL agent with a rich memory panel, persistent file-backed storage, and an optional LLM extraction layer.
+
+### Entry point
+
+```bash
+# 3-act auto-play scenario then REPL
+uv run python -m console --scenario
+
+# Plain REPL (deterministic grammar)
+uv run python -m console
+
+# Assertion suite for CI (no API key required)
+uv run python -m console --selftest
+
+# LLM-backed natural language parsing (requires ANTHROPIC_API_KEY)
+uv run python -m console --llm
+
+# Delete the persistent DB and exit
+uv run python -m console --reset
+```
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--db PATH` | File-backed DB path (default: `.mempill/console.db`) |
+| `--agent AGENT_ID` | Agent ID string (default: `console-user`) |
+| `--llm` | Enable LLM extraction via Claude (requires `ANTHROPIC_API_KEY`) |
+| `--scenario` | Auto-play the 3-act story then hand off to REPL |
+| `--selftest` | Run deterministic assertion suite; exit 0 on pass |
+| `--reset` | Delete the DB file and exit |
+
+### Quickstart
+
+```
+$ uv run python -m console
+mempill Console Agent  [deterministic]
+Type /help for commands, /quit to exit.
+
+mempill> INGEST acme:ceo held_by "Alice" SINCE 2020-01-01
+Ingested: acme:ceo held_by = "Alice"
+  disposition: CommittedCheap
+  claim_ref:   c97b91b2...
+
+mempill> INGEST acme:ceo held_by "Bob" SINCE 2023-03-15
+Ingested: acme:ceo held_by = "Bob"
+  disposition: Contested
+  contested_with: ['c97b91b2...']
+  [!] Contested — use /reconcile to resolve.
+
+mempill> /reconcile acme:ceo held_by
+Reconcile acme:ceo held_by:
+  f27bbdbc...  → CommittedCheap
+
+mempill> RECALL acme:ceo held_by
+Memory: acme:ceo held_by = "Bob" (conf 0.90)
+  status: Resolved  ref: f27bbdbc...
+```
+
+### --scenario output highlights
+
+The auto-play scenario demonstrates:
+- **CONTESTED** badge — two open-ended Functional claims overlap
+- **SUPERSEDED** in audit — Alice's claim bounded by reconcile
+- **FIREWALL HELD** — `RecallReEntry` × 5 does not alter the belief
+
+### --selftest CI usage
+
+```bash
+uv run python -m console --selftest && echo "CI: selftest passed"
+```
+
+Exit 0 = all 13 assertions passed (T1–T7). No API key required.
+The selftest uses `open_in_memory()` — never touches the persistent DB.
+
+### --llm no-key guard
+
+```bash
+# No key set:
+$ uv run python -m console --llm
+ERROR: --llm requires ANTHROPIC_API_KEY to be set in the environment.
+# exits 1
+```
+
+### Grammar reference
+
+See `console/GRAMMAR.md` for the full command grammar with SDK mappings.
+
+---
+
 ## Architecture notes
 
 - The mempill engine is a structural, bi-temporal memory store — no LLM, no embeddings.

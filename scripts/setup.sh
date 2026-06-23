@@ -67,9 +67,9 @@ uv pip install -e "$MEMPILL_MCP_DIR"
 echo "      mempill-mcp installed."
 
 # ── Install MCP client library ────────────────────────────────────────────────
-echo "[4/5] Installing mcp>=1.9,<2..."
-uv pip install "mcp>=1.9,<2"
-echo "      mcp installed."
+echo "[4/5] Installing mcp>=1.9,<2 and rich>=13..."
+uv pip install "mcp>=1.9,<2" "rich>=13"
+echo "      mcp + rich installed."
 
 # ── Install this demo package ─────────────────────────────────────────────────
 echo "[5/5] Installing mempill-demo (editable)..."
@@ -87,3 +87,8 @@ echo "  uv run python demo/temporal_validity.py"
 echo ""
 echo "Run the MCP verification:"
 echo "  uv run python mcp/verify_stdio.py"
+echo ""
+echo "Run the interactive console agent:"
+echo "  uv run python -m console --scenario    # 3-act demo then REPL"
+echo "  uv run python -m console --selftest    # CI assertion suite (no API key)"
+echo "  uv run python -m console               # plain REPL"
