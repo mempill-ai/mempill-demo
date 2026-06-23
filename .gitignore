@@ -9,3 +9,7 @@ __pycache__/
 *.sqlite3
 # Claude Code MCP config (personal paths — keep .example tracked)
 .mcp.json
+# Environment variable files — keep .example tracked
+.env
+.env.*
+!.env.example

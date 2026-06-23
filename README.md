@@ -147,6 +147,8 @@ uv run python -m console
 uv run python -m console --selftest
 
 # LLM-backed natural language parsing (requires ANTHROPIC_API_KEY)
+# Copy .env.example to .env and set ANTHROPIC_API_KEY (or export it in your shell).
+# Optionally set MEMPILL_MODEL to override the default model.
 uv run python -m console --llm
 
 # Delete the persistent DB and exit
@@ -207,10 +209,16 @@ uv run python -m console --selftest && echo "CI: selftest passed"
 Exit 0 = all 13 assertions passed (T1–T7). No API key required.
 The selftest uses `open_in_memory()` — never touches the persistent DB.
 
+### --llm setup
+
+Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY` (or export it in your shell). The app auto-loads `.env` on startup — no manual `source` needed. Deterministic mode (`--selftest`, plain REPL, `--scenario`) requires no key.
+
+Optionally set `MEMPILL_MODEL` to override the default model (e.g. `MEMPILL_MODEL=claude-haiku-4-5` for a cheaper run).
+
 ### --llm no-key guard
 
 ```bash
-# No key set:
+# No key set and no .env:
 $ uv run python -m console --llm
 ERROR: --llm requires ANTHROPIC_API_KEY to be set in the environment.
 # exits 1

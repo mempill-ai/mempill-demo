@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover
 from mempill_demo.domain.models import CommandKind, ParsedCommand
 
 
-_MODEL = "claude-haiku-4-5-20251001"
+_MODEL = os.environ.get("MEMPILL_MODEL", "claude-haiku-4-5-20251001")
 
 _EXTRACTION_SYSTEM = """
 You are a command extraction assistant for a mempill memory agent.

@@ -16,6 +16,10 @@ import argparse
 import pathlib
 import sys
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
