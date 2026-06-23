@@ -1,5 +1,5 @@
 """
-demo/temporal_validity.py — mempill temporal-validity demonstration (3 acts)
+examples/temporal_validity.py — mempill temporal-validity demonstration (3 acts)
 
 Runs entirely offline using the local mempill wheel (no LLM, no network, no
 vector DB). All intelligence is structural — the engine tracks WHEN something
@@ -15,7 +15,7 @@ just in the top-level 'confidence' dict. Example:
   'valid_time': {'start': '2020-01-01T00:00:00Z', 'valid_time_confidence': 0.9}
 
 Usage:
-  uv run python demo/temporal_validity.py
+  uv run python examples/temporal_validity.py
 """
 
 import sys
@@ -103,7 +103,6 @@ def run() -> None:
     else:
         note(f"ACTUAL disposition: {resp_alice['disposition']!r} (narrating real engine behavior).")
 
-    # Query: what does the engine believe right now?
     q1 = engine.query_memory({
         "agent_id": agent_id,
         "subject": "acme:ceo",
@@ -152,7 +151,6 @@ def run() -> None:
     else:
         note(f"ACTUAL BEHAVIOR: disposition={actual_act2_disposition!r} (plan assumed Contested).")
 
-    # Reconcile: tell the engine to resolve conflicts for this subject line.
     print()
     print("  [RECONCILE] Resolving conflict on (acme:ceo, held_by)...")
     reconcile_resp = engine.reconcile({
@@ -162,7 +160,6 @@ def run() -> None:
     show("reconcile outcomes      ", reconcile_resp["outcomes"])
     show("reconcile oracle_escals ", reconcile_resp["oracle_escalations"])
 
-    # Decode reconcile outcomes
     outcomes = reconcile_resp["outcomes"]
     if outcomes:
         for (ref, disp) in outcomes:
@@ -175,7 +172,6 @@ def run() -> None:
     else:
         note("ACTUAL: reconcile returned no outcomes — claims may have self-resolved.")
 
-    # Post-reconcile query: current canonical belief
     print()
     note("Post-reconcile: querying current canonical belief...")
     q_current = engine.query_memory({
@@ -183,12 +179,9 @@ def run() -> None:
         "subject": "acme:ceo",
         "predicate": "held_by",
     })
-    current_belief = q_current.get("belief", {})
     show("current belief status         ", belief_status(q_current))
     show("current belief primary value  ", belief_value(q_current))
 
-    # The status after reconcile is "Resolved" (not "Committed") — the engine
-    # marks the belief as having gone through adjudication.
     if belief_status(q_current) == "Resolved":
         note("Status='Resolved': the conflict was adjudicated — Bob superseded Alice.")
         note("Alice's claim is now 'Superseded' in the ledger; her 2020-2023 period is immutable.")
@@ -208,9 +201,6 @@ def run() -> None:
     note("derived_from=[bob_ref] identifies the source claim (the recall provenance chain).")
     note("The Amplification Guard (C6) must prevent this from inflating the belief.")
 
-    # Use the reconcile-promoted bob_ref (CommittedCheap outcome) as the recall source.
-    # When derived_from identifies the recalled claim, the firewall can recognize
-    # re-ingestion as corroboration — not as independent new evidence.
     committed_bob_ref = outcomes[0][0] if outcomes else bob_ref
 
     RECALL_COUNT = 808
@@ -238,7 +228,6 @@ def run() -> None:
 
     print(f"  Done. {RECALL_COUNT} recall-re-entry ingests completed.")
 
-    # Audit: inspect the ledger
     audit_resp = engine.query_audit({
         "agent_id": agent_id,
         "claim_ref": None,
@@ -248,7 +237,6 @@ def run() -> None:
     entries = audit_resp["entries"]
     total_entries = len(entries)
 
-    # Count distinct claim_refs in the ledger
     distinct_refs: set[str] = set()
     for entry in entries:
         ref = entry.get("claim_ref") or entry.get("id")
@@ -258,7 +246,6 @@ def run() -> None:
     show("audit ledger total entries   ", total_entries)
     show("distinct claim_refs in ledger", len(distinct_refs))
 
-    # Query the belief after 808 recall re-entries
     q_after = engine.query_memory({
         "agent_id": agent_id,
         "subject": "acme:ceo",

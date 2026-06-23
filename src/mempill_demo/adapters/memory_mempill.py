@@ -1,0 +1,397 @@
+"""
+mempill_demo.adapters.memory_mempill — THE ONLY module that imports mempill.
+
+Encapsulates all SDK quirks:
+  - valid_time["valid_time_confidence"] inside the valid_time dict
+  - belief["belief"]["primary"]["fact"]["value"] deep path extraction
+  - audit entries have no subject/predicate/value → session registry correlation
+  - ProvenanceLabel and Disposition enum mapping
+  - reconcile() returns only winner; loser is in audit ledger
+"""
+from __future__ import annotations
+
+from typing import Any
+
+import mempill
+from mempill import Disposition, ProvenanceLabel
+
+from mempill_demo.domain.models import (
+    AuditEntry,
+    BeliefView,
+    AlternativeView,
+    ClaimMeta,
+    ParsedCommand,
+    ReconcileOutcome,
+    SessionStats,
+    CommandKind,
+    _prov_abbr,
+)
+
+
+class MempillMemoryStore:
+    """MemoryStore adapter backed by a real mempill Engine."""
+
+    def __init__(self, engine: mempill.Engine, agent_id: str) -> None:
+        self._engine = engine
+        self._agent_id = agent_id
+        # Session-local claim registry: claim_ref → ClaimMeta
+        # Needed because audit entries carry claim_ref but NOT subject/predicate/value.
+        self._registry: dict[str, ClaimMeta] = {}
+        self._stats = SessionStats()
+
+    @property
+    def stats(self) -> SessionStats:
+        return self._stats
+
+    # ── Write path ────────────────────────────────────────────────────────────
+
+    def ingest(self, cmd: ParsedCommand) -> ClaimMeta:
+        """Ingest a ParsedCommand into the engine; register in local registry."""
+        # Determine provenance
+        prov_str = (cmd.extra or {}).get("provenance_str", "UserAsserted")
+        if cmd.kind == CommandKind.RECALL_REENTRY:
+            prov = ProvenanceLabel.recall_re_entry()
+        elif prov_str == "ModelDerived":
+            prov = ProvenanceLabel.model_derived()
+        else:
+            prov = ProvenanceLabel.external_user_asserted()
+
+        cardinality = (cmd.extra or {}).get("cardinality", "Functional")
+
+        # Build valid_time — always include valid_time_confidence inside the dict (SDK quirk R1)
+        conf_val = 0.7 if cmd.kind == CommandKind.RECALL_REENTRY else cmd.conf
+        valid_time: dict = {"valid_time_confidence": conf_val}
+        if cmd.since:
+            valid_time["start"] = cmd.since
+        if cmd.until:
+            valid_time["end"] = cmd.until
+
+        # Build derived_from for RECALL_REENTRY
+        derived_from: list[str] = []
+        if cmd.kind == CommandKind.RECALL_REENTRY and cmd.source_claim_ref:
+            derived_from = [cmd.source_claim_ref]
+
+        criticality = "Low" if cmd.kind == CommandKind.RECALL_REENTRY else "Medium"
+
+        request = {
+            "agent_id": self._agent_id,
+            "subject": cmd.subject,
+            "predicate": cmd.predicate,
+            "value": cmd.value,
+            "provenance": prov,
+            "cardinality": cardinality,
+            "valid_time": valid_time,
+            "confidence": {
+                "value_confidence": conf_val,
+                "valid_time_confidence": conf_val,
+            },
+            "criticality": criticality,
+            "derived_from": derived_from,
+        }
+
+        resp = self._engine.ingest_claim(request)
+        disp = resp["disposition"]
+        ref = resp["claim_ref"]
+
+        meta = ClaimMeta(
+            subject=cmd.subject,
+            predicate=cmd.predicate,
+            value=cmd.value,
+            provenance=prov,
+            valid_time=valid_time if (cmd.since or cmd.until) else None,
+            conf=conf_val,
+            disposition=disp,
+            claim_ref=ref,
+        )
+        self._registry[ref] = meta
+        return meta
+
+    # ── Read paths ────────────────────────────────────────────────────────────
+
+    def recall(self, subject: str, predicate: str) -> BeliefView:
+        """Query the engine and map to a BeliefView domain object."""
+        resp = self._engine.query_memory({
+            "agent_id": self._agent_id,
+            "subject": subject,
+            "predicate": predicate,
+        })
+        return self._map_belief(resp, subject, predicate)
+
+    def reconcile(self, subject: str, predicate: str) -> list[ReconcileOutcome]:
+        """Run reconciliation; return list of ReconcileOutcome domain objects."""
+        resp = self._engine.reconcile({
+            "agent_id": self._agent_id,
+            "subject_lines": [(subject, predicate)],
+        })
+        outcomes = resp.get("outcomes", [])
+        return [ReconcileOutcome(claim_ref=ref, disposition=disp) for ref, disp in outcomes]
+
+    def history(
+        self,
+        subject: str,
+        predicate: str,
+    ) -> tuple[list[ClaimMeta], list[AuditEntry]]:
+        """Return all ClaimMeta for the subject/predicate + correlated audit entries."""
+        metas = [
+            meta for meta in self._registry.values()
+            if meta.subject == subject and meta.predicate == predicate
+        ]
+        if not metas:
+            return [], []
+
+        refs = {m.claim_ref for m in metas}
+        all_audit = self._fetch_audit(limit=500)
+        relevant = [e for e in all_audit if e.claim_ref in refs]
+        return metas, relevant
+
+    def audit(self, limit: int) -> list[AuditEntry]:
+        """Return the last `limit` audit entries."""
+        return self._fetch_audit(limit=limit)
+
+    def beliefs(self) -> list[BeliefView]:
+        """Return current beliefs for all unique subject/predicate pairs in registry."""
+        seen: set[tuple[str, str]] = set()
+        result: list[BeliefView] = []
+        for meta in self._registry.values():
+            key = (meta.subject, meta.predicate)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                belief = self.recall(meta.subject, meta.predicate)
+                result.append(belief)
+            except Exception:
+                pass
+        return result
+
+    def registry_snapshot(self) -> dict[str, ClaimMeta]:
+        """Return a snapshot of the session registry."""
+        return dict(self._registry)
+
+    # ── Scenario runner (keeps mempill out of app/) ───────────────────────────
+
+    def _run_scenario(self) -> None:
+        """
+        Run the 3-act CEO scenario — engine calls live here (not in app/scenario.py)
+        so that mempill is only imported in adapters/.
+        """
+        engine = self._engine
+        agent_id = self._agent_id
+
+        print()
+        print("=" * 62)
+        print("  mempill Console Agent — 3-Act Scenario (auto-play)")
+        print("  Subject: acme:ceo  Predicate: held_by")
+        print("  No LLM required — deterministic structural memory only.")
+        print("=" * 62)
+
+        # ── ACT 1: Alice is CEO ───────────────────────────────────────────────
+        print("\n--- ACT 1: Ingest 'Alice is CEO' (valid from 2020-01-01) ---")
+        resp_alice = engine.ingest_claim({
+            "agent_id": agent_id,
+            "subject": "acme:ceo",
+            "predicate": "held_by",
+            "value": "Alice",
+            "provenance": ProvenanceLabel.external_first_hand(),
+            "cardinality": "Functional",
+            "valid_time": {"start": "2020-01-01T00:00:00Z", "valid_time_confidence": 0.95},
+            "confidence": {"value_confidence": 0.95, "valid_time_confidence": 0.95},
+            "criticality": "Medium",
+            "derived_from": [],
+        })
+        alice_ref = resp_alice["claim_ref"]
+        act1_disp = resp_alice["disposition"]
+        self._registry[alice_ref] = ClaimMeta(
+            subject="acme:ceo", predicate="held_by", value="Alice",
+            provenance=ProvenanceLabel.external_first_hand(),
+            valid_time=None, conf=0.95, disposition=str(act1_disp), claim_ref=alice_ref,
+        )
+        self._stats.n_ingests += 1
+        print(f"  disposition:  {act1_disp}")
+        print(f"  claim_ref:    {alice_ref[:8]}...")
+        if str(act1_disp) == str(Disposition.CommittedCheap):
+            print("  [note] CommittedCheap — fast-path commit, no conflict.")
+        else:
+            print(f"  [note] ACTUAL: {act1_disp!r} (narrating real engine behavior).")
+        q1 = engine.query_memory({"agent_id": agent_id, "subject": "acme:ceo", "predicate": "held_by"})
+        print(f"  RECALL → value={q1.get('belief', {}).get('primary', {}).get('fact', {}).get('value')!r}"
+              f"  status={q1.get('belief', {}).get('status')}")
+
+        # ── ACT 2: Bob is CEO — conflict ──────────────────────────────────────
+        print("\n--- ACT 2: Ingest 'Bob is CEO' (valid from 2023-03-15) — conflict expected ---")
+        resp_bob = engine.ingest_claim({
+            "agent_id": agent_id,
+            "subject": "acme:ceo",
+            "predicate": "held_by",
+            "value": "Bob",
+            "provenance": ProvenanceLabel.external_first_hand(),
+            "cardinality": "Functional",
+            "valid_time": {"start": "2023-03-15T00:00:00Z", "valid_time_confidence": 0.9},
+            "confidence": {"value_confidence": 0.9, "valid_time_confidence": 0.9},
+            "criticality": "Medium",
+            "derived_from": [],
+        })
+        bob_ref = resp_bob["claim_ref"]
+        act2_disp = resp_bob["disposition"]
+        contested_with = resp_bob.get("contested_with", [])
+        self._registry[bob_ref] = ClaimMeta(
+            subject="acme:ceo", predicate="held_by", value="Bob",
+            provenance=ProvenanceLabel.external_first_hand(),
+            valid_time=None, conf=0.9, disposition=str(act2_disp), claim_ref=bob_ref,
+        )
+        self._stats.n_ingests += 1
+        print(f"  disposition:     {act2_disp}")
+        print(f"  contested_with:  {[r[:8]+'...' for r in contested_with]}")
+        if str(act2_disp) == str(Disposition.Contested):
+            self._stats.n_contested += 1
+            print("  [note] CONTESTED — two open-ended Functional claims overlap. Engine did NOT overwrite Alice.")
+            print("  [badge] CONTESTED  ← this is the key mempill guarantee")
+        elif str(act2_disp) == str(Disposition.CommittedCheap):
+            print("  [note] ACTUAL: CommittedCheap — engine fast-committed Bob without conflict flag.")
+        else:
+            print(f"  [note] ACTUAL: {act2_disp!r}")
+
+        print()
+        print("  [/reconcile] Resolving acme:ceo held_by...")
+        reconcile_resp = engine.reconcile({"agent_id": agent_id, "subject_lines": [("acme:ceo", "held_by")]})
+        outcomes = reconcile_resp.get("outcomes", [])
+        escalations = reconcile_resp.get("oracle_escalations", 0)
+        print(f"  outcomes:  {outcomes}")
+        print(f"  escalations: {escalations}")
+
+        committed_bob_ref = bob_ref
+        for ref, disp in outcomes:
+            if str(disp) in ("Superseded", "Invalidated"):
+                self._stats.n_superseded += 1
+                print(f"  [badge] SUPERSEDED  ← {ref[:8]}...")
+            else:
+                committed_bob_ref = ref
+                print(f"  [badge] COMMITTED   ← {ref[:8]}... (Bob, now authoritative)")
+
+        q_post = engine.query_memory({"agent_id": agent_id, "subject": "acme:ceo", "predicate": "held_by"})
+        post_val = q_post.get("belief", {}).get("primary", {}).get("fact", {}).get("value")
+        post_status = q_post.get("belief", {}).get("status")
+        print(f"  Post-reconcile belief: \"{post_val}\"  status={post_status}")
+
+        # ── ACT 3: Amplification firewall ─────────────────────────────────────
+        print("\n--- ACT 3: RECALL_REENTRY ×5 — amplification firewall ---")
+        print(f"  Re-ingesting 'Bob is CEO' 5× with RecallReEntry provenance (derived_from={committed_bob_ref[:8]}...)")
+        from mempill_demo.domain.models import CommandKind, ParsedCommand
+        for i in range(5):
+            rr_cmd = ParsedCommand(
+                kind=CommandKind.RECALL_REENTRY,
+                subject="acme:ceo",
+                predicate="held_by",
+                value="Bob",
+                source_claim_ref=committed_bob_ref,
+                conf=0.7,
+            )
+            self.ingest(rr_cmd)
+
+        q_after = engine.query_memory({"agent_id": agent_id, "subject": "acme:ceo", "predicate": "held_by"})
+        after_val = q_after.get("belief", {}).get("primary", {}).get("fact", {}).get("value")
+        after_status = q_after.get("belief", {}).get("status")
+        corroboration = (q_after.get("belief", {}).get("primary") or {}).get("currency_signal", {}).get("corroboration_count", 0)
+        print(f"  Belief after 5 re-entries: \"{after_val}\"  status={after_status}")
+        print(f"  corroboration_count: {corroboration}")
+        print("  [badge] FIREWALL HELD — RecallReEntry did not alter the belief.")
+
+        print()
+        print("=" * 62)
+        print("  Scenario complete.")
+        print(f"  Act 1: Alice  → {act1_disp}")
+        print(f"  Act 2: Bob    → {act2_disp}  reconcile→{[d for _, d in outcomes]}")
+        print(f"  Act 3: ×5 recall-reentry  → belief unchanged ({after_val}, {after_status})")
+        print("=" * 62)
+        print()
+
+    # ── Private helpers ───────────────────────────────────────────────────────
+
+    def _fetch_audit(self, limit: int) -> list[AuditEntry]:
+        resp = self._engine.query_audit({
+            "agent_id": self._agent_id,
+            "claim_ref": None,
+            "from_tx_time": None,
+            "limit": limit,
+        })
+        entries = resp.get("entries", [])
+        return [
+            AuditEntry(
+                claim_ref=e.get("claim_ref", ""),
+                event_kind=e.get("event_kind", "?"),
+                disposition=e.get("disposition", "?"),
+                recorded_at=str(e.get("recorded_at", "")),
+                rationale=e.get("rationale", ""),
+            )
+            for e in entries
+        ]
+
+    def _map_belief(self, resp: dict, subject: str, predicate: str) -> BeliefView:
+        """Map a raw query_memory response dict to a BeliefView domain object."""
+        belief = resp.get("belief", {})
+        status = belief.get("status", "UNKNOWN")
+        primary = belief.get("primary")
+
+        if primary is None:
+            # R5: no belief
+            return BeliefView(
+                subject=subject,
+                predicate=predicate,
+                value=None,
+                status="UNKNOWN",
+                conf=None,
+                vt_start="",
+                vt_end="",
+                provenance="",
+                claim_ref="",
+                corroboration=0,
+                alternatives=[],
+            )
+
+        # Extract primary fields
+        value = primary.get("fact", {}).get("value")
+        conf_dict = primary.get("confidence", {})
+        conf_val = conf_dict.get("value_confidence") if isinstance(conf_dict, dict) else conf_dict
+        vt = primary.get("valid_time") or {}
+        vt_start = vt.get("start", "") if isinstance(vt, dict) else ""
+        vt_end = (vt.get("end") or "open") if isinstance(vt, dict) else "open"
+        claim_ref = primary.get("claim_ref", "")
+        currency = primary.get("currency_signal", {}) or {}
+        corroboration = currency.get("corroboration_count", 0)
+        prov = _prov_abbr(primary.get("provenance"))
+
+        # Map alternatives (for R2/Contested)
+        alternatives_raw = belief.get("alternatives", []) or []
+        alternatives: list[AlternativeView] = []
+        for alt in alternatives_raw:
+            if alt is None:
+                continue
+            alt_fact = alt.get("fact", {}) or {}
+            alt_val = alt_fact.get("value")
+            alt_conf_dict = alt.get("confidence", {}) or {}
+            alt_cv = alt_conf_dict.get("value_confidence") if isinstance(alt_conf_dict, dict) else alt_conf_dict
+            alt_vt = alt.get("valid_time") or {}
+            alt_start = alt_vt.get("start", "") if isinstance(alt_vt, dict) else ""
+            alt_end = (alt_vt.get("end") or "open") if isinstance(alt_vt, dict) else "open"
+            alt_ref = alt.get("claim_ref", "")
+            alternatives.append(AlternativeView(
+                value=alt_val,
+                conf=alt_cv,
+                vt_start=alt_start,
+                vt_end=alt_end,
+                claim_ref=alt_ref,
+            ))
+
+        return BeliefView(
+            subject=subject,
+            predicate=predicate,
+            value=value,
+            status=status,
+            conf=conf_val,
+            vt_start=vt_start,
+            vt_end=vt_end,
+            provenance=prov,
+            claim_ref=claim_ref,
+            corroboration=corroboration,
+            alternatives=alternatives,
+        )

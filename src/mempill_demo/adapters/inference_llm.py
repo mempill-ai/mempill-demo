@@ -1,10 +1,10 @@
 """
-console.inference.llm — LLM-backed command extraction.
+mempill_demo.adapters.inference_llm — LLM-backed command extraction.
 
 Guard: requires ANTHROPIC_API_KEY in environment.
 Model: claude-haiku-4-5-20251001
 
-This module is NEVER imported by selftest.py or the deterministic path.
+This module is NEVER imported by selftest or the deterministic path.
 It is only loaded when --llm is passed and the key guard has already
 verified ANTHROPIC_API_KEY is present.
 """
@@ -12,19 +12,17 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Optional
+from typing import Any
 
-# Conditional import — guard must be called before any LLM usage.
 try:
     import anthropic as _anthropic
 except ImportError:  # pragma: no cover
     _anthropic = None  # type: ignore[assignment]
 
-from console.inference.base import CommandKind, ParsedCommand
-from mempill import ProvenanceLabel
+from mempill_demo.domain.models import CommandKind, ParsedCommand
 
 
-_MODEL = "claude-haiku-4-5-20251001"
+_MODEL = os.environ.get("MEMPILL_MODEL", "claude-haiku-4-5-20251001")
 
 _EXTRACTION_SYSTEM = """
 You are a command extraction assistant for a mempill memory agent.
@@ -75,11 +73,9 @@ class LLMParser:
         self._client = _anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
     def parse(self, raw: str) -> ParsedCommand:
-        """Parse a natural-language turn into a ParsedCommand."""
         try:
             extraction = self._extract(raw)
         except Exception as exc:
-            # Fall back to RECALL query on any parse failure
             return ParsedCommand(
                 kind=CommandKind.UNKNOWN,
                 raw=raw,
@@ -109,7 +105,6 @@ class LLMParser:
                 error="No claims or query detected.",
             )
 
-        # Use the first claim for the ParsedCommand
         claim = claims[0]
         prov_str = claim.get("provenance", "UserAsserted")
         conf = float(claim.get("value_confidence", 0.9))
