@@ -1,0 +1,16 @@
+{
+  "_comment": "Claude Desktop MCP config for mempill. Copy the mcpServers block into ~/Library/Application Support/Claude/claude_desktop_config.json (macOS) or %APPDATA%\\Claude\\claude_desktop_config.json (Windows). Replace /ABSOLUTE/PATH/TO/mempill-demo with the real absolute path to this repo. Claude Desktop does NOT expand $HOME or shell variables — use literal absolute paths. Restart Claude Desktop (full quit) after editing. IMPORTANT: uses the demo venv Python that already has the mempill wheel built — no uv run required.",
+  "mcpServers": {
+    "mempill": {
+      "command": "/ABSOLUTE/PATH/TO/mempill-demo/.venv/bin/python",
+      "args": [
+        "-m",
+        "mempill_mcp"
+      ],
+      "env": {
+        "MEMPILL_AGENT_ID": "my-agent",
+        "MEMPILL_DB_PATH": "/ABSOLUTE/PATH/TO/mempill-demo/demo.db"
+      }
+    }
+  }
+}

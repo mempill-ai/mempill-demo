@@ -1,0 +1,11 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+# local demo databases
+*.db
+*.sqlite
+*.sqlite3
+# Claude Code MCP config (personal paths — keep .example tracked)
+.mcp.json
