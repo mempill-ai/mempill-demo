@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 # mempill and mempill-mcp are unpublished (private wheel); path-installed by setup.sh.
 # Do NOT add them here — they are not on PyPI.
 dependencies = [
+    "anthropic>=0.111,<1",
     "mcp>=1.9,<2",
     "python-dotenv>=1.0",
     "rich>=13",
