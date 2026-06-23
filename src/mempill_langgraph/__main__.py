@@ -6,6 +6,7 @@ Constructs MempillMemoryStore + ChatAnthropic, builds the graph, runs the REPL.
 from __future__ import annotations
 
 import os
+import pathlib
 import sys
 
 from dotenv import load_dotenv
@@ -30,7 +31,9 @@ _AGENT_ID = "langgraph-demo"
 _USER_ID = "user-001"
 _MODEL = os.environ.get("MEMPILL_MODEL", "claude-sonnet-4-6")
 
-engine = mempill.Engine()
+_db_path = pathlib.Path(os.environ.get("MEMPILL_DB_PATH", ".mempill/langgraph.db"))
+_db_path.parent.mkdir(parents=True, exist_ok=True)
+engine = mempill.open(str(_db_path))
 memory_store = MempillMemoryStore(engine=engine, agent_id=_AGENT_ID)
 llm = ChatAnthropic(model=_MODEL, temperature=0.0, max_tokens=1024)
 graph = build_graph(memory_store=memory_store, llm=llm)

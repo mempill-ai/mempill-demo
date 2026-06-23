@@ -263,6 +263,48 @@ def test_full_graph_multi_turn_history_grows():
 
 # ── Live smoke test (skipped without API key) ─────────────────────────────────
 
+# ── Test 5: Real engine construction (offline, in-memory) ────────────────────
+
+def test_real_engine_construction_offline():
+    """
+    Exercises REAL mempill.open_in_memory() + MempillMemoryStore + build_graph
+    without an API key or any live LLM call.
+
+    This is the gap that would have caught the mempill.Engine() TypeError:
+    the real adapter + graph wiring must construct correctly using the proper
+    mempill factory function.
+    """
+    import mempill
+    from mempill_demo.adapters.memory_mempill import MempillMemoryStore
+
+    # Real engine via factory — NOT mempill.Engine() (which is not constructable)
+    engine = mempill.open_in_memory()
+    real_store = MempillMemoryStore(engine=engine, agent_id="offline-test")
+
+    fake_reply = AIMessage(content="Hello! How can I help you today?")
+    fake_llm = _fake_llm(fake_reply)
+
+    graph = build_graph(
+        memory_store=real_store,
+        llm=fake_llm,
+        extractor=_empty_extractor,
+    )
+
+    result = graph.invoke(
+        {
+            "messages": [HumanMessage(content="Hi!")],
+            "user_id": "u1",
+            "agent_id": "offline-test",
+        },
+        config={"configurable": {"thread_id": "real-engine-t1"}},
+    )
+
+    ai_content = result["messages"][-1].content
+    assert ai_content, "Expected non-empty AI reply from real-engine offline test"
+
+
+# ── Live smoke test (skipped without API key) ─────────────────────────────────
+
 @pytest.mark.skipif(
     not os.environ.get("ANTHROPIC_API_KEY"),
     reason="ANTHROPIC_API_KEY not set — live smoke test skipped",
@@ -273,7 +315,7 @@ def test_live_smoke():
     from langchain_anthropic import ChatAnthropic
     from mempill_demo.adapters.memory_mempill import MempillMemoryStore
 
-    engine = mempill.Engine()
+    engine = mempill.open_in_memory()
     ms = MempillMemoryStore(engine=engine, agent_id="smoke-test")
     llm = ChatAnthropic(
         model=os.environ.get("MEMPILL_MODEL", "claude-sonnet-4-6"),
