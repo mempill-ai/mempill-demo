@@ -63,6 +63,12 @@ The setup script:
 3. Installs `mempill-mcp` (editable) from `../mempill/mempill-mcp/`
 4. Installs `mcp>=1.9,<2`
 5. Installs `mempill-demo` (editable)
+6. Installs LangGraph conversational-agent dependencies by DEFAULT
+
+For a lean install without LangGraph:
+```bash
+SKIP_LANGGRAPH=true bash scripts/setup.sh
+```
 
 Verify the install:
 ```bash
@@ -138,21 +144,21 @@ A mempill-aware REPL agent with a rich memory panel, persistent file-backed stor
 
 ```bash
 # 3-act auto-play scenario then REPL
-uv run python -m console --scenario
+uv run python -m mempill_demo --scenario
 
 # Plain REPL (deterministic grammar)
-uv run python -m console
+uv run python -m mempill_demo
 
 # Assertion suite for CI (no API key required)
-uv run python -m console --selftest
+uv run python -m mempill_demo --selftest
 
 # LLM-backed natural language parsing (requires ANTHROPIC_API_KEY)
 # Copy .env.example to .env and set ANTHROPIC_API_KEY (or export it in your shell).
 # Optionally set MEMPILL_MODEL to override the default model.
-uv run python -m console --llm
+uv run python -m mempill_demo --llm
 
 # Delete the persistent DB and exit
-uv run python -m console --reset
+uv run python -m mempill_demo --reset
 ```
 
 ### Flags
@@ -169,7 +175,7 @@ uv run python -m console --reset
 ### Quickstart
 
 ```
-$ uv run python -m console
+$ uv run python -m mempill_demo
 mempill Console Agent  [deterministic]
 Type /help for commands, /quit to exit.
 
@@ -203,7 +209,7 @@ The auto-play scenario demonstrates:
 ### --selftest CI usage
 
 ```bash
-uv run python -m console --selftest && echo "CI: selftest passed"
+uv run python -m mempill_demo --selftest && echo "CI: selftest passed"
 ```
 
 Exit 0 = all 13 assertions passed (T1–T7). No API key required.
@@ -219,7 +225,7 @@ Optionally set `MEMPILL_MODEL` to override the default model (e.g. `MEMPILL_MODE
 
 ```bash
 # No key set and no .env:
-$ uv run python -m console --llm
+$ uv run python -m mempill_demo --llm
 ERROR: --llm requires ANTHROPIC_API_KEY to be set in the environment.
 # exits 1
 ```
@@ -234,17 +240,15 @@ See `console/GRAMMAR.md` for the full command grammar with SDK mappings.
 
 A natural-language CHAT agent that uses mempill as long-term memory. The LLM replies naturally each turn while reading and writing the mempill memory store — multi-turn history, contested-belief surfacing, structured-output extraction (no `json.loads`).
 
-### Setup
+### Setup (included by default)
 
-Install the LangGraph optional dependency group:
+The LangGraph dependencies are installed by default during `bash scripts/setup.sh`. If you ran a lean setup with `SKIP_LANGGRAPH=true`, install them now:
 
 ```bash
-INSTALL_LANGGRAPH=true bash scripts/setup.sh
-# or directly:
 uv pip install -e ".[langgraph]"
 ```
 
-Set your API key in `.env` or the environment:
+Set your API key in `.env` or the environment (runtime-only; not needed during setup):
 
 ```bash
 # .env
@@ -252,6 +256,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 # Optional — override the default model
 MEMPILL_MODEL=claude-sonnet-4-6
 ```
+
+**Note:** `SKIP_LANGGRAPH` and `INSTALL_LANGGRAPH` are setup-time flags only — they do not belong in `.env` and have no effect at runtime. Only `ANTHROPIC_API_KEY` is needed at runtime.
 
 ### Run the agent
 

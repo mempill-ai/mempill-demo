@@ -76,11 +76,13 @@ echo "[5/5] Installing mempill-demo (editable)..."
 uv pip install -e .
 echo "      mempill-demo installed."
 
-# ── [6/6] Optional: install LangGraph showcase deps ───────────────────────────
-if [ "${INSTALL_LANGGRAPH:-false}" = "true" ]; then
-    echo "[6/6] Installing LangGraph showcase dependencies..."
+# ── [6/6] Install LangGraph conversational-agent deps (default; opt-out via SKIP_LANGGRAPH)
+if [ "${SKIP_LANGGRAPH:-false}" != "true" ]; then
+    echo "[6/6] Installing LangGraph conversational-agent dependencies..."
     uv pip install -e ".[langgraph]"
-    echo "      LangGraph deps installed."
+    echo "      LangGraph deps installed.  (skip with SKIP_LANGGRAPH=true)"
+else
+    echo "[6/6] Skipping LangGraph deps (SKIP_LANGGRAPH=true)."
 fi
 
 echo ""
@@ -99,3 +101,6 @@ echo "Run the interactive console agent:"
 echo "  uv run python -m mempill_demo --scenario    # 3-act demo then REPL"
 echo "  uv run python -m mempill_demo --selftest    # CI assertion suite (no API key)"
 echo "  uv run python -m mempill_demo               # plain REPL"
+echo ""
+echo "Run the LangGraph conversational agent (requires ANTHROPIC_API_KEY in .env):"
+echo "  uv run python -m mempill_langgraph"
