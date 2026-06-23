@@ -1,7 +1,7 @@
 """
-console.inference.deterministic — keyword-insensitive grammar parser.
+mempill_demo.adapters.inference_deterministic — keyword-insensitive grammar parser.
 
-Grammar (from PLANNING.md §2):
+Grammar:
   INGEST <subject> <predicate> "<value>" [SINCE <ISO>] [UNTIL <ISO>] [CONF <0-1>]
   RECALL <subject> <predicate>
   RECALL_REENTRY <subject> <predicate> "<value>" <source_claim_ref>
@@ -18,10 +18,9 @@ Grammar (from PLANNING.md §2):
 from __future__ import annotations
 
 import re
-import shlex
 from typing import Optional
 
-from console.inference.base import CommandKind, ParsedCommand
+from mempill_demo.domain.models import CommandKind, ParsedCommand
 
 
 class DeterministicParser:
@@ -30,8 +29,7 @@ class DeterministicParser:
     def parse(self, raw: str) -> ParsedCommand:
         stripped = raw.strip()
         if not stripped:
-            return ParsedCommand(kind=CommandKind.UNKNOWN, raw=raw,
-                                 error="Empty input")
+            return ParsedCommand(kind=CommandKind.UNKNOWN, raw=raw, error="Empty input")
         upper = stripped.upper()
 
         # ── Slash-commands ────────────────────────────────────────────────────
@@ -93,8 +91,7 @@ class DeterministicParser:
                     limit = int(parts[1])
                 except ValueError:
                     pass
-            return ParsedCommand(kind=CommandKind.AUDIT, raw=raw,
-                                 audit_limit=limit)
+            return ParsedCommand(kind=CommandKind.AUDIT, raw=raw, audit_limit=limit)
 
         if cmd == "/reconcile":
             if len(parts) < 3:
@@ -109,17 +106,12 @@ class DeterministicParser:
     # ── INGEST parser ─────────────────────────────────────────────────────────
 
     def _parse_ingest(self, stripped: str, raw: str) -> ParsedCommand:
-        """
-        INGEST <subject> <predicate> "<value>" [SINCE <ISO>] [UNTIL <ISO>] [CONF <0-1>]
-        """
-        # Extract quoted value
         m = re.search(r'"([^"]*)"', stripped)
         if not m:
             return ParsedCommand(kind=CommandKind.UNKNOWN, raw=raw,
                                  error='INGEST requires a quoted value: INGEST subj pred "value"')
         value = m.group(1)
 
-        # Strip up to the quoted segment: "INGEST subj pred "
         before_quote = stripped[:m.start()].strip()
         tokens = before_quote.split()
         if len(tokens) < 3:
@@ -128,7 +120,6 @@ class DeterministicParser:
         subject = tokens[1]
         predicate = tokens[2]
 
-        # Parse optional modifiers from the text AFTER the closing quote
         after_quote = stripped[m.end():].strip()
         since, until, conf = self._parse_modifiers(after_quote)
 
@@ -146,7 +137,6 @@ class DeterministicParser:
     # ── RECALL parser ─────────────────────────────────────────────────────────
 
     def _parse_recall(self, stripped: str, raw: str) -> ParsedCommand:
-        """RECALL <subject> <predicate>"""
         tokens = stripped.split()
         if len(tokens) < 3:
             return ParsedCommand(kind=CommandKind.UNKNOWN, raw=raw,
@@ -157,7 +147,6 @@ class DeterministicParser:
     # ── RECALL_REENTRY parser ─────────────────────────────────────────────────
 
     def _parse_recall_reentry(self, stripped: str, raw: str) -> ParsedCommand:
-        """RECALL_REENTRY <subject> <predicate> "<value>" <source_claim_ref>"""
         m = re.search(r'"([^"]*)"', stripped)
         if not m:
             return ParsedCommand(kind=CommandKind.UNKNOWN, raw=raw,
@@ -187,29 +176,24 @@ class DeterministicParser:
     # ── Modifier helper ───────────────────────────────────────────────────────
 
     def _parse_modifiers(self, text: str) -> tuple[Optional[str], Optional[str], float]:
-        """Parse SINCE/UNTIL/CONF from remaining text after the quoted value."""
         since: Optional[str] = None
         until: Optional[str] = None
         conf: float = 0.9
 
         tokens = text.upper().split()
-        i = 0
-        # Use original-case version for date values
         original_tokens = text.split()
+        i = 0
         while i < len(tokens):
             tok = tokens[i]
             if tok == "SINCE" and i + 1 < len(original_tokens):
-                raw_date = original_tokens[i + 1]
-                since = self._normalise_iso(raw_date)
+                since = self._normalise_iso(original_tokens[i + 1])
                 i += 2
             elif tok == "UNTIL" and i + 1 < len(original_tokens):
-                raw_date = original_tokens[i + 1]
-                until = self._normalise_iso(raw_date)
+                until = self._normalise_iso(original_tokens[i + 1])
                 i += 2
             elif tok == "CONF" and i + 1 < len(original_tokens):
                 try:
-                    conf = float(original_tokens[i + 1])
-                    conf = max(0.0, min(1.0, conf))
+                    conf = max(0.0, min(1.0, float(original_tokens[i + 1])))
                 except ValueError:
                     pass
                 i += 2
@@ -220,7 +204,6 @@ class DeterministicParser:
 
     @staticmethod
     def _normalise_iso(date_str: str) -> str:
-        """Append T00:00:00Z if the string looks like a bare date."""
         if len(date_str) == 10 and re.match(r"\d{4}-\d{2}-\d{2}$", date_str):
             return date_str + "T00:00:00Z"
         return date_str

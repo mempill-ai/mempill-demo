@@ -166,7 +166,7 @@ These are tracked via the session-local claim registry keyed by `claim_ref`.
 
 ---
 
-## Disposition Badge Map (panel.py)
+## Disposition Badge Map (presenter_rich.py)
 
 | Disposition(s) | Badge | Color |
 |---|---|---|
