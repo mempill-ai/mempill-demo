@@ -1,0 +1,336 @@
+"""
+tests/test_langgraph_graph.py — Offline integration tests for the full LangGraph graph.
+
+All tests run WITHOUT an ANTHROPIC_API_KEY.
+Uses FakeMessagesListChatModel + FakeMemoryStore (langgraph-specific variant) +
+a deterministic extractor callable to drive write_memory without tool-calls.
+
+Approach for structured-extraction in offline tests:
+    The write_memory node accepts an optional `extractor` callable via build_graph().
+    In offline tests we supply a deterministic lambda that returns ClaimExtractResult
+    directly — bypassing llm.with_structured_output entirely. This avoids the
+    FakeMessagesListChatModel tool-call format complexity while keeping the node
+    logic fully exercised.
+"""
+from __future__ import annotations
+
+import os
+
+import pytest
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.memory import MemorySaver
+
+from mempill_demo.domain.models import AlternativeView, BeliefView
+from mempill_langgraph.extraction import ClaimExtractResult, ExtractedClaim
+from mempill_langgraph.graph import build_graph
+
+from tests.fakes_langgraph import LGFakeMemoryStore
+
+
+# ── Shared fake responses ─────────────────────────────────────────────────────
+
+def _fake_llm(*responses):
+    """Helper: build a FakeMessagesListChatModel from AIMessage responses."""
+    return FakeMessagesListChatModel(responses=list(responses))
+
+
+def _empty_extractor(prompt: str) -> ClaimExtractResult:
+    """Extractor that always returns no claims (greetings, contested surfaces)."""
+    return ClaimExtractResult(claims=[])
+
+
+def _claim_extractor(claims: list[ExtractedClaim]):
+    """Extractor that returns a fixed list of claims regardless of prompt."""
+    result = ClaimExtractResult(claims=claims)
+    return lambda prompt: result
+
+
+# ── Test 1: Contested belief — surfaced in reply, ZERO writes ─────────────────
+
+def test_full_graph_contested_turn():
+    """
+    A Contested belief is formatted into memory_context; the LLM reply surfaces it;
+    write_memory ingests ZERO claims (recall-reentry firewall blocks re-stating Alice/Bob).
+    """
+    contested_belief = BeliefView(
+        subject="acme:ceo",
+        predicate="held_by",
+        status="Contested",
+        value="Alice",
+        conf=0.95,
+        vt_start="2020-01-01",
+        vt_end="open",
+        provenance="EXT",
+        claim_ref="ref-alice",
+        corroboration=0,
+        alternatives=[
+            AlternativeView(
+                value="Bob",
+                conf=0.90,
+                vt_start="2023-03-15",
+                vt_end="open",
+                claim_ref="ref-bob",
+            )
+        ],
+    )
+    fake_store = LGFakeMemoryStore(belief=contested_belief)
+
+    # The LLM reply mentions both Alice and Bob — classic contested surface
+    fake_reply = AIMessage(
+        content="I have conflicting information: Claim A says Alice and Claim B says Bob. "
+                "Please run /reconcile to resolve."
+    )
+    fake_llm = _fake_llm(fake_reply)
+
+    graph = build_graph(
+        memory_store=fake_store,
+        llm=fake_llm,
+        extractor=_empty_extractor,  # no new facts to extract
+    )
+
+    result = graph.invoke(
+        {
+            "messages": [HumanMessage(content="Who is the CEO of ACME?")],
+            "user_id": "u1",
+            "agent_id": "test",
+        },
+        config={"configurable": {"thread_id": "contested-t1"}},
+    )
+
+    # memory_context contains CONTESTED block
+    assert "CONTESTED" in result["memory_context"], (
+        f"Expected CONTESTED in memory_context, got: {result['memory_context']!r}"
+    )
+    # AI reply mentions both values
+    ai_content = result["messages"][-1].content
+    assert "Alice" in ai_content or "Bob" in ai_content, (
+        f"Expected contested values in AI reply, got: {ai_content!r}"
+    )
+    # ZERO writes (contested surface → empty extractor → no ingest)
+    assert len(fake_store.ingested) == 0, (
+        f"Expected 0 ingests for contested turn, got: {fake_store.ingested}"
+    )
+
+
+# ── Test 2: Greeting — natural reply, no recall, no ingest ────────────────────
+
+def test_full_graph_greeting():
+    """
+    A greeting ('Hi!') has no extractable subject/predicate.
+    retrieve_memory sets memory_context='', recall() is NOT called.
+    write_memory gets no claims -> no ingest.
+    """
+    fake_store = LGFakeMemoryStore()  # no preloaded belief
+
+    fake_reply = AIMessage(content="Hello! How can I help you today?")
+    fake_llm = _fake_llm(fake_reply)
+
+    graph = build_graph(
+        memory_store=fake_store,
+        llm=fake_llm,
+        extractor=_empty_extractor,
+    )
+
+    result = graph.invoke(
+        {
+            "messages": [HumanMessage(content="Hi!")],
+            "user_id": "u1",
+            "agent_id": "test",
+        },
+        config={"configurable": {"thread_id": "greet-t1"}},
+    )
+
+    # No subject detected → empty context
+    assert result["memory_context"] == "", (
+        f"Expected empty memory_context for greeting, got: {result['memory_context']!r}"
+    )
+    # recall() was NOT called
+    assert fake_store.recall_calls == 0, (
+        f"Expected 0 recall calls for greeting, got {fake_store.recall_calls}"
+    )
+    # No ingests
+    assert fake_store.ingested == [], (
+        f"Expected no ingests for greeting, got: {fake_store.ingested}"
+    )
+    # Non-empty AI reply
+    ai_content = result["messages"][-1].content
+    assert ai_content, "Expected non-empty AI reply for greeting"
+
+
+# ── Test 3: Stated fact → write_memory ingests with ModelDerived provenance ────
+
+def test_full_graph_stated_fact_ingested_model_derived():
+    """
+    When the LLM asserts a fact in its reply and the extractor returns a claim,
+    write_memory ingests it with provenance_str='ModelDerived'.
+    """
+    fake_store = LGFakeMemoryStore()  # no preloaded belief — recall returns UNKNOWN
+
+    fake_reply = AIMessage(content="Based on what you told me, Alice is the CEO of ACME.")
+    fake_llm = _fake_llm(fake_reply)
+
+    extracted_claim = ExtractedClaim(
+        subject="acme:ceo",
+        predicate="held_by",
+        value="Alice",
+        conf=0.85,
+        is_user_asserted=False,  # model derived
+    )
+
+    # Use a fresh store so memory_context is empty (no recall reentry block)
+    graph = build_graph(
+        memory_store=fake_store,
+        llm=fake_llm,
+        extractor=_claim_extractor([extracted_claim]),
+    )
+
+    result = graph.invoke(
+        {
+            "messages": [HumanMessage(content="Alice is the CEO of ACME.")],
+            "user_id": "u1",
+            "agent_id": "test",
+        },
+        config={"configurable": {"thread_id": "fact-t1"}},
+    )
+
+    assert len(fake_store.ingested) == 1, (
+        f"Expected 1 ingest, got {len(fake_store.ingested)}: {fake_store.ingested}"
+    )
+    cmd = fake_store.ingested[0]
+    assert cmd.extra.get("provenance_str") == "ModelDerived", (
+        f"Expected ModelDerived provenance, got: {cmd.extra}"
+    )
+    assert cmd.subject == "acme:ceo"
+    assert cmd.predicate == "held_by"
+    assert cmd.value == "Alice"
+
+
+# ── Test 4: Multi-turn — message history grows across invokes (same thread_id) ─
+
+def test_full_graph_multi_turn_history_grows():
+    """
+    Two graph.invoke() calls with the same thread_id + MemorySaver checkpointer
+    accumulate messages: after turn 2, messages list contains 2 human + 2 AI messages.
+    """
+    fake_store = LGFakeMemoryStore()
+
+    # 2 turns × 1 LLM call per turn (respond node only — extractor is callable)
+    reply_1 = AIMessage(content="Hello! How can I help?")
+    reply_2 = AIMessage(content="Got it! I'll remember that.")
+    fake_llm = _fake_llm(reply_1, reply_2)
+
+    checkpointer = MemorySaver()
+    graph = build_graph(
+        memory_store=fake_store,
+        llm=fake_llm,
+        checkpointer=checkpointer,
+        extractor=_empty_extractor,
+    )
+
+    config = {"configurable": {"thread_id": "multi-t1"}}
+
+    # Turn 1
+    graph.invoke(
+        {
+            "messages": [HumanMessage(content="Hi there!")],
+            "user_id": "u1",
+            "agent_id": "test",
+        },
+        config=config,
+    )
+
+    # Turn 2 — only messages needed; checkpointer restores user_id, agent_id
+    result2 = graph.invoke(
+        {"messages": [HumanMessage(content="What do you know about me?")]},
+        config=config,
+    )
+
+    # Total messages: 2 human + 2 AI = 4
+    messages = result2["messages"]
+    human_count = sum(
+        1 for m in messages
+        if hasattr(m, "type") and m.type == "human"
+        or m.__class__.__name__ == "HumanMessage"
+    )
+    ai_count = sum(
+        1 for m in messages
+        if isinstance(m, AIMessage) or m.__class__.__name__ == "AIMessage"
+    )
+    assert human_count == 2, f"Expected 2 human messages, got {human_count}: {messages}"
+    assert ai_count == 2, f"Expected 2 AI messages, got {ai_count}: {messages}"
+
+
+# ── Live smoke test (skipped without API key) ─────────────────────────────────
+
+# ── Test 5: Real engine construction (offline, in-memory) ────────────────────
+
+def test_real_engine_construction_offline():
+    """
+    Exercises REAL mempill.open_in_memory() + MempillMemoryStore + build_graph
+    without an API key or any live LLM call.
+
+    This is the gap that would have caught the mempill.Engine() TypeError:
+    the real adapter + graph wiring must construct correctly using the proper
+    mempill factory function.
+    """
+    import mempill
+    from mempill_demo.adapters.memory_mempill import MempillMemoryStore
+
+    # Real engine via factory — NOT mempill.Engine() (which is not constructable)
+    engine = mempill.open_in_memory()
+    real_store = MempillMemoryStore(engine=engine, agent_id="offline-test")
+
+    fake_reply = AIMessage(content="Hello! How can I help you today?")
+    fake_llm = _fake_llm(fake_reply)
+
+    graph = build_graph(
+        memory_store=real_store,
+        llm=fake_llm,
+        extractor=_empty_extractor,
+    )
+
+    result = graph.invoke(
+        {
+            "messages": [HumanMessage(content="Hi!")],
+            "user_id": "u1",
+            "agent_id": "offline-test",
+        },
+        config={"configurable": {"thread_id": "real-engine-t1"}},
+    )
+
+    ai_content = result["messages"][-1].content
+    assert ai_content, "Expected non-empty AI reply from real-engine offline test"
+
+
+# ── Live smoke test (skipped without API key) ─────────────────────────────────
+
+@pytest.mark.skipif(
+    not os.environ.get("ANTHROPIC_API_KEY"),
+    reason="ANTHROPIC_API_KEY not set — live smoke test skipped",
+)
+def test_live_smoke():
+    """Live smoke test: requires ANTHROPIC_API_KEY. Not run in offline CI."""
+    import mempill
+    from langchain_anthropic import ChatAnthropic
+    from mempill_demo.adapters.memory_mempill import MempillMemoryStore
+
+    engine = mempill.open_in_memory()
+    ms = MempillMemoryStore(engine=engine, agent_id="smoke-test")
+    llm = ChatAnthropic(
+        model=os.environ.get("MEMPILL_MODEL", "claude-sonnet-4-6"),
+        temperature=0.0,
+        max_tokens=256,
+    )
+    graph = build_graph(memory_store=ms, llm=llm)
+    result = graph.invoke(
+        {
+            "messages": [HumanMessage(content="Hi! Just testing.")],
+            "user_id": "smoke-user",
+            "agent_id": "smoke-test",
+        },
+        config={"configurable": {"thread_id": "smoke-session-1"}},
+    )
+    ai_reply = result["messages"][-1].content
+    assert ai_reply, "Expected non-empty live reply"
+    print(f"\n[live smoke] reply: {ai_reply[:120]}")
