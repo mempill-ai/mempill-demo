@@ -7,6 +7,7 @@ Encapsulates all SDK quirks:
   - audit entries have no subject/predicate/value → session registry correlation
   - ProvenanceLabel and Disposition enum mapping
   - reconcile() returns only winner; loser is in audit ledger
+  - Oracle wiring: open_oracle / open_oracle_in_memory for HITL adjudication queue
 """
 from __future__ import annotations
 
@@ -168,6 +169,41 @@ class MempillMemoryStore:
         """Return a snapshot of the session registry."""
         return dict(self._registry)
 
+    # ── Oracle / HITL methods ─────────────────────────────────────────────────
+
+    def list_pending(self) -> list[dict]:
+        """Return pending adjudication requests for this agent from the engine queue."""
+        return self._engine.list_pending_adjudications(agent_id=self._agent_id)
+
+    def submit(self, handle_id: str, verdict: str) -> dict:
+        """
+        Submit a human verdict for a pending adjudication.
+
+        verdict: "Affirm" | "Deny" | "Unknown"
+        Builds the response dict with external_first_hand provenance (decision E in ARCHITECTURE).
+        """
+        response = {
+            "handle_id": handle_id,
+            "verdict": verdict,
+            "evidence_provenance": ProvenanceLabel.external_first_hand(),
+        }
+        return self._engine.submit_adjudication(response)
+
+    def _sweep_expired(self) -> int:
+        """
+        Sweep expired adjudications back to Contested.
+
+        Returns the count of adjudications swept (0 if none). Called on startup
+        (decision H.2) and via /sweep in the REPL.
+        """
+        result = self._engine.sweep_expired_adjudications()
+        # The engine returns a count or a dict with a count field
+        if isinstance(result, int):
+            return result
+        if isinstance(result, dict):
+            return result.get("swept", result.get("count", 0))
+        return 0
+
     # ── Scenario runner (keeps mempill out of app/) ───────────────────────────
 
     def _run_scenario(self) -> None:
@@ -214,11 +250,12 @@ class MempillMemoryStore:
         else:
             print(f"  [note] ACTUAL: {act1_disp!r} (narrating real engine behavior).")
         q1 = engine.query_memory({"agent_id": agent_id, "subject": "acme:ceo", "predicate": "held_by"})
-        print(f"  RECALL → value={q1.get('belief', {}).get('primary', {}).get('fact', {}).get('value')!r}"
+        q1_primary = q1.get("belief", {}).get("primary") or {}
+        print(f"  RECALL → value={q1_primary.get('fact', {}).get('value')!r}"
               f"  status={q1.get('belief', {}).get('status')}")
 
         # ── ACT 2: Bob is CEO — conflict ──────────────────────────────────────
-        print("\n--- ACT 2: Ingest 'Bob is CEO' (valid from 2023-03-15) — conflict expected ---")
+        print("\n--- ACT 2: Ingest 'Bob is CEO' (valid from 2023-03-15) — HITL conflict ---")
         resp_bob = engine.ingest_claim({
             "agent_id": agent_id,
             "subject": "acme:ceo",
@@ -242,36 +279,70 @@ class MempillMemoryStore:
         self._stats.n_ingests += 1
         print(f"  disposition:     {act2_disp}")
         print(f"  contested_with:  {[r[:8]+'...' for r in contested_with]}")
-        if str(act2_disp) == str(Disposition.Contested):
+
+        # With HumanOracle the conflict goes to QueuedForAdjudication instead of plain Contested
+        if str(act2_disp) == "QueuedForAdjudication":
             self._stats.n_contested += 1
-            print("  [note] CONTESTED — two open-ended Functional claims overlap. Engine did NOT overwrite Alice.")
-            print("  [badge] CONTESTED  ← this is the key mempill guarantee")
+            print("  [note] QueuedForAdjudication — conflict handed to human oracle queue.")
+            print("  [badge] QUEUED  ← conflict is pending human /review")
+        elif str(act2_disp) == str(Disposition.Contested):
+            self._stats.n_contested += 1
+            print("  [note] CONTESTED — two open-ended Functional claims overlap.")
+            print("  [badge] CONTESTED  ← use /review to resolve")
         elif str(act2_disp) == str(Disposition.CommittedCheap):
             print("  [note] ACTUAL: CommittedCheap — engine fast-committed Bob without conflict flag.")
         else:
             print(f"  [note] ACTUAL: {act2_disp!r}")
 
-        print()
-        print("  [/reconcile] Resolving acme:ceo held_by...")
-        reconcile_resp = engine.reconcile({"agent_id": agent_id, "subject_lines": [("acme:ceo", "held_by")]})
-        outcomes = reconcile_resp.get("outcomes", [])
-        escalations = reconcile_resp.get("oracle_escalations", 0)
-        print(f"  outcomes:  {outcomes}")
-        print(f"  escalations: {escalations}")
+        # Show query_memory while pending (surfaces Contested[both] while queued)
+        q_pending = engine.query_memory({"agent_id": agent_id, "subject": "acme:ceo", "predicate": "held_by"})
+        pend_status = q_pending.get("belief", {}).get("status")
+        pend_primary = (q_pending.get("belief", {}).get("primary") or {})
+        pend_val = pend_primary.get("fact", {}).get("value")
+        pend_alts = q_pending.get("belief", {}).get("alternatives") or []
+        print(f"\n  RECALL while queued → status={pend_status}  primary={pend_val!r}")
+        for alt in pend_alts:
+            alt_val = (alt.get("fact") or {}).get("value")
+            print(f"    alternative: {alt_val!r}")
+        print("  Both Alice and Bob are visible — agent reports uncertainty.")
 
+        # Show pending adjudications
+        pending = engine.list_pending_adjudications(agent_id=agent_id)
+        print(f"\n  Pending adjudications: {len(pending)}")
+        for p in pending:
+            print(f"    handle={p['handle_id'][:8]}...  "
+                  f"incumbent={p['incumbent_value']!r}  challenger={p['challenger_value']!r}")
+
+        # Simulate /review — choose challenger (Bob wins)
         committed_bob_ref = bob_ref
-        for ref, disp in outcomes:
-            if str(disp) in ("Superseded", "Invalidated"):
+        outcomes = []
+        if pending:
+            print("\n  [/review] Human chooses: [c]hallenger → Bob wins")
+            handle_id = pending[0]["handle_id"]
+            sub_result = engine.submit_adjudication({
+                "handle_id": handle_id,
+                "verdict": "Affirm",
+                "evidence_provenance": ProvenanceLabel.external_first_hand(),
+            })
+            sub_disp = sub_result.get("disposition", "?")
+            sub_ref = sub_result.get("claim_ref", bob_ref)
+            committed_bob_ref = sub_ref
+            print(f"  submit_adjudication → disposition={sub_disp}  ref={sub_ref[:8]}...")
+            if sub_disp in ("Superseded", "Invalidated"):
                 self._stats.n_superseded += 1
-                print(f"  [badge] SUPERSEDED  ← {ref[:8]}...")
+                print(f"  [badge] SUPERSEDED  ← {alice_ref[:8]}... (Alice now superseded)")
             else:
-                committed_bob_ref = ref
-                print(f"  [badge] COMMITTED   ← {ref[:8]}... (Bob, now authoritative)")
+                print(f"  [badge] COMMITTED   ← {sub_ref[:8]}... (Bob, now authoritative)")
+            outcomes = [("review-resolved", sub_disp)]
+        else:
+            # Fallback: engine already resolved without oracle (CommittedCheap path)
+            print("\n  [note] No pending adjudications — engine resolved at ingest.")
+            committed_bob_ref = bob_ref
 
         q_post = engine.query_memory({"agent_id": agent_id, "subject": "acme:ceo", "predicate": "held_by"})
         post_val = q_post.get("belief", {}).get("primary", {}).get("fact", {}).get("value")
         post_status = q_post.get("belief", {}).get("status")
-        print(f"  Post-reconcile belief: \"{post_val}\"  status={post_status}")
+        print(f"  Post-review belief: \"{post_val}\"  status={post_status}")
 
         # ── ACT 3: Amplification firewall ─────────────────────────────────────
         print("\n--- ACT 3: RECALL_REENTRY ×5 — amplification firewall ---")
@@ -300,7 +371,7 @@ class MempillMemoryStore:
         print("=" * 62)
         print("  Scenario complete.")
         print(f"  Act 1: Alice  → {act1_disp}")
-        print(f"  Act 2: Bob    → {act2_disp}  reconcile→{[d for _, d in outcomes]}")
+        print(f"  Act 2: Bob    → {act2_disp}  /review→{[d for _, d in outcomes]}")
         print(f"  Act 3: ×5 recall-reentry  → belief unchanged ({after_val}, {after_status})")
         print("=" * 62)
         print()
