@@ -54,6 +54,17 @@ def run_repl(
             print("[Use --reset flag on startup to delete the DB.]")
             continue
 
+        # /review — human-in-the-loop adjudication
+        if raw.lower() == "/review":
+            from mempill_demo.app.review import run_review
+            run_review(store, presenter)
+            continue
+
+        # /sweep — expire timed-out adjudications
+        if raw.lower() == "/sweep":
+            _sweep(store)
+            continue
+
         response = handle_command(cmd, store, stats)
         presenter.render(response)
 
@@ -70,6 +81,19 @@ def _print_startup_audit(store: MemoryStore, presenter: Presenter) -> None:
         presenter.render_startup_audit(entries)
     except Exception:
         pass
+
+
+def _sweep(store: MemoryStore) -> None:
+    """Call sweep_expired_adjudications() on oracle-wired stores."""
+    sweep_fn = getattr(store, "_sweep_expired", None)
+    if sweep_fn is None:
+        print("[/sweep] This store does not support oracle sweep.")
+        return
+    n = sweep_fn()
+    if n:
+        print(f"[/sweep] Swept {n} expired adjudication(s) back to Contested.")
+    else:
+        print("[/sweep] No expired adjudications found.")
 
 
 def _render_panel(

@@ -92,11 +92,12 @@ def main() -> None:
             print(f"DB not found: {db_path} (nothing to delete)")
         sys.exit(0)
 
-    # ── Open the engine ───────────────────────────────────────────────────────
+    # ── Open the engine (oracle-wired for HITL) ───────────────────────────────
     import mempill
+    from mempill_demo.adapters.human_oracle import HumanOracle
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    engine = mempill.open(str(db_path))
+    engine = mempill.open_oracle(str(db_path), HumanOracle())
 
     # ── Build adapters ────────────────────────────────────────────────────────
     from mempill_demo.adapters.memory_mempill import MempillMemoryStore
@@ -105,6 +106,11 @@ def main() -> None:
     from mempill_demo.domain.models import SessionStats
 
     store = MempillMemoryStore(engine, agent_id=args.agent)
+
+    # ── Sweep expired adjudications on startup (decision H.2, quiet if none) ─
+    swept = store._sweep_expired()
+    if swept:
+        print(f"[startup] Swept {swept} expired adjudication(s) back to Contested.")
     presenter = RichPresenter()
     det_parser = DeterministicParser()
 

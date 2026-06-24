@@ -1,14 +1,19 @@
 """
-tests/test_integration.py — integration selftest using real mempill.open_in_memory().
+tests/test_integration.py — integration selftest using real mempill engine.
 
 Assertions:
-  T1  Alice ingest → CommittedCheap
-  T2  RECALL acme:ceo held_by → R1 value="Alice"
-  T3  Bob ingest (conflicting open-ended Functional) → Contested (narrate actual)
-  T4  /reconcile → Bob=Committed/Resolved, Alice=Superseded in audit
-  T5  RECALL after reconcile → current=Bob
-  T6  RECALL_REENTRY ×5 → belief unchanged (firewall held)
-  T7  /history shows both Alice and Bob entries
+  T1   Alice ingest → CommittedCheap
+  T2   RECALL acme:ceo held_by → R1 value="Alice"
+  T3   Bob ingest (conflicting open-ended Functional) → QueuedForAdjudication (oracle-wired)
+  T4   HITL: submit Affirm → Bob wins; Alice Superseded in audit
+  T5   RECALL after adjudication → current=Bob, Resolved
+  T6   RECALL_REENTRY ×5 → belief unchanged (firewall held)
+  T7   audit contains both Alice and Bob claim_refs
+  T8   HITL: list_pending shows handle with correct incumbent/challenger
+  T9   HITL: query while queued → Contested[both] surfaces both values (pre-T4)
+  T10  HITL: submit Deny (incumbent=Alice wins) → query → single belief Alice
+  T11  HITL: submit Unknown (abstain) → belief stays Contested; removed from queue
+  T12  HITL durability: file-backed engine, ingest conflict, close+reopen, pending survives
 
 Does NOT import console.inference.llm — fully deterministic.
 Exit 0 on all assertions pass. Exit 1 on any failure.
@@ -16,9 +21,13 @@ Exit 0 on all assertions pass. Exit 1 on any failure.
 from __future__ import annotations
 
 import sys
+import tempfile
+import pathlib
 
 import mempill
 from mempill import Disposition, ProvenanceLabel
+from mempill_demo.adapters.human_oracle import HumanOracle
+from mempill_demo.adapters.memory_mempill import MempillMemoryStore
 
 
 def _assert(condition: bool, label: str, detail: str = "") -> None:
@@ -46,8 +55,10 @@ def run() -> None:
     print("  Deterministic only (no API key required).")
     print()
 
-    engine = mempill.open_in_memory()
+    # All tests use oracle-wired engine (HumanOracle) — this is the production path.
+    engine = mempill.open_oracle_in_memory(HumanOracle())
     agent_id = "selftest-agent"
+    store = MempillMemoryStore(engine, agent_id=agent_id)
 
     # ── T1: Alice ingest → CommittedCheap ────────────────────────────────────
     print("T1 — Alice ingest (external_first_hand, Functional, 2020-)")
@@ -89,8 +100,8 @@ def run() -> None:
         f"actual={status1!r}",
     )
 
-    # ── T3: Bob ingest (conflicting, open-ended) → Contested ─────────────────
-    print("\nT3 — Bob ingest (same Functional, open-ended, 2023-) — expect Contested")
+    # ── T3: Bob ingest (conflicting, open-ended) → QueuedForAdjudication ─────
+    print("\nT3 — Bob ingest (same Functional, open-ended, 2023-) — oracle: QueuedForAdjudication")
     resp_bob = engine.ingest_claim({
         "agent_id": agent_id,
         "subject": "acme:ceo",
@@ -107,35 +118,47 @@ def run() -> None:
     act2_disp = resp_bob["disposition"]
     contested_with = resp_bob.get("contested_with", [])
     print(f"  disposition={act2_disp}  ref={bob_ref[:8]}...  contested_with={[r[:8]+'...' for r in contested_with]}")
+    _assert(
+        str(act2_disp) == "QueuedForAdjudication",
+        "T3: Bob disposition == QueuedForAdjudication (oracle-wired)",
+        f"actual={act2_disp!r}",
+    )
 
-    if act2_disp == Disposition.Contested:
-        print("  [note] CONFIRMED: Contested — engine detected two open-ended Functional claims.")
-        _assert(True, "T3: Bob disposition == Contested (expected)")
-    elif act2_disp == Disposition.CommittedCheap:
-        print("  [note] ACTUAL: CommittedCheap — engine fast-committed Bob without conflict.")
-        _assert(True, "T3: Bob disposition == CommittedCheap (actual, plan assumed Contested — DEVIATION NOTED)")
-    else:
-        print(f"  [note] ACTUAL: {act2_disp!r} — unexpected disposition.")
-        _assert(True, f"T3: Bob disposition={act2_disp!r} (actual)")
-
-    # ── T4: /reconcile → Bob=Committed, Alice=Superseded ─────────────────────
-    print("\nT4 — /reconcile acme:ceo held_by")
-    rec_resp = engine.reconcile({
+    # ── T9 (interleaved here): query while queued → Contested[both] ──────────
+    print("\nT9 — RECALL while queued → Contested[both] surfaces both values")
+    q_pending = engine.query_memory({
         "agent_id": agent_id,
-        "subject_lines": [("acme:ceo", "held_by")],
+        "subject": "acme:ceo",
+        "predicate": "held_by",
     })
-    outcomes = rec_resp.get("outcomes", [])
-    print(f"  reconcile outcomes: {[(r[:8], d) for r, d in outcomes]}")
+    pend_status = _belief_status(q_pending)
+    pend_alts = q_pending.get("belief", {}).get("alternatives") or []
+    print(f"  status={pend_status}  alternatives={len(pend_alts)}")
+    _assert(
+        pend_status in ("Contested", "QueuedForAdjudication", "PendingConflict"),
+        "T9: belief status is Contested/queued while pending",
+        f"actual={pend_status!r}",
+    )
 
-    committed_bob_ref = bob_ref
-    bob_committed = False
-    for ref, disp in outcomes:
-        if disp not in ("Superseded", "Invalidated"):
-            bob_committed = True
-            committed_bob_ref = ref
-    if not outcomes:
-        print("  [note] No explicit outcomes — self-resolved at ingest time.")
-        bob_committed = True
+    # ── T8: list_pending shows handle with correct incumbent/challenger ────────
+    print("\nT8 — list_pending shows handle: incumbent=Alice, challenger=Bob")
+    pending_list = store.list_pending()
+    print(f"  pending count: {len(pending_list)}")
+    _assert(len(pending_list) >= 1, "T8: at least 1 pending adjudication", f"actual={len(pending_list)}")
+    first = pending_list[0]
+    incumbent = first.get("incumbent_value")
+    challenger = first.get("challenger_value")
+    handle_id = first.get("handle_id")
+    print(f"  handle={handle_id[:8]}...  incumbent={incumbent!r}  challenger={challenger!r}")
+    _assert(incumbent == "Alice", "T8: incumbent_value == 'Alice'", f"actual={incumbent!r}")
+    _assert(challenger == "Bob", "T8: challenger_value == 'Bob'", f"actual={challenger!r}")
+
+    # ── T4: submit Affirm → Bob wins; audit shows Alice Superseded ────────────
+    print("\nT4 — submit Affirm (challenger=Bob wins) → adjudication resolved")
+    submit_result = store.submit(handle_id, "Affirm")
+    sub_disp = submit_result.get("disposition", "?")
+    committed_bob_ref = submit_result.get("claim_ref", bob_ref)
+    print(f"  submit_adjudication → disposition={sub_disp}  ref={committed_bob_ref[:8]}...")
 
     audit_t4 = engine.query_audit({
         "agent_id": agent_id,
@@ -144,20 +167,19 @@ def run() -> None:
         "limit": 200,
     })
     audit_entries_t4 = audit_t4.get("entries", [])
-    alice_superseded_in_audit = any(
+    all_dispositions_t4 = {e.get("disposition") for e in audit_entries_t4}
+    alice_superseded = any(
         e.get("claim_ref") == alice_ref and e.get("disposition") in ("Superseded", "Invalidated")
         for e in audit_entries_t4
     )
-    print(f"  Alice ref {alice_ref[:8]}: Superseded event in audit = {alice_superseded_in_audit}")
-    for e in audit_entries_t4:
-        if e.get("claim_ref") == alice_ref:
-            print(f"    event_kind={e.get('event_kind')}  disposition={e.get('disposition')}")
+    print(f"  Alice ref {alice_ref[:8]}: Superseded event in audit = {alice_superseded}")
+    print(f"  All dispositions in audit: {all_dispositions_t4}")
+    _assert(alice_superseded, "T4: Alice claim → Superseded in audit after adjudication")
+    _assert(sub_disp in ("CommittedCheap", "Committed", "Resolved", "CommittedInferred"),
+            "T4: Bob claim → Committed after Affirm", f"actual={sub_disp!r}")
 
-    _assert(alice_superseded_in_audit, "T4: Alice claim → Superseded in audit after reconcile")
-    _assert(bob_committed, "T4: Bob claim → Committed/Resolved after reconcile")
-
-    # ── T5: RECALL after reconcile → current=Bob ─────────────────────────────
-    print("\nT5 — RECALL after reconcile → current value=Bob")
+    # ── T5: RECALL after adjudication → current=Bob ───────────────────────────
+    print("\nT5 — RECALL after adjudication → current value=Bob")
     q_current = engine.query_memory({
         "agent_id": agent_id,
         "subject": "acme:ceo",
@@ -238,10 +260,161 @@ def run() -> None:
         f"actual={alice_events}",
     )
     _assert(
-        bool({"CommittedCheap", "CommittedInferred", "Resolved", "Committed"} & bob_events),
-        "T7: Bob has a Committed/Resolved event in audit",
+        bool({"CommittedCheap", "CommittedInferred", "Resolved", "Committed", "QueuedForAdjudication"} & bob_events),
+        "T7: Bob has a Committed/Resolved/Queued event in audit",
         f"actual={bob_events}",
     )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # T10: Deny verdict — incumbent wins
+    # ═══════════════════════════════════════════════════════════════════════════
+    print("\n" + "=" * 62)
+    print("T10 — submit Deny (incumbent wins): separate engine instance")
+    print("=" * 62)
+
+    deny_engine = mempill.open_oracle_in_memory(HumanOracle())
+    deny_agent = "deny-selftest-agent"
+    deny_store = MempillMemoryStore(deny_engine, deny_agent)
+
+    deny_engine.ingest_claim({
+        "agent_id": deny_agent, "subject": "acme:coo", "predicate": "held_by", "value": "Carol",
+        "provenance": ProvenanceLabel.external_first_hand(), "cardinality": "Functional",
+        "valid_time": {"start": "2020-01-01T00:00:00Z", "valid_time_confidence": 0.9},
+        "confidence": {"value_confidence": 0.9, "valid_time_confidence": 0.9},
+        "criticality": "Medium", "derived_from": [],
+    })
+    deny_engine.ingest_claim({
+        "agent_id": deny_agent, "subject": "acme:coo", "predicate": "held_by", "value": "Dave",
+        "provenance": ProvenanceLabel.external_first_hand(), "cardinality": "Functional",
+        "valid_time": {"start": "2023-01-01T00:00:00Z", "valid_time_confidence": 0.9},
+        "confidence": {"value_confidence": 0.9, "valid_time_confidence": 0.9},
+        "criticality": "Medium", "derived_from": [],
+    })
+
+    deny_pending = deny_store.list_pending()
+    print(f"  pending count: {len(deny_pending)}")
+    _assert(len(deny_pending) >= 1, "T10: pending adjudication for Deny test")
+    deny_handle = deny_pending[0]["handle_id"]
+    deny_result = deny_store.submit(deny_handle, "Deny")
+    deny_disp = deny_result.get("disposition", "?")
+    print(f"  Submit Deny → disposition={deny_disp}")
+
+    q_deny = deny_engine.query_memory({"agent_id": deny_agent, "subject": "acme:coo", "predicate": "held_by"})
+    deny_val = _belief_value(q_deny)
+    deny_status = _belief_status(q_deny)
+    print(f"  Belief after Deny: value={deny_val!r}  status={deny_status}")
+    _assert(deny_val == "Carol", "T10: belief value == 'Carol' (incumbent) after Deny", f"actual={deny_val!r}")
+    _assert(
+        deny_status in ("Committed", "CommittedCheap", "CommittedInferred", "Resolved"),
+        "T10: belief status Committed after Deny",
+        f"actual={deny_status!r}",
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # T11: Unknown verdict — stays Contested
+    # ═══════════════════════════════════════════════════════════════════════════
+    print("\nT11 — submit Unknown (abstain): belief stays Contested")
+
+    unk_engine = mempill.open_oracle_in_memory(HumanOracle())
+    unk_agent = "unknown-selftest-agent"
+    unk_store = MempillMemoryStore(unk_engine, unk_agent)
+
+    unk_engine.ingest_claim({
+        "agent_id": unk_agent, "subject": "acme:cfo", "predicate": "held_by", "value": "Eve",
+        "provenance": ProvenanceLabel.external_first_hand(), "cardinality": "Functional",
+        "valid_time": {"start": "2020-01-01T00:00:00Z", "valid_time_confidence": 0.9},
+        "confidence": {"value_confidence": 0.9, "valid_time_confidence": 0.9},
+        "criticality": "Medium", "derived_from": [],
+    })
+    unk_engine.ingest_claim({
+        "agent_id": unk_agent, "subject": "acme:cfo", "predicate": "held_by", "value": "Frank",
+        "provenance": ProvenanceLabel.external_first_hand(), "cardinality": "Functional",
+        "valid_time": {"start": "2023-01-01T00:00:00Z", "valid_time_confidence": 0.9},
+        "confidence": {"value_confidence": 0.9, "valid_time_confidence": 0.9},
+        "criticality": "Medium", "derived_from": [],
+    })
+
+    unk_pending = unk_store.list_pending()
+    _assert(len(unk_pending) >= 1, "T11: pending adjudication for Unknown test")
+    unk_handle = unk_pending[0]["handle_id"]
+    unk_result = unk_store.submit(unk_handle, "Unknown")
+    unk_disp = unk_result.get("disposition", "?")
+    print(f"  Submit Unknown → disposition={unk_disp}")
+
+    q_unk = unk_engine.query_memory({"agent_id": unk_agent, "subject": "acme:cfo", "predicate": "held_by"})
+    unk_status = _belief_status(q_unk)
+    print(f"  Belief after Unknown: status={unk_status}")
+    _assert(
+        unk_status in ("Contested", "PendingConflict"),
+        "T11: belief stays Contested after Unknown verdict",
+        f"actual={unk_status!r}",
+    )
+    # Queue should be empty after Unknown (removed from queue)
+    unk_pending_after = unk_store.list_pending()
+    print(f"  Pending after Unknown: {len(unk_pending_after)}")
+    _assert(
+        len(unk_pending_after) == 0,
+        "T11: no pending adjudications after Unknown (removed from queue)",
+        f"actual={len(unk_pending_after)}",
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # T12: Durability — file-backed engine, conflict survives close+reopen
+    # ═══════════════════════════════════════════════════════════════════════════
+    print("\n" + "=" * 62)
+    print("T12 — Durability: file-backed engine, defer survives restart")
+    print("=" * 62)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = str(pathlib.Path(tmpdir) / "durability-test.db")
+        dur_agent = "durability-agent"
+
+        # Phase A: open, ingest conflict, verify queued
+        eng_a = mempill.open_oracle(db_path, HumanOracle())
+        eng_a.ingest_claim({
+            "agent_id": dur_agent, "subject": "acme:cfo", "predicate": "held_by", "value": "Grace",
+            "provenance": ProvenanceLabel.external_first_hand(), "cardinality": "Functional",
+            "valid_time": {"start": "2020-01-01T00:00:00Z", "valid_time_confidence": 0.9},
+            "confidence": {"value_confidence": 0.9, "valid_time_confidence": 0.9},
+            "criticality": "Medium", "derived_from": [],
+        })
+        resp_hank = eng_a.ingest_claim({
+            "agent_id": dur_agent, "subject": "acme:cfo", "predicate": "held_by", "value": "Hank",
+            "provenance": ProvenanceLabel.external_first_hand(), "cardinality": "Functional",
+            "valid_time": {"start": "2023-01-01T00:00:00Z", "valid_time_confidence": 0.9},
+            "confidence": {"value_confidence": 0.9, "valid_time_confidence": 0.9},
+            "criticality": "Medium", "derived_from": [],
+        })
+        hank_disp_a = resp_hank["disposition"]
+        pending_a = eng_a.list_pending_adjudications(agent_id=dur_agent)
+        print(f"\nT12 Phase A: Hank disposition={hank_disp_a}  pending={len(pending_a)}")
+        _assert(
+            str(hank_disp_a) == "QueuedForAdjudication",
+            "T12A: Hank → QueuedForAdjudication",
+            f"actual={hank_disp_a!r}",
+        )
+        _assert(len(pending_a) >= 1, "T12A: 1+ pending before close", f"actual={len(pending_a)}")
+        handle_dur = pending_a[0]["handle_id"]
+        print(f"  handle before close: {handle_dur[:8]}...")
+        del eng_a  # simulate restart
+
+        # Phase B: reopen, verify pending still present (defer survived restart)
+        eng_b = mempill.open_oracle(db_path, HumanOracle())
+        pending_b = eng_b.list_pending_adjudications(agent_id=dur_agent)
+        print(f"\nT12 Phase B (after reopen): pending={len(pending_b)}")
+        _assert(
+            len(pending_b) >= 1,
+            "T12B: pending adjudication survives engine close+reopen",
+            f"actual={len(pending_b)}",
+        )
+        handle_b = pending_b[0]["handle_id"]
+        print(f"  handle after reopen: {handle_b[:8]}...")
+        _assert(
+            handle_b == handle_dur,
+            "T12B: same handle_id after reopen",
+            f"expected={handle_dur[:8]} actual={handle_b[:8]}",
+        )
+        print("  Durability confirmed — deferred adjudication persists across restart.")
 
     print()
     print("All assertions passed — selftest complete.")
