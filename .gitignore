@@ -13,3 +13,5 @@ __pycache__/
 .env
 .env.*
 !.env.example
+# Claude Code task sentinels and worktree metadata
+.claude/
