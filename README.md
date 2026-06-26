@@ -24,7 +24,7 @@ A runnable demonstration of mempill's temporal-validity memory engine and its MC
 mempill-demo/             ← this repo
   pyproject.toml
   scripts/setup.sh
-  demo/temporal_validity.py   # 3-act demo
+  examples/temporal_validity.py   # 3-act demo
   mcp/verify_stdio.py         # real MCP stdio client verification
   mcp/claude_desktop_config.json.example
   mcp/.mcp.json.example
@@ -80,7 +80,7 @@ uv run python -c "import mempill, mempill_mcp, mcp; print('imports OK')"
 ## Run the demo
 
 ```bash
-uv run python demo/temporal_validity.py
+uv run python examples/temporal_validity.py
 ```
 
 The demo runs all 3 acts and prints the actual engine output with inline narration explaining the temporal-validity behavior.
