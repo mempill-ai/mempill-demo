@@ -93,6 +93,16 @@ class ReconcileOutcome:
 
 
 @dataclass
+class TimelineEntry:
+    """A single entry in the ordered belief timeline for a (subject, predicate) pair."""
+    value: str
+    valid_from: Optional[str]    # RFC3339 or None
+    valid_until: Optional[str]   # RFC3339 or None ("open" when None)
+    status: str                  # "Current" | "Superseded"
+    claim_ref: str
+
+
+@dataclass
 class AuditEntry:
     claim_ref: str
     event_kind: str

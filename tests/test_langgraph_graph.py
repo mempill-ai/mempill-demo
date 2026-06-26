@@ -21,7 +21,7 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 
-from mempill_demo.domain.models import AlternativeView, BeliefView
+from mempill_demo.domain.models import AlternativeView, BeliefView, TimelineEntry
 from mempill_langgraph.extraction import ClaimExtractResult, ExtractedClaim, KeyExtractResult
 from mempill_langgraph.graph import build_graph
 
@@ -559,6 +559,134 @@ def test_canonical_key_round_trip():
     # AI reply should reference Alice
     ai_content = result["messages"][-1].content
     assert ai_content, "Expected non-empty AI reply"
+
+
+# ── Test 8: Timeline block injected when history has >1 entry ─────────────────
+
+def test_retrieve_memory_includes_timeline_block_when_multi_entry():
+    """
+    When the LGFakeMemoryStore has >1 timeline entry, retrieve_memory must include
+    a [MEMORY TIMELINE] block in memory_context alongside the current-belief block.
+    Single-entry history (no prior holders) must NOT produce a timeline block.
+    """
+    # Build a resolved belief for Acme CEO = Bob (current)
+    resolved_belief = BeliefView(
+        subject="acme:ceo",
+        predicate="held_by",
+        status="Committed",
+        value="Bob",
+        conf=0.95,
+        vt_start="2025-01-01T00:00:00Z",
+        vt_end="open",
+        provenance="EXT",
+        claim_ref="ref-bob",
+        corroboration=0,
+        alternatives=[],
+    )
+
+    # Two-entry timeline: Alice (superseded) → Bob (current)
+    timeline = [
+        TimelineEntry(
+            value="Alice",
+            valid_from="2020-01-01T00:00:00Z",
+            valid_until="2025-01-01T00:00:00Z",
+            status="Superseded",
+            claim_ref="ref-alice",
+        ),
+        TimelineEntry(
+            value="Bob",
+            valid_from="2025-01-01T00:00:00Z",
+            valid_until=None,
+            status="Current",
+            claim_ref="ref-bob",
+        ),
+    ]
+
+    fake_store = LGFakeMemoryStore(belief=resolved_belief, timeline_entries=timeline)
+    fake_reply = AIMessage(content="Acme's CEO is Bob. Previously it was Alice (2020–2025).")
+    fake_llm = _fake_llm(fake_reply)
+
+    graph = build_graph(
+        memory_store=fake_store,
+        llm=fake_llm,
+        extractor=_empty_extractor,
+        key_extractor=_fixed_key_extractor("acme:ceo", "held_by"),
+    )
+
+    result = graph.invoke(
+        {
+            "messages": [HumanMessage(content="Who was Acme's CEO before?")],
+            "user_id": "u1",
+            "agent_id": "test",
+        },
+        config={"configurable": {"thread_id": "timeline-t1"}},
+    )
+
+    ctx = result["memory_context"]
+    # Must contain both the current-belief block and the timeline block
+    assert "MEMORY TIMELINE" in ctx, (
+        f"Expected [MEMORY TIMELINE] block in memory_context, got: {ctx!r}"
+    )
+    assert "Alice" in ctx, f"Expected Alice in timeline, got: {ctx!r}"
+    assert "Bob" in ctx, f"Expected Bob in timeline, got: {ctx!r}"
+    assert "Superseded" in ctx, f"Expected Superseded status in timeline, got: {ctx!r}"
+    assert "Current" in ctx, f"Expected Current status in timeline, got: {ctx!r}"
+
+
+def test_retrieve_memory_no_timeline_block_for_single_entry():
+    """
+    When history has exactly 1 entry (no prior holders), no [MEMORY TIMELINE]
+    block should be injected — it would only add noise.
+    """
+    resolved_belief = BeliefView(
+        subject="acme:ceo",
+        predicate="held_by",
+        status="Committed",
+        value="Alice",
+        conf=0.95,
+        vt_start="2020-01-01T00:00:00Z",
+        vt_end="open",
+        provenance="EXT",
+        claim_ref="ref-alice",
+        corroboration=0,
+        alternatives=[],
+    )
+    # Only one timeline entry — no predecessors
+    single_timeline = [
+        TimelineEntry(
+            value="Alice",
+            valid_from="2020-01-01T00:00:00Z",
+            valid_until=None,
+            status="Current",
+            claim_ref="ref-alice",
+        ),
+    ]
+
+    fake_store = LGFakeMemoryStore(belief=resolved_belief, timeline_entries=single_timeline)
+    fake_reply = AIMessage(content="Alice is the CEO of Acme.")
+    fake_llm = _fake_llm(fake_reply)
+
+    graph = build_graph(
+        memory_store=fake_store,
+        llm=fake_llm,
+        extractor=_empty_extractor,
+        key_extractor=_fixed_key_extractor("acme:ceo", "held_by"),
+    )
+
+    result = graph.invoke(
+        {
+            "messages": [HumanMessage(content="Who is Acme's CEO?")],
+            "user_id": "u1",
+            "agent_id": "test",
+        },
+        config={"configurable": {"thread_id": "no-timeline-t1"}},
+    )
+
+    ctx = result["memory_context"]
+    assert "MEMORY TIMELINE" not in ctx, (
+        f"Expected NO timeline block for single-entry history, got: {ctx!r}"
+    )
+    assert "Alice" in ctx, f"Expected Alice in resolved belief block, got: {ctx!r}"
 
 
 # ── Live smoke test (skipped without API key) ─────────────────────────────────
