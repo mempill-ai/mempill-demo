@@ -5,6 +5,7 @@ It depends only on the MemoryStore Protocol and domain types from mempill_demo.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Callable, Optional
 
@@ -25,6 +26,8 @@ from mempill_langgraph.prompts import (
     RESOLVED_BLOCK,
 )
 from mempill_langgraph.state import AgentState
+
+log = logging.getLogger("mempill.demo")
 
 # ── Subject/predicate extraction heuristics ──────────────────────────────────
 
@@ -194,8 +197,9 @@ def make_nodes(
             result: ClaimExtractResult = _extractor_llm(
                 EXTRACTION_PROMPT.format(assistant_message=last_ai_content)
             )
-        except Exception:
+        except Exception as exc:
             # Never crash write_memory — graceful no-op on extraction failure
+            log.warning("write_memory: claim extraction failed: %s", exc)
             return {}
 
         if not result.claims:
@@ -228,9 +232,12 @@ def make_nodes(
             )
             try:
                 memory_store.ingest(cmd)
-            except Exception:
-                # Don't crash the conversation on a failed write
-                pass
+            except Exception as exc:
+                # Don't crash the conversation on a failed write — but surface it.
+                log.warning(
+                    "write_memory: ingest failed for %s/%s=%r: %s",
+                    claim.subject, claim.predicate, claim.value, exc,
+                )
 
         return {}
 
