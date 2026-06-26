@@ -32,6 +32,20 @@ from mempill_demo.domain.models import (
 )
 
 
+def _to_rfc3339(value: str) -> str:
+    """Normalize a date/datetime string to an RFC3339 datetime the engine accepts.
+
+    The engine's ``valid_time.start`` / ``valid_time.end`` require a full RFC3339
+    datetime (e.g. ``2020-01-01T00:00:00Z``). LLM extractors frequently emit a bare
+    date (``2020-01-01``), which the engine rejects with "premature end of input".
+    Expand a bare ``YYYY-MM-DD`` to midnight UTC; pass anything else through unchanged.
+    """
+    s = value.strip()
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return f"{s}T00:00:00Z"
+    return s
+
+
 class MempillMemoryStore:
     """MemoryStore adapter backed by a real mempill Engine."""
 
@@ -66,9 +80,9 @@ class MempillMemoryStore:
         conf_val = 0.7 if cmd.kind == CommandKind.RECALL_REENTRY else cmd.conf
         valid_time: dict = {"valid_time_confidence": conf_val}
         if cmd.since:
-            valid_time["start"] = cmd.since
+            valid_time["start"] = _to_rfc3339(cmd.since)
         if cmd.until:
-            valid_time["end"] = cmd.until
+            valid_time["end"] = _to_rfc3339(cmd.until)
 
         # Build derived_from for RECALL_REENTRY
         derived_from: list[str] = []
