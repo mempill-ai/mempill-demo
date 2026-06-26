@@ -6,7 +6,6 @@ It depends only on the MemoryStore Protocol and domain types from mempill_demo.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Callable, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -16,11 +15,12 @@ from langgraph.store.base import BaseStore
 from mempill_demo.domain.models import BeliefView, CommandKind, ParsedCommand
 from mempill_demo.ports.memory import MemoryStore
 
-from mempill_langgraph.extraction import ClaimExtractResult
+from mempill_langgraph.extraction import ClaimExtractResult, KeyExtractResult
 from mempill_langgraph.prompts import (
     CONTESTED_BLOCK,
     EMPTY_BLOCK,
     EXTRACTION_PROMPT,
+    KEY_EXTRACTION_PROMPT,
     MEMORY_SYSTEM_PREFIX,
     NO_BELIEF_BLOCK,
     RESOLVED_BLOCK,
@@ -28,39 +28,6 @@ from mempill_langgraph.prompts import (
 from mempill_langgraph.state import AgentState
 
 log = logging.getLogger("mempill.demo")
-
-# ── Subject/predicate extraction heuristics ──────────────────────────────────
-
-# Patterns: (regex, subject_group, predicate_literal)
-_SUBJECT_PATTERNS: list[tuple[re.Pattern, str, str]] = [
-    (re.compile(r"who\s+is\s+(?:the\s+)?ceo\s+of\s+(\w+)", re.I), r"\1:ceo", "held_by"),
-    (re.compile(r"(?:ceo|chief\s+executive)\s+of\s+(\w+)", re.I), r"\1:ceo", "held_by"),
-    (re.compile(r"where\s+(?:does|did)\s+(\w+)\s+live", re.I), r"\1", "lives_in"),
-    (re.compile(r"where\s+is\s+(\w+)\s+(?:located|based)", re.I), r"\1", "location"),
-    (re.compile(r"what\s+is\s+(\w+)['’]?s?\s+role", re.I), r"\1", "role"),
-    (re.compile(r"(\w+)\s+(?:is|are)\s+the\s+ceo\s+of\s+(\w+)", re.I), r"\2:ceo", "held_by"),
-    (re.compile(r"(\w+)['’]?s?\s+role\s+(?:at|in)\s+(\w+)", re.I), r"\1", "role"),
-]
-
-
-def _extract_subject_predicate(text: str) -> tuple[Optional[str], Optional[str]]:
-    """Heuristic keyword-pattern extraction — no LLM call, no json.loads."""
-    for pattern, subj_template, pred in _SUBJECT_PATTERNS:
-        m = pattern.search(text)
-        if m:
-            # Replace back-references in template using match groups
-            subject = pattern.sub(subj_template, text[m.start():m.end()]).strip()
-            # Re-apply simpler group substitution
-            try:
-                groups = m.groups()
-                s = subj_template
-                for i, g in enumerate(groups, start=1):
-                    s = s.replace(f"\\{i}", (g or "").lower())
-                subject = s
-            except Exception:
-                subject = (m.group(1) or "").lower()
-            return subject.lower(), pred
-    return None, None
 
 
 # ── Belief formatting (deterministic Python — not LLM) ───────────────────────
@@ -104,30 +71,38 @@ def make_nodes(
     memory_store: MemoryStore,
     llm: Any,
     extractor: Optional[Callable[[str], ClaimExtractResult]] = None,
+    key_extractor: Optional[Callable[[str], KeyExtractResult]] = None,
 ):
     """
     Return the three node functions closed over memory_store and llm.
 
     The optional `extractor` parameter accepts a callable (str -> ClaimExtractResult)
-    to override the default llm.with_structured_output binding. This is used in
-    offline tests where FakeMessagesListChatModel cannot cleanly drive tool-calls
-    via with_structured_output in all cases.
+    to override the default llm.with_structured_output binding for write_memory.
 
-    If extractor is None, the default llm.with_structured_output(ClaimExtractResult)
-    binding is used (production path — requires a real or tool-call-capable model).
+    The optional `key_extractor` parameter accepts a callable (str -> KeyExtractResult)
+    to override the default LLM-backed canonical key extractor for retrieve_memory.
+
+    Both injectable seams use the SAME canonical key convention so that a fact
+    written by write_memory is always recoverable by retrieve_memory.
+
+    If either parameter is None the default llm.with_structured_output binding is
+    used (production path — requires a real or tool-call-capable model).
     """
-    # Build the default extraction chain once at construction time.
+    # Build the default extraction chains once at construction time.
     _extractor_llm = extractor or _make_default_extractor(llm)
+    _key_extractor_llm = key_extractor or _make_default_key_extractor(llm)
 
     # ── Node A: retrieve_memory ───────────────────────────────────────────────
 
     def retrieve_memory(state: AgentState, config: RunnableConfig, *, store: BaseStore) -> dict:
         """
-        Determine (subject, predicate) from the latest human message via heuristics,
-        call MemoryStore.recall via the PORT, format BeliefView into memory_context.
+        Determine (subject, predicate) from the latest human message using an
+        LLM-backed canonical key extractor that shares the SAME key convention as
+        write_memory.  This ensures a question about a fact always maps to the
+        same (subject, predicate) key that was used to write that fact.
 
-        The `store: Any` parameter (LangGraph's store injection via Pattern A) is
-        accepted in the signature but intentionally unused — mempill is accessed
+        The `store: BaseStore` parameter (LangGraph's store injection via Pattern A)
+        is accepted in the signature but intentionally unused — mempill is accessed
         via the `memory_store` closure, not LangGraph's InMemoryStore.
         """
         # Get the latest human message
@@ -141,9 +116,9 @@ def make_nodes(
                 latest_human = msg.content or ""
                 break
 
-        subject, predicate = _extract_subject_predicate(latest_human)
+        subject, predicate = _extract_canonical_key(latest_human, _key_extractor_llm)
 
-        if subject is None or predicate is None:
+        if not subject or not predicate:
             # No identifiable subject — greeting or small-talk
             return {"memory_context": EMPTY_BLOCK}
 
@@ -254,13 +229,46 @@ def make_nodes(
 
 
 def _make_default_extractor(llm: Any) -> Callable[[str], ClaimExtractResult]:
-    """Bind llm.with_structured_output for production use."""
+    """Bind llm.with_structured_output(ClaimExtractResult) for production use."""
     extractor_llm = llm.with_structured_output(ClaimExtractResult)
 
     def _extract(prompt: str) -> ClaimExtractResult:
         return extractor_llm.invoke(prompt)
 
     return _extract
+
+
+def _make_default_key_extractor(llm: Any) -> Callable[[str], KeyExtractResult]:
+    """Bind llm.with_structured_output(KeyExtractResult) for production use."""
+    key_extractor_llm = llm.with_structured_output(KeyExtractResult)
+
+    def _extract_key(prompt: str) -> KeyExtractResult:
+        return key_extractor_llm.invoke(prompt)
+
+    return _extract_key
+
+
+def _extract_canonical_key(
+    text: str,
+    key_extractor_fn: Callable[[str], KeyExtractResult],
+) -> tuple[Optional[str], Optional[str]]:
+    """
+    Use the injected key_extractor_fn to derive the canonical (subject, predicate)
+    for a user question.  Returns (None, None) when no key is identifiable
+    (greeting, small-talk, or extractor failure).
+    """
+    if not text or not text.strip():
+        return None, None
+    try:
+        result: KeyExtractResult = key_extractor_fn(
+            KEY_EXTRACTION_PROMPT.format(user_question=text)
+        )
+        subject = (result.subject or "").strip().lower() or None
+        predicate = (result.predicate or "").strip().lower() or None
+        return subject, predicate
+    except Exception as exc:
+        log.warning("retrieve_memory: key extraction failed: %s", exc)
+        return None, None
 
 
 def _is_recall_reentry(subject: str, predicate: str, value: str, memory_context: str) -> bool:

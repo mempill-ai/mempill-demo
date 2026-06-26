@@ -32,3 +32,21 @@ class ClaimExtractResult(BaseModel):
             "Empty list for greetings, small-talk, questions, contested reports."
         ),
     )
+
+
+class KeyExtractResult(BaseModel):
+    """Result of canonical key extraction from a user question (for retrieve_memory)."""
+    subject: str = Field(
+        default="",
+        description=(
+            "Canonical subject key, e.g. 'acme:ceo' or 'bob'. "
+            "Empty string when no subject is identifiable (greeting/small-talk)."
+        ),
+    )
+    predicate: str = Field(
+        default="",
+        description=(
+            "Canonical predicate, e.g. 'held_by' or 'lives_in'. "
+            "Empty string when no predicate is identifiable."
+        ),
+    )
