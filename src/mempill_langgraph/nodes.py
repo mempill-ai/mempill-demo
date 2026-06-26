@@ -37,19 +37,20 @@ def _format_belief(belief: BeliefView) -> str:
     if belief.value is None and not belief.alternatives:
         return NO_BELIEF_BLOCK.format(subject=belief.subject, predicate=belief.predicate)
 
-    if belief.status in ("Contested",) and belief.alternatives:
-        alt = belief.alternatives[0]
+    if belief.status in ("Contested", "Conflict") and (belief.alternatives or belief.value is not None):
+        # Contested has no winner. The candidates may be (primary + alternatives) or,
+        # when there is no primary, entirely in `alternatives`. Surface the first two.
+        candidates = []
+        if belief.value is not None:
+            candidates.append((belief.value, belief.conf, belief.vt_start, belief.vt_end))
+        candidates.extend((a.value, a.conf, a.vt_start, a.vt_end) for a in belief.alternatives)
+        (va, ca, sa, ea) = candidates[0]
+        (vb, cb, sb, eb) = candidates[1] if len(candidates) > 1 else (None, None, "", "")
         return CONTESTED_BLOCK.format(
             subject=belief.subject,
             predicate=belief.predicate,
-            value_a=belief.value,
-            conf_a=belief.conf if belief.conf is not None else "?",
-            start_a=belief.vt_start or "?",
-            end_a=belief.vt_end or "open",
-            value_b=alt.value,
-            conf_b=alt.conf if alt.conf is not None else "?",
-            start_b=alt.vt_start or "?",
-            end_b=alt.vt_end or "open",
+            value_a=va, conf_a=ca if ca is not None else "?", start_a=sa or "?", end_a=ea or "open",
+            value_b=vb, conf_b=cb if cb is not None else "?", start_b=sb or "?", end_b=eb or "open",
         )
 
     return RESOLVED_BLOCK.format(

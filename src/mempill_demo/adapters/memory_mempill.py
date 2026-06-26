@@ -57,6 +57,24 @@ def _to_rfc3339(value: str) -> Optional[str]:
     return None  # unparseable — caller omits this bound
 
 
+def _map_alternatives(belief: dict) -> "list[AlternativeView]":
+    """Map the `alternatives` array of a query_memory belief into AlternativeView list."""
+    out: list[AlternativeView] = []
+    for alt in (belief.get("alternatives") or []):
+        if alt is None:
+            continue
+        vt = alt.get("valid_time") or {}
+        conf = alt.get("confidence", {}) or {}
+        out.append(AlternativeView(
+            value=(alt.get("fact", {}) or {}).get("value"),
+            conf=conf.get("value_confidence") if isinstance(conf, dict) else conf,
+            vt_start=vt.get("start", "") if isinstance(vt, dict) else "",
+            vt_end=(vt.get("end") or "open") if isinstance(vt, dict) else "open",
+            claim_ref=alt.get("claim_ref", ""),
+        ))
+    return out
+
+
 class MempillMemoryStore:
     """MemoryStore adapter backed by a real mempill Engine."""
 
@@ -486,19 +504,21 @@ class MempillMemoryStore:
         primary = belief.get("primary")
 
         if primary is None:
-            # R5: no belief
+            # No primary winner. This is EITHER a true no-belief OR a Contested belief
+            # (Contested has no primary — both candidates live in `alternatives`). Preserve
+            # the real status and the alternatives instead of discarding them as "UNKNOWN".
             return BeliefView(
                 subject=subject,
                 predicate=predicate,
                 value=None,
-                status="UNKNOWN",
+                status=status,
                 conf=None,
                 vt_start="",
                 vt_end="",
                 provenance="",
                 claim_ref="",
                 corroboration=0,
-                alternatives=[],
+                alternatives=_map_alternatives(belief),
             )
 
         # Extract primary fields
@@ -514,26 +534,7 @@ class MempillMemoryStore:
         prov = _prov_abbr(primary.get("provenance"))
 
         # Map alternatives (for R2/Contested)
-        alternatives_raw = belief.get("alternatives", []) or []
-        alternatives: list[AlternativeView] = []
-        for alt in alternatives_raw:
-            if alt is None:
-                continue
-            alt_fact = alt.get("fact", {}) or {}
-            alt_val = alt_fact.get("value")
-            alt_conf_dict = alt.get("confidence", {}) or {}
-            alt_cv = alt_conf_dict.get("value_confidence") if isinstance(alt_conf_dict, dict) else alt_conf_dict
-            alt_vt = alt.get("valid_time") or {}
-            alt_start = alt_vt.get("start", "") if isinstance(alt_vt, dict) else ""
-            alt_end = (alt_vt.get("end") or "open") if isinstance(alt_vt, dict) else "open"
-            alt_ref = alt.get("claim_ref", "")
-            alternatives.append(AlternativeView(
-                value=alt_val,
-                conf=alt_cv,
-                vt_start=alt_start,
-                vt_end=alt_end,
-                claim_ref=alt_ref,
-            ))
+        alternatives = _map_alternatives(belief)
 
         return BeliefView(
             subject=subject,
