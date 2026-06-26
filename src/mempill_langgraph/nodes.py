@@ -25,6 +25,8 @@ from mempill_langgraph.prompts import (
     MEMORY_SYSTEM_PREFIX,
     NO_BELIEF_BLOCK,
     RESOLVED_BLOCK,
+    TIMELINE_BLOCK,
+    TIMELINE_ENTRY_LINE,
 )
 from mempill_langgraph.state import AgentState, PendingDecision
 
@@ -64,6 +66,34 @@ def _format_belief(belief: BeliefView) -> str:
         vt_end=belief.vt_end or "open",
         provenance=belief.provenance,
         corroboration=belief.corroboration,
+    )
+
+
+# ── Timeline formatting (deterministic Python — not LLM) ─────────────────────
+
+def _format_timeline(subject: str, predicate: str, entries: list) -> str:
+    """Format a list of TimelineEntry objects into a compact TIMELINE_BLOCK string.
+
+    Only called when len(entries) > 1 — single-entry histories add no useful context.
+    Entries are ordered oldest→newest (Superseded first, Current last) as returned
+    by mempill.history().
+    """
+    lines = []
+    for e in entries:
+        vf = e.valid_from or "?"
+        vu = e.valid_until or "open"
+        lines.append(
+            TIMELINE_ENTRY_LINE.format(
+                status=e.status,
+                value=e.value,
+                valid_from=vf,
+                valid_until=vu,
+            )
+        )
+    return TIMELINE_BLOCK.format(
+        subject=subject,
+        predicate=predicate,
+        entries="\n".join(lines),
     )
 
 
@@ -219,6 +249,26 @@ def make_nodes(
             except Exception as exc:
                 log.warning("auto-reconcile failed for %s/%s: %s", subject, predicate, exc)
 
+        # ── Step 3b: Timeline injection ───────────────────────────────────────
+        # Fetch the full ordered history for this (subject, predicate) and append a
+        # compact TIMELINE block to memory_context when there are >1 entries.
+        # This lets the LLM answer "who was before / prior / history" questions without
+        # any separate intent classifier — both current and historical are in one context.
+        timeline_block = ""
+        try:
+            timeline_entries = memory_store.timeline_history(subject, predicate)
+            if len(timeline_entries) > 1:
+                timeline_block = _format_timeline(subject, predicate, timeline_entries)
+                log.info(
+                    "timeline_injection %s/%s → %d entries",
+                    subject, predicate, len(timeline_entries),
+                )
+        except AttributeError:
+            # memory_store does not implement timeline_history (e.g. base FakeMemoryStore)
+            pass
+        except Exception as exc:
+            log.warning("timeline_history failed for %s/%s: %s", subject, predicate, exc)
+
         # ── Step 4: Conversational adjudication setup (residual tie) ──────────
         new_pending: Optional[PendingDecision] = None
         if belief.status in ("Contested", "Conflict"):
@@ -252,6 +302,8 @@ def make_nodes(
                     break  # take the first matching pending item
 
         memory_context = _format_belief(belief)
+        if timeline_block:
+            memory_context = memory_context + "\n\n" + timeline_block
         result: dict = {"memory_context": memory_context}
         if new_pending is not None:
             result["pending_decision"] = new_pending

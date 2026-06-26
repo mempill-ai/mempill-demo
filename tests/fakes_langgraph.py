@@ -16,6 +16,7 @@ from mempill_demo.domain.models import (
     ClaimMeta,
     ParsedCommand,
     ReconcileOutcome,
+    TimelineEntry,
 )
 
 
@@ -39,6 +40,7 @@ class LGFakeMemoryStore:
         belief: Optional[BeliefView] = None,
         reconcile_result_belief: Optional[BeliefView] = None,
         pending_items: Optional[list[dict]] = None,
+        timeline_entries: Optional[list[TimelineEntry]] = None,
     ) -> None:
         self._belief = belief or BeliefView(
             subject="",
@@ -57,6 +59,7 @@ class LGFakeMemoryStore:
         # Simulates valid-time resolution (Contested → Resolved/CommittedCheap).
         self._reconcile_result_belief = reconcile_result_belief
         self._pending_items: list[dict] = list(pending_items or [])
+        self._timeline_entries: list[TimelineEntry] = list(timeline_entries or [])
         self.ingested: list[ParsedCommand] = []
         self.recall_calls: int = 0
         self.reconcile_calls: int = 0
@@ -111,6 +114,9 @@ class LGFakeMemoryStore:
             p for p in self._pending_items if p.get("handle_id") != handle_id
         ]
         return {"disposition": "Committed", "claim_ref": "fake-adj-ref"}
+
+    def timeline_history(self, subject: str, predicate: str) -> list[TimelineEntry]:
+        return list(self._timeline_entries)
 
     def history(self, subject: str, predicate: str) -> tuple[list[ClaimMeta], list[AuditEntry]]:
         return [], []

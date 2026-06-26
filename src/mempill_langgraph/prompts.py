@@ -53,6 +53,14 @@ No memory stored. Do not invent a value."""
 # Empty block — no subject detected (greeting, small-talk)
 EMPTY_BLOCK = ""
 
+# Timeline block — injected alongside the current-belief block when >1 entry exists
+TIMELINE_BLOCK = """\
+[MEMORY TIMELINE: {subject} | {predicate}]
+{entries}"""
+
+# Each line in the timeline (one per history entry)
+TIMELINE_ENTRY_LINE = "  {status}: \"{value}\"  {valid_from} -> {valid_until}"
+
 # ── System prompt for the respond node ──────────────────────────────────────
 
 MEMORY_SYSTEM_PREFIX = """\
@@ -65,6 +73,13 @@ Memory rules (non-negotiable):
 - If memory status is Committed/CommittedCheap: answer with confidence; cite the valid timeframe.
 - If no memory block is present: respond naturally from conversation context only.
 - Greetings, small-talk, and chitchat: respond naturally. There is nothing wrong with "Hi!"
+
+Timeline rules (when a [MEMORY TIMELINE] block is present):
+- Use the timeline to answer "who was before?", "history", "previous", "prior", or "full timeline" questions.
+- Each timeline entry shows status (Current/Superseded), value, and the valid-time window (start -> end).
+- The "Current" entry is the present holder. "Superseded" entries are past holders.
+- Present the timeline in chronological order, stating the valid-time window for each holder.
+- Do NOT invent entries beyond what the timeline shows.
 
 {memory_context}"""
 

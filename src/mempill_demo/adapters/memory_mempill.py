@@ -25,7 +25,7 @@ from typing import Any, Optional
 
 import mempill
 from mempill import Disposition, ProvenanceLabel
-from mempill import remember as _remember, recall as _recall, RememberOptions, UnparsableDateError
+from mempill import remember as _remember, recall as _recall, history as _history, RememberOptions, UnparsableDateError
 
 log = logging.getLogger("mempill.demo")
 
@@ -37,6 +37,7 @@ from mempill_demo.domain.models import (
     ParsedCommand,
     ReconcileOutcome,
     SessionStats,
+    TimelineEntry,
     CommandKind,
     _prov_abbr,
 )
@@ -259,6 +260,37 @@ class MempillMemoryStore:
         all_audit = self._fetch_audit(limit=500)
         relevant = [e for e in all_audit if e.claim_ref in refs]
         return metas, relevant
+
+    def timeline_history(self, subject: str, predicate: str) -> list[TimelineEntry]:
+        """Return the ordered timeline for (subject, predicate) via mempill.history().
+
+        Entries are ordered oldest→newest (Superseded first, Current last).
+        Returns an empty list when no history exists.
+        Logs → query_history / ← N entries consistent with existing log style.
+        """
+        log.info("→ query_history subject=%s predicate=%s", subject, predicate)
+        try:
+            h = _history(self._engine, self._agent_id, subject, predicate)
+        except Exception as exc:
+            log.warning("  query_history failed: %s", exc)
+            return []
+
+        if h.is_empty():
+            log.info("← query_history 0 entries")
+            return []
+
+        entries: list[TimelineEntry] = [
+            TimelineEntry(
+                value=str(e.value),
+                valid_from=e.valid_from or None,
+                valid_until=e.valid_until or None,
+                status=str(e.status),
+                claim_ref=str(e.claim_ref),
+            )
+            for e in h
+        ]
+        log.info("← query_history %d entries", len(entries))
+        return entries
 
     def audit(self, limit: int) -> list[AuditEntry]:
         """Return the last `limit` audit entries."""
