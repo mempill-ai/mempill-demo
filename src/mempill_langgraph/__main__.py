@@ -12,6 +12,7 @@ Wave 3 additions (ARCHITECTURE §D):
 """
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import sys
@@ -19,6 +20,33 @@ import sys
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ── Verbose logging (MEMPILL_VERBOSE or --verbose arg) ───────────────────────
+# Parse --verbose before the API-key guard so logging is active from the start.
+# We do a minimal manual parse here to avoid full argparse setup at module level.
+_verbosity: int = 0
+_argv = sys.argv[1:]
+_verbosity += _argv.count("--verbose") + _argv.count("-v")
+if _verbosity == 0:
+    _env_val = os.environ.get("MEMPILL_VERBOSE", "").strip().lower()
+    if _env_val in ("1", "true", "yes"):
+        _verbosity = 1
+    elif _env_val == "2":
+        _verbosity = 2
+
+if _verbosity > 0:
+    _log_level = logging.DEBUG if _verbosity >= 2 else logging.INFO
+    logging.basicConfig(
+        level=_log_level,
+        format="%(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+    # Enable LangChain call-level debug output when available
+    try:
+        from langchain.globals import set_debug  # type: ignore[import-untyped]
+        set_debug(True)
+    except ImportError:
+        pass  # langchain.globals unavailable — degrade gracefully
 
 if not os.environ.get("ANTHROPIC_API_KEY"):
     print("ERROR: ANTHROPIC_API_KEY not set. Add it to .env or export it.")

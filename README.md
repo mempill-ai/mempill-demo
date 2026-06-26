@@ -215,6 +215,29 @@ uv run python -m mempill_demo --selftest && echo "CI: selftest passed"
 Exit 0 = all 13 assertions passed (T1–T7). No API key required.
 The selftest uses `open_in_memory()` — never touches the persistent DB.
 
+### Verbose logging
+
+Pass `--verbose` (or set `MEMPILL_VERBOSE=1`) to print engine call summaries to stderr. Pass `--verbose --verbose` (or `MEMPILL_VERBOSE=2`) to also print raw request/response payloads at DEBUG level.
+
+```bash
+# INFO — one line per engine call + result
+uv run python -m mempill_demo --verbose
+
+# DEBUG — full raw payloads
+MEMPILL_VERBOSE=2 uv run python -m mempill_demo
+```
+
+Sample INFO output (console agent, INGEST + RECALL):
+
+```
+INFO mempill.demo: → ingest_claim subject=acme:ceo predicate=held_by value='Alice' prov=ExternalUserAsserted
+INFO mempill.demo: ← disposition=CommittedCheap claim_ref=c97b91b2 contested_with=[]
+INFO mempill.demo: → query_memory subject=acme:ceo predicate=held_by
+INFO mempill.demo: ← status=Resolved primary='Alice' alternatives=[]
+```
+
+For the LangGraph agent, `--verbose` / `MEMPILL_VERBOSE=1` additionally enables LangChain call-level debug output (every LLM call with inputs and outputs) via `langchain.globals.set_debug(True)`. Default mode (no flag, no env var) is completely silent, preserving the existing behavior.
+
 ### --llm setup
 
 Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY` (or export it in your shell). The app auto-loads `.env` on startup — no manual `source` needed. Deterministic mode (`--selftest`, plain REPL, `--scenario`) requires no key.
