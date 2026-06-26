@@ -12,7 +12,8 @@ Encapsulates all SDK quirks:
 from __future__ import annotations
 
 import logging
-from typing import Any
+import re
+from typing import Any, Optional
 
 import mempill
 from mempill import Disposition, ProvenanceLabel
@@ -32,18 +33,28 @@ from mempill_demo.domain.models import (
 )
 
 
-def _to_rfc3339(value: str) -> str:
+_ISO_DATE_RE = re.compile(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$")
+
+
+def _to_rfc3339(value: str) -> Optional[str]:
     """Normalize a date/datetime string to an RFC3339 datetime the engine accepts.
 
     The engine's ``valid_time.start`` / ``valid_time.end`` require a full RFC3339
-    datetime (e.g. ``2020-01-01T00:00:00Z``). LLM extractors frequently emit a bare
-    date (``2020-01-01``), which the engine rejects with "premature end of input".
-    Expand a bare ``YYYY-MM-DD`` to midnight UTC; pass anything else through unchanged.
+    datetime (e.g. ``2020-01-01T00:00:00Z``). LLM extractors emit looser forms — a
+    bare date (``2020-01-01``), year-month (``2020-03``), or year only (``2020``).
+    Expand any of those to midnight UTC, defaulting unknown month/day to ``01``.
+    Already-full datetimes (containing ``T``) pass through. Anything unparseable
+    (e.g. natural language like ``March 2020``) returns ``None`` so the caller omits
+    the window instead of sending a bad request ("premature end of input").
     """
     s = value.strip()
-    if len(s) == 10 and s[4] == "-" and s[7] == "-":
-        return f"{s}T00:00:00Z"
-    return s
+    if "T" in s:  # already a full datetime
+        return s
+    m = _ISO_DATE_RE.match(s)
+    if m:
+        year, month, day = m.group(1), m.group(2) or "01", m.group(3) or "01"
+        return f"{year}-{month}-{day}T00:00:00Z"
+    return None  # unparseable — caller omits this bound
 
 
 class MempillMemoryStore:
@@ -80,9 +91,13 @@ class MempillMemoryStore:
         conf_val = 0.7 if cmd.kind == CommandKind.RECALL_REENTRY else cmd.conf
         valid_time: dict = {"valid_time_confidence": conf_val}
         if cmd.since:
-            valid_time["start"] = _to_rfc3339(cmd.since)
+            _start = _to_rfc3339(cmd.since)
+            if _start:
+                valid_time["start"] = _start
         if cmd.until:
-            valid_time["end"] = _to_rfc3339(cmd.until)
+            _end = _to_rfc3339(cmd.until)
+            if _end:
+                valid_time["end"] = _end
 
         # Build derived_from for RECALL_REENTRY
         derived_from: list[str] = []
