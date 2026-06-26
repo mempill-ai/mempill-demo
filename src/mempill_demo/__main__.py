@@ -13,6 +13,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import pathlib
 import sys
 
@@ -58,12 +60,51 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Delete the persistent DB file and exit",
     )
+    p.add_argument(
+        "--verbose",
+        action="count",
+        default=0,
+        help=(
+            "Enable verbose logging of engine calls to stderr. "
+            "Pass once for INFO (summaries); pass twice for DEBUG (raw payloads). "
+            "Also honoured via env MEMPILL_VERBOSE=1 (INFO) or MEMPILL_VERBOSE=2 (DEBUG)."
+        ),
+    )
     return p
+
+
+def _configure_logging(verbosity: int) -> None:
+    """Configure logging based on verbosity level.
+
+    verbosity=0 → silent (no basicConfig call; logging stays at WARNING default).
+    verbosity=1 → INFO  (engine call summaries).
+    verbosity=2+ → DEBUG (raw payloads as well).
+    Also reads MEMPILL_VERBOSE env var (1 → INFO, 2 → DEBUG) if CLI count is 0.
+    """
+    if verbosity == 0:
+        env_val = os.environ.get("MEMPILL_VERBOSE", "").strip().lower()
+        if env_val in ("1", "true", "yes"):
+            verbosity = 1
+        elif env_val == "2":
+            verbosity = 2
+
+    if verbosity == 0:
+        return  # remain silent — no logging config
+
+    level = logging.DEBUG if verbosity >= 2 else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
 
 
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+
+    # ── --verbose / MEMPILL_VERBOSE: configure logging before anything else ──
+    _configure_logging(args.verbose)
 
     # ── --selftest: run assertions, exit ─────────────────────────────────────
     if args.selftest:

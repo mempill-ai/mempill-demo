@@ -11,10 +11,13 @@ Encapsulates all SDK quirks:
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import mempill
 from mempill import Disposition, ProvenanceLabel
+
+log = logging.getLogger("mempill.demo")
 
 from mempill_demo.domain.models import (
     AuditEntry,
@@ -90,9 +93,21 @@ class MempillMemoryStore:
             "derived_from": derived_from,
         }
 
+        log.info(
+            "→ ingest_claim subject=%s predicate=%s value=%r prov=%s",
+            cmd.subject, cmd.predicate, cmd.value, prov,
+        )
+        log.debug("  ingest_claim request=%r", request)
+
         resp = self._engine.ingest_claim(request)
         disp = resp["disposition"]
         ref = resp["claim_ref"]
+        contested = resp.get("contested_with", [])
+        log.info(
+            "← disposition=%s claim_ref=%s contested_with=%s",
+            disp, ref[:8], [r[:8] for r in contested] if contested else [],
+        )
+        log.debug("  ingest_claim response=%r", resp)
 
         meta = ClaimMeta(
             subject=cmd.subject,
@@ -111,20 +126,37 @@ class MempillMemoryStore:
 
     def recall(self, subject: str, predicate: str) -> BeliefView:
         """Query the engine and map to a BeliefView domain object."""
+        log.info("→ query_memory subject=%s predicate=%s", subject, predicate)
         resp = self._engine.query_memory({
             "agent_id": self._agent_id,
             "subject": subject,
             "predicate": predicate,
         })
+        log.debug("  query_memory response=%r", resp)
+        belief = resp.get("belief", {})
+        status = belief.get("status", "UNKNOWN")
+        primary_val = (belief.get("primary") or {}).get("fact", {}).get("value")
+        alts = [
+            (a.get("fact") or {}).get("value")
+            for a in (belief.get("alternatives") or [])
+            if a
+        ]
+        log.info(
+            "← status=%s primary=%r alternatives=%r",
+            status, primary_val, alts,
+        )
         return self._map_belief(resp, subject, predicate)
 
     def reconcile(self, subject: str, predicate: str) -> list[ReconcileOutcome]:
         """Run reconciliation; return list of ReconcileOutcome domain objects."""
+        log.info("→ reconcile subject=%s predicate=%s", subject, predicate)
         resp = self._engine.reconcile({
             "agent_id": self._agent_id,
             "subject_lines": [(subject, predicate)],
         })
+        log.debug("  reconcile response=%r", resp)
         outcomes = resp.get("outcomes", [])
+        log.info("← reconcile outcomes_count=%d outcomes=%r", len(outcomes), outcomes)
         return [ReconcileOutcome(claim_ref=ref, disposition=disp) for ref, disp in outcomes]
 
     def history(
@@ -173,7 +205,12 @@ class MempillMemoryStore:
 
     def list_pending(self) -> list[dict]:
         """Return pending adjudication requests for this agent from the engine queue."""
-        return self._engine.list_pending_adjudications(agent_id=self._agent_id)
+        log.info("→ list_pending_adjudications agent_id=%s", self._agent_id)
+        result = self._engine.list_pending_adjudications(agent_id=self._agent_id)
+        log.debug("  list_pending_adjudications response=%r", result)
+        handle_ids = [p.get("handle_id", "?")[:8] for p in result]
+        log.info("← pending_count=%d handle_ids=%r", len(result), handle_ids)
+        return result
 
     def submit(self, handle_id: str, verdict: str) -> dict:
         """
@@ -182,12 +219,20 @@ class MempillMemoryStore:
         verdict: "Affirm" | "Deny" | "Unknown"
         Builds the response dict with external_first_hand provenance (decision E in ARCHITECTURE).
         """
+        log.info("→ submit_adjudication handle_id=%s verdict=%s", handle_id[:8], verdict)
         response = {
             "handle_id": handle_id,
             "verdict": verdict,
             "evidence_provenance": ProvenanceLabel.external_first_hand(),
         }
-        return self._engine.submit_adjudication(response)
+        result = self._engine.submit_adjudication(response)
+        log.debug("  submit_adjudication response=%r", result)
+        log.info(
+            "← submit_adjudication disposition=%s claim_ref=%s",
+            result.get("disposition", "?"),
+            str(result.get("claim_ref", "?"))[:8],
+        )
+        return result
 
     def _sweep_expired(self) -> int:
         """
@@ -196,13 +241,18 @@ class MempillMemoryStore:
         Returns the count of adjudications swept (0 if none). Called on startup
         (decision H.2) and via /sweep in the REPL.
         """
+        log.info("→ sweep_expired_adjudications")
         result = self._engine.sweep_expired_adjudications()
+        log.debug("  sweep_expired_adjudications response=%r", result)
         # The engine returns a count or a dict with a count field
         if isinstance(result, int):
-            return result
-        if isinstance(result, dict):
-            return result.get("swept", result.get("count", 0))
-        return 0
+            swept = result
+        elif isinstance(result, dict):
+            swept = result.get("swept", result.get("count", 0))
+        else:
+            swept = 0
+        log.info("← swept_count=%d", swept)
+        return swept
 
     # ── Scenario runner (keeps mempill out of app/) ───────────────────────────
 
@@ -379,13 +429,16 @@ class MempillMemoryStore:
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _fetch_audit(self, limit: int) -> list[AuditEntry]:
+        log.info("→ query_audit agent_id=%s limit=%d", self._agent_id, limit)
         resp = self._engine.query_audit({
             "agent_id": self._agent_id,
             "claim_ref": None,
             "from_tx_time": None,
             "limit": limit,
         })
+        log.debug("  query_audit response=%r", resp)
         entries = resp.get("entries", [])
+        log.info("← audit_entries_count=%d", len(entries))
         return [
             AuditEntry(
                 claim_ref=e.get("claim_ref", ""),
