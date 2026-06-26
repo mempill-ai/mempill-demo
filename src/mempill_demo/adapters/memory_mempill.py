@@ -2,21 +2,21 @@
 mempill_demo.adapters.memory_mempill — THE ONLY module that imports mempill.
 
 Encapsulates all SDK quirks:
-  - belief["belief"]["primary"]["fact"]["value"] deep path extraction
   - audit entries have no subject/predicate/value → session registry correlation
   - ProvenanceLabel and Disposition enum mapping
   - reconcile() returns only winner; loser is in audit ledger
   - Oracle wiring: open_oracle / open_oracle_in_memory for HITL adjudication queue
 
-Date normalization (valid_time) is now delegated to mempill.remember() via
+This adapter is now fully on the ergonomic API (remember() / recall()) for all
+write and read paths, including RECALL_REENTRY (derived_from is forwarded via
+RememberOptions).  Oracle, reconcile, and audit methods remain on the raw engine
+API as those surfaces have no ergonomic equivalents.
+
+Date normalization (valid_time) is delegated to mempill.remember() via
 RememberOptions, which handles the RFC3339 expansion internally and raises
 UnparsableDateError for natural-language dates.  The ingest() method catches that
 error and retries without the date window — preserving the "omit window, still
 ingest" fallback that existed when _to_rfc3339() returned None.
-
-RECALL_REENTRY claims still use the raw dict path because remember() hardcodes
-derived_from=[] and does not expose a derived_from parameter.  If that gap is
-closed upstream, the RECALL_REENTRY branch can be migrated too.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from typing import Any, Optional
 
 import mempill
 from mempill import Disposition, ProvenanceLabel
-from mempill import remember as _remember, RememberOptions, UnparsableDateError
+from mempill import remember as _remember, recall as _recall, RememberOptions, UnparsableDateError
 
 log = logging.getLogger("mempill.demo")
 
@@ -40,24 +40,6 @@ from mempill_demo.domain.models import (
     CommandKind,
     _prov_abbr,
 )
-
-
-def _map_alternatives(belief: dict) -> "list[AlternativeView]":
-    """Map the `alternatives` array of a query_memory belief into AlternativeView list."""
-    out: list[AlternativeView] = []
-    for alt in (belief.get("alternatives") or []):
-        if alt is None:
-            continue
-        vt = alt.get("valid_time") or {}
-        conf = alt.get("confidence", {}) or {}
-        out.append(AlternativeView(
-            value=(alt.get("fact", {}) or {}).get("value"),
-            conf=conf.get("value_confidence") if isinstance(conf, dict) else conf,
-            vt_start=vt.get("start", "") if isinstance(vt, dict) else "",
-            vt_end=(vt.get("end") or "open") if isinstance(vt, dict) else "open",
-            claim_ref=alt.get("claim_ref", ""),
-        ))
-    return out
 
 
 class MempillMemoryStore:
@@ -83,55 +65,39 @@ class MempillMemoryStore:
     def ingest(self, cmd: ParsedCommand) -> ClaimMeta:
         """Ingest a ParsedCommand into the engine; register in local registry.
 
-        UserAsserted and ModelDerived commands are routed through mempill.remember()
-        (ergonomic API), which handles RFC3339 normalization and the valid_time dict
-        quirk internally.  If a date string is unparseable (e.g. natural language),
-        UnparsableDateError is caught and the command is re-submitted without the
-        date window so the fact is still stored.
-
-        RECALL_REENTRY uses the raw dict path because mempill.remember() does not
-        expose a derived_from parameter.
+        All write paths (UserAsserted, ModelDerived, RECALL_REENTRY) go through
+        mempill.remember() (ergonomic API).  For RECALL_REENTRY, derived_from is
+        forwarded via RememberOptions.  For UserAsserted/ModelDerived, date strings
+        are normalized to RFC3339 by remember(); UnparsableDateError is caught and
+        the command is re-submitted without the date window so the fact is still stored.
         """
         prov_str = (cmd.extra or {}).get("provenance_str", "UserAsserted")
         cardinality = (cmd.extra or {}).get("cardinality", "Functional")
 
         if cmd.kind == CommandKind.RECALL_REENTRY:
-            # ── Raw dict path: remember() lacks derived_from support ──────────
+            # ── Ergonomic path: RECALL_REENTRY via remember() with derived_from ─
             prov = ProvenanceLabel.recall_re_entry()
             conf_val = 0.7
-            valid_time: dict = {"valid_time_confidence": conf_val}
-            derived_from: list[str] = [cmd.source_claim_ref] if cmd.source_claim_ref else []
-
-            request = {
-                "agent_id": self._agent_id,
-                "subject": cmd.subject,
-                "predicate": cmd.predicate,
-                "value": cmd.value,
-                "provenance": prov,
-                "cardinality": cardinality,
-                "valid_time": valid_time,
-                "confidence": {
-                    "value_confidence": conf_val,
-                    "valid_time_confidence": conf_val,
-                },
-                "criticality": "Low",
-                "derived_from": derived_from,
-            }
+            opts_rr = RememberOptions(
+                derived_from=[cmd.source_claim_ref] if cmd.source_claim_ref else [],
+                provenance=prov,
+                confidence=conf_val,
+                cardinality=cardinality,
+                criticality="Low",
+            )
 
             log.info(
                 "→ ingest_claim subject=%s predicate=%s value=%r prov=%s",
                 cmd.subject, cmd.predicate, cmd.value, prov,
             )
-            log.debug("  ingest_claim request=%r", request)
-            resp = self._engine.ingest_claim(request)
-            disp = str(resp["disposition"])
-            ref = resp["claim_ref"]
-            contested = resp.get("contested_with", [])
+            receipt = _remember(self._engine, self._agent_id, cmd.subject, cmd.predicate, cmd.value, opts_rr)
+            disp = str(receipt.disposition)
+            ref = receipt.claim_ref
+            contested = receipt.contested_with
             log.info(
                 "← disposition=%s claim_ref=%s contested_with=%s",
                 disp, ref[:8], [r[:8] for r in contested] if contested else [],
             )
-            log.debug("  ingest_claim response=%r", resp)
             meta = ClaimMeta(
                 subject=cmd.subject,
                 predicate=cmd.predicate,
@@ -206,27 +172,59 @@ class MempillMemoryStore:
     def recall(self, subject: str, predicate: str) -> BeliefView:
         """Query the engine and map to a BeliefView domain object."""
         log.info("→ query_memory subject=%s predicate=%s", subject, predicate)
-        resp = self._engine.query_memory({
-            "agent_id": self._agent_id,
-            "subject": subject,
-            "predicate": predicate,
-        })
-        log.debug("  query_memory response=%r", resp)
-        belief = resp.get("belief", {})
-        status = belief.get("status", "UNKNOWN")
-        primary_val = (belief.get("primary") or {}).get("fact", {}).get("value")
-        alts = [
-            (a.get("fact") or {}).get("value")
-            for a in (belief.get("alternatives") or [])
-            if a
-        ]
+        result = _recall(self._engine, self._agent_id, subject, predicate)
+        primary_val = result.primary.value if result.primary else None
+        alt_vals = [c.value for c in result.candidates]
         log.info(
             "← status=%s primary=%r alternatives=%r",
-            status, primary_val, alts,
+            result.status, primary_val, alt_vals,
         )
         if subject and predicate:
             self._last_recalled = (subject, predicate)
-        return self._map_belief(resp, subject, predicate)
+
+        # Map candidates → AlternativeView (populated for Contested/Conflict and
+        # also for non-contested alternatives).
+        alternatives = [
+            AlternativeView(
+                value=c.detail.value,
+                conf=c.detail.value_confidence,
+                vt_start=c.detail.valid_from or "",
+                vt_end=c.detail.valid_until or "open",
+                claim_ref=c.detail.claim_ref,
+            )
+            for c in result.candidates
+        ]
+
+        if result.primary is None:
+            # NoBelief, Contested, or TimingUncertain — no resolved primary.
+            return BeliefView(
+                subject=subject,
+                predicate=predicate,
+                value=None,
+                status=result.status,
+                conf=None,
+                vt_start="",
+                vt_end="",
+                provenance="",
+                claim_ref="",
+                corroboration=0,
+                alternatives=alternatives,
+            )
+
+        p = result.primary
+        return BeliefView(
+            subject=subject,
+            predicate=predicate,
+            value=p.value,
+            status=result.status,
+            conf=p.value_confidence,
+            vt_start=p.valid_from or "",
+            vt_end=p.valid_until or "open",
+            provenance=_prov_abbr(p.provenance),
+            claim_ref=p.claim_ref,
+            corroboration=p.corroboration_count,
+            alternatives=alternatives,
+        )
 
     def last_recalled(self) -> "Optional[tuple[str, str]]":
         """The (subject, predicate) of the most recent recall — used by /reconcile."""
@@ -535,55 +533,3 @@ class MempillMemoryStore:
             for e in entries
         ]
 
-    def _map_belief(self, resp: dict, subject: str, predicate: str) -> BeliefView:
-        """Map a raw query_memory response dict to a BeliefView domain object."""
-        belief = resp.get("belief", {})
-        status = belief.get("status", "UNKNOWN")
-        primary = belief.get("primary")
-
-        if primary is None:
-            # No primary winner. This is EITHER a true no-belief OR a Contested belief
-            # (Contested has no primary — both candidates live in `alternatives`). Preserve
-            # the real status and the alternatives instead of discarding them as "UNKNOWN".
-            return BeliefView(
-                subject=subject,
-                predicate=predicate,
-                value=None,
-                status=status,
-                conf=None,
-                vt_start="",
-                vt_end="",
-                provenance="",
-                claim_ref="",
-                corroboration=0,
-                alternatives=_map_alternatives(belief),
-            )
-
-        # Extract primary fields
-        value = primary.get("fact", {}).get("value")
-        conf_dict = primary.get("confidence", {})
-        conf_val = conf_dict.get("value_confidence") if isinstance(conf_dict, dict) else conf_dict
-        vt = primary.get("valid_time") or {}
-        vt_start = vt.get("start", "") if isinstance(vt, dict) else ""
-        vt_end = (vt.get("end") or "open") if isinstance(vt, dict) else "open"
-        claim_ref = primary.get("claim_ref", "")
-        currency = primary.get("currency_signal", {}) or {}
-        corroboration = currency.get("corroboration_count", 0)
-        prov = _prov_abbr(primary.get("provenance"))
-
-        # Map alternatives (for R2/Contested)
-        alternatives = _map_alternatives(belief)
-
-        return BeliefView(
-            subject=subject,
-            predicate=predicate,
-            value=value,
-            status=status,
-            conf=conf_val,
-            vt_start=vt_start,
-            vt_end=vt_end,
-            provenance=prov,
-            claim_ref=claim_ref,
-            corroboration=corroboration,
-            alternatives=alternatives,
-        )
