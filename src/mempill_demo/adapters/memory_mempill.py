@@ -2,21 +2,30 @@
 mempill_demo.adapters.memory_mempill — THE ONLY module that imports mempill.
 
 Encapsulates all SDK quirks:
-  - valid_time["valid_time_confidence"] inside the valid_time dict
   - belief["belief"]["primary"]["fact"]["value"] deep path extraction
   - audit entries have no subject/predicate/value → session registry correlation
   - ProvenanceLabel and Disposition enum mapping
   - reconcile() returns only winner; loser is in audit ledger
   - Oracle wiring: open_oracle / open_oracle_in_memory for HITL adjudication queue
+
+Date normalization (valid_time) is now delegated to mempill.remember() via
+RememberOptions, which handles the RFC3339 expansion internally and raises
+UnparsableDateError for natural-language dates.  The ingest() method catches that
+error and retries without the date window — preserving the "omit window, still
+ingest" fallback that existed when _to_rfc3339() returned None.
+
+RECALL_REENTRY claims still use the raw dict path because remember() hardcodes
+derived_from=[] and does not expose a derived_from parameter.  If that gap is
+closed upstream, the RECALL_REENTRY branch can be migrated too.
 """
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Optional
 
 import mempill
 from mempill import Disposition, ProvenanceLabel
+from mempill import remember as _remember, RememberOptions, UnparsableDateError
 
 log = logging.getLogger("mempill.demo")
 
@@ -31,30 +40,6 @@ from mempill_demo.domain.models import (
     CommandKind,
     _prov_abbr,
 )
-
-
-_ISO_DATE_RE = re.compile(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$")
-
-
-def _to_rfc3339(value: str) -> Optional[str]:
-    """Normalize a date/datetime string to an RFC3339 datetime the engine accepts.
-
-    The engine's ``valid_time.start`` / ``valid_time.end`` require a full RFC3339
-    datetime (e.g. ``2020-01-01T00:00:00Z``). LLM extractors emit looser forms — a
-    bare date (``2020-01-01``), year-month (``2020-03``), or year only (``2020``).
-    Expand any of those to midnight UTC, defaulting unknown month/day to ``01``.
-    Already-full datetimes (containing ``T``) pass through. Anything unparseable
-    (e.g. natural language like ``March 2020``) returns ``None`` so the caller omits
-    the window instead of sending a bad request ("premature end of input").
-    """
-    s = value.strip()
-    if "T" in s:  # already a full datetime
-        return s
-    m = _ISO_DATE_RE.match(s)
-    if m:
-        year, month, day = m.group(1), m.group(2) or "01", m.group(3) or "01"
-        return f"{year}-{month}-{day}T00:00:00Z"
-    return None  # unparseable — caller omits this bound
 
 
 def _map_alternatives(belief: dict) -> "list[AlternativeView]":
@@ -96,75 +81,119 @@ class MempillMemoryStore:
     # ── Write path ────────────────────────────────────────────────────────────
 
     def ingest(self, cmd: ParsedCommand) -> ClaimMeta:
-        """Ingest a ParsedCommand into the engine; register in local registry."""
-        # Determine provenance
-        prov_str = (cmd.extra or {}).get("provenance_str", "UserAsserted")
-        if cmd.kind == CommandKind.RECALL_REENTRY:
-            prov = ProvenanceLabel.recall_re_entry()
-        elif prov_str == "ModelDerived":
-            prov = ProvenanceLabel.model_derived()
-        else:
-            prov = ProvenanceLabel.external_user_asserted()
+        """Ingest a ParsedCommand into the engine; register in local registry.
 
+        UserAsserted and ModelDerived commands are routed through mempill.remember()
+        (ergonomic API), which handles RFC3339 normalization and the valid_time dict
+        quirk internally.  If a date string is unparseable (e.g. natural language),
+        UnparsableDateError is caught and the command is re-submitted without the
+        date window so the fact is still stored.
+
+        RECALL_REENTRY uses the raw dict path because mempill.remember() does not
+        expose a derived_from parameter.
+        """
+        prov_str = (cmd.extra or {}).get("provenance_str", "UserAsserted")
         cardinality = (cmd.extra or {}).get("cardinality", "Functional")
 
-        # Build valid_time — always include valid_time_confidence inside the dict (SDK quirk R1)
-        conf_val = 0.7 if cmd.kind == CommandKind.RECALL_REENTRY else cmd.conf
-        valid_time: dict = {"valid_time_confidence": conf_val}
-        if cmd.since:
-            _start = _to_rfc3339(cmd.since)
-            if _start:
-                valid_time["start"] = _start
-        if cmd.until:
-            _end = _to_rfc3339(cmd.until)
-            if _end:
-                valid_time["end"] = _end
+        if cmd.kind == CommandKind.RECALL_REENTRY:
+            # ── Raw dict path: remember() lacks derived_from support ──────────
+            prov = ProvenanceLabel.recall_re_entry()
+            conf_val = 0.7
+            valid_time: dict = {"valid_time_confidence": conf_val}
+            derived_from: list[str] = [cmd.source_claim_ref] if cmd.source_claim_ref else []
 
-        # Build derived_from for RECALL_REENTRY
-        derived_from: list[str] = []
-        if cmd.kind == CommandKind.RECALL_REENTRY and cmd.source_claim_ref:
-            derived_from = [cmd.source_claim_ref]
+            request = {
+                "agent_id": self._agent_id,
+                "subject": cmd.subject,
+                "predicate": cmd.predicate,
+                "value": cmd.value,
+                "provenance": prov,
+                "cardinality": cardinality,
+                "valid_time": valid_time,
+                "confidence": {
+                    "value_confidence": conf_val,
+                    "valid_time_confidence": conf_val,
+                },
+                "criticality": "Low",
+                "derived_from": derived_from,
+            }
 
-        criticality = "Low" if cmd.kind == CommandKind.RECALL_REENTRY else "Medium"
+            log.info(
+                "→ ingest_claim subject=%s predicate=%s value=%r prov=%s",
+                cmd.subject, cmd.predicate, cmd.value, prov,
+            )
+            log.debug("  ingest_claim request=%r", request)
+            resp = self._engine.ingest_claim(request)
+            disp = str(resp["disposition"])
+            ref = resp["claim_ref"]
+            contested = resp.get("contested_with", [])
+            log.info(
+                "← disposition=%s claim_ref=%s contested_with=%s",
+                disp, ref[:8], [r[:8] for r in contested] if contested else [],
+            )
+            log.debug("  ingest_claim response=%r", resp)
+            meta = ClaimMeta(
+                subject=cmd.subject,
+                predicate=cmd.predicate,
+                value=cmd.value,
+                provenance=prov,
+                valid_time=None,
+                conf=conf_val,
+                disposition=disp,
+                claim_ref=ref,
+            )
+            self._registry[ref] = meta
+            return meta
 
-        request = {
-            "agent_id": self._agent_id,
-            "subject": cmd.subject,
-            "predicate": cmd.predicate,
-            "value": cmd.value,
-            "provenance": prov,
-            "cardinality": cardinality,
-            "valid_time": valid_time,
-            "confidence": {
-                "value_confidence": conf_val,
-                "valid_time_confidence": conf_val,
-            },
-            "criticality": criticality,
-            "derived_from": derived_from,
-        }
+        # ── Ergonomic path: UserAsserted / ModelDerived ───────────────────────
+        prov = ProvenanceLabel.model_derived() if prov_str == "ModelDerived" else ProvenanceLabel.external_user_asserted()
+        conf_val = cmd.conf
+
+        opts = RememberOptions(
+            valid_from=cmd.since or None,
+            valid_until=cmd.until or None,
+            confidence=conf_val,
+            cardinality=cardinality,
+            provenance=prov,
+            criticality="Medium",
+        )
 
         log.info(
             "→ ingest_claim subject=%s predicate=%s value=%r prov=%s",
             cmd.subject, cmd.predicate, cmd.value, prov,
         )
-        log.debug("  ingest_claim request=%r", request)
 
-        resp = self._engine.ingest_claim(request)
-        disp = resp["disposition"]
-        ref = resp["claim_ref"]
-        contested = resp.get("contested_with", [])
+        try:
+            receipt = _remember(self._engine, self._agent_id, cmd.subject, cmd.predicate, cmd.value, opts)
+        except UnparsableDateError as exc:
+            # Natural-language date (e.g. "March 2020") — omit the window and
+            # re-submit so the fact is still stored (matches pre-refactor behavior
+            # where _to_rfc3339 returned None and the bound was silently skipped).
+            log.warning("  unparseable date %r — retrying without valid_time window", exc.input)
+            opts_no_date = RememberOptions(
+                confidence=conf_val,
+                cardinality=cardinality,
+                provenance=prov,
+                criticality="Medium",
+            )
+            receipt = _remember(self._engine, self._agent_id, cmd.subject, cmd.predicate, cmd.value, opts_no_date)
+
+        disp = str(receipt.disposition)
+        ref = receipt.claim_ref
+        contested = receipt.contested_with
         log.info(
             "← disposition=%s claim_ref=%s contested_with=%s",
             disp, ref[:8], [r[:8] for r in contested] if contested else [],
         )
-        log.debug("  ingest_claim response=%r", resp)
 
+        # Reconstruct valid_time for ClaimMeta (only for display purposes in registry)
+        has_date = bool(cmd.since or cmd.until)
         meta = ClaimMeta(
             subject=cmd.subject,
             predicate=cmd.predicate,
             value=cmd.value,
             provenance=prov,
-            valid_time=valid_time if (cmd.since or cmd.until) else None,
+            valid_time={"valid_from": cmd.since, "valid_until": cmd.until} if has_date else None,
             conf=conf_val,
             disposition=disp,
             claim_ref=ref,
