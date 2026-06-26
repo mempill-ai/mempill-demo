@@ -15,8 +15,17 @@ class ExtractedClaim(BaseModel):
     predicate: str = Field(description="Relationship or property, e.g. 'held_by', 'lives_in'")
     value: str = Field(description="The asserted value, e.g. 'Alice', 'Paris'")
     conf: float = Field(default=0.85, ge=0.0, le=1.0, description="Confidence 0-1")
-    since: Optional[str] = Field(default=None, description="ISO8601 start or null")
-    until: Optional[str] = Field(default=None, description="ISO8601 end or null")
+    since: Optional[str] = Field(
+        default=None,
+        description=(
+            "Start as a full ISO-8601 date YYYY-MM-DD; default unknown month/day to 01 "
+            "(e.g. 'March 2020' -> '2020-03-01', '2020' -> '2020-01-01'). null if unknown."
+        ),
+    )
+    until: Optional[str] = Field(
+        default=None,
+        description="End as a full ISO-8601 date YYYY-MM-DD (same rules as 'since'); null if open-ended",
+    )
     is_user_asserted: bool = Field(
         default=False,
         description="True if the user explicitly stated this fact; False if inferred by model",
