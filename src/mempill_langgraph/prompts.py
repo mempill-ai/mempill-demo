@@ -41,10 +41,11 @@ Memory rules (non-negotiable):
 # ── Extraction prompt for write_memory node ──────────────────────────────────
 
 EXTRACTION_PROMPT = """\
-Extract any new factual claims from the following assistant message.
-A factual claim is a (subject, predicate, value) triple asserting something about the world.
-Return an empty claims list for: greetings, questions, expressions of uncertainty, procedural responses, or contested reports.
-Do NOT extract claims already framed as contested or uncertain.
+Extract any new factual claims from the following user message.
+A factual claim is a (subject, predicate, value) triple asserting something about the world that the USER is stating as fact.
+Return an empty claims list for: greetings, questions, expressions of uncertainty, commands, or procedural requests.
+Do NOT extract claims framed as contested, uncertain, or that are merely questions about the world.
+All claims extracted from a user message are user-asserted facts — set is_user_asserted=True for every claim.
 
 Message:
-{assistant_message}"""
+{user_message}"""
