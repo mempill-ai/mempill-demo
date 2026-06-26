@@ -15,9 +15,10 @@ from langgraph.store.base import BaseStore
 from mempill_demo.domain.models import BeliefView, CommandKind, ParsedCommand
 from mempill_demo.ports.memory import MemoryStore
 
-from mempill_langgraph.extraction import ClaimExtractResult, KeyExtractResult
+from mempill_langgraph.extraction import ClaimExtractResult, DecisionClassifyResult, KeyExtractResult
 from mempill_langgraph.prompts import (
     CONTESTED_BLOCK,
+    DECISION_CLASSIFY_PROMPT,
     EMPTY_BLOCK,
     EXTRACTION_PROMPT,
     KEY_EXTRACTION_PROMPT,
@@ -25,7 +26,7 @@ from mempill_langgraph.prompts import (
     NO_BELIEF_BLOCK,
     RESOLVED_BLOCK,
 )
-from mempill_langgraph.state import AgentState
+from mempill_langgraph.state import AgentState, PendingDecision
 
 log = logging.getLogger("mempill.demo")
 
@@ -73,38 +74,64 @@ def make_nodes(
     llm: Any,
     extractor: Optional[Callable[[str], ClaimExtractResult]] = None,
     key_extractor: Optional[Callable[[str], KeyExtractResult]] = None,
+    decision_classifier: Optional[Callable[[str], DecisionClassifyResult]] = None,
 ):
     """
     Return the three node functions closed over memory_store and llm.
 
-    The optional `extractor` parameter accepts a callable (str -> ClaimExtractResult)
-    to override the default llm.with_structured_output binding for write_memory.
+    Injectable seams (all override the default llm.with_structured_output binding):
+      extractor:            str -> ClaimExtractResult  (write_memory)
+      key_extractor:        str -> KeyExtractResult    (retrieve_memory key lookup)
+      decision_classifier:  str -> DecisionClassifyResult  (conversational adjudication)
 
-    The optional `key_extractor` parameter accepts a callable (str -> KeyExtractResult)
-    to override the default LLM-backed canonical key extractor for retrieve_memory.
-
-    Both injectable seams use the SAME canonical key convention so that a fact
-    written by write_memory is always recoverable by retrieve_memory.
-
-    If either parameter is None the default llm.with_structured_output binding is
-    used (production path — requires a real or tool-call-capable model).
+    All seams use the same canonical key convention so write↔read always match.
+    When a parameter is None the default llm.with_structured_output binding is used
+    (production path — requires a real or tool-call-capable model).
     """
     # Build the default extraction chains once at construction time.
     _extractor_llm = extractor or _make_default_extractor(llm)
     _key_extractor_llm = key_extractor or _make_default_key_extractor(llm)
 
+    # Decision classifier is built lazily — only when a pending_decision is actually
+    # present in state.  This avoids calling llm.with_structured_output() for models
+    # (like FakeMessagesListChatModel) that raise NotImplementedError for that method.
+    _explicit_decision_classifier = decision_classifier
+    _lazy_classifier: list[Callable[[str], DecisionClassifyResult]] = []  # mutable cell
+
+    def _get_decision_classifier() -> Callable[[str], DecisionClassifyResult]:
+        if _explicit_decision_classifier is not None:
+            return _explicit_decision_classifier
+        if not _lazy_classifier:
+            _lazy_classifier.append(_make_default_decision_classifier(llm))
+        return _lazy_classifier[0]
+
     # ── Node A: retrieve_memory ───────────────────────────────────────────────
 
     def retrieve_memory(state: AgentState, config: RunnableConfig, *, store: BaseStore) -> dict:
         """
-        Determine (subject, predicate) from the latest human message using an
-        LLM-backed canonical key extractor that shares the SAME key convention as
-        write_memory.  This ensures a question about a fact always maps to the
-        same (subject, predicate) key that was used to write that fact.
+        1. If pending_decision is set from a prior Contested turn, classify the
+           current user message to pick incumbent / challenger / neither.
+           - challenger  → submit_adjudication("Affirm")  (challenger wins)
+           - incumbent   → submit_adjudication("Deny")    (incumbent stands)
+           - neither     → leave pending; continue with normal recall
+           After submitting, clear pending_decision and recall the freshly-resolved belief.
+           IMPORTANT: when we process a decision-turn, set a flag so write_memory
+           does NOT ingest the user's short answer as a new claim.
 
-        The `store: BaseStore` parameter (LangGraph's store injection via Pattern A)
-        is accepted in the signature but intentionally unused — mempill is accessed
-        via the `memory_store` closure, not LangGraph's InMemoryStore.
+        2. Extract (subject, predicate) from the latest human message and recall.
+
+        3. AUTO-RECONCILE (silent, deterministic): if belief.status == "Contested",
+           call memory_store.reconcile(subject, predicate) then recall again.
+           Valid-time succession (most-recent wins) resolves the line without any
+           user action.  Only a genuine tie remains Contested after this step.
+
+        4. CONVERSATIONAL ADJUDICATION (residual tie): if, after auto-reconcile,
+           the belief is STILL Contested AND list_pending() has an entry for this
+           (subject, predicate), record a PendingDecision in state.  The respond
+           node will ask the user which value is correct.
+
+        The `store: BaseStore` parameter is accepted (Pattern-A LangGraph injection)
+        but unused — mempill is accessed via the `memory_store` closure.
         """
         # Get the latest human message
         messages = state.get("messages", [])
@@ -117,6 +144,58 @@ def make_nodes(
                 latest_human = msg.content or ""
                 break
 
+        # ── Step 1: Process any outstanding pending_decision ──────────────────
+        # PendingDecision is a TypedDict → dict at runtime; use [] not . access.
+        existing_decision: Optional[dict] = state.get("pending_decision")
+        if existing_decision is not None and latest_human:
+            inc_val = existing_decision["incumbent_value"]
+            chal_val = existing_decision["challenger_value"]
+            handle_id = existing_decision["handle_id"]
+            dec_subject = existing_decision["subject"]
+            dec_predicate = existing_decision["predicate"]
+
+            verdict_result = _classify_decision(
+                latest_human,
+                inc_val,
+                chal_val,
+                _get_decision_classifier(),
+            )
+            if verdict_result in ("challenger", "incumbent"):
+                # Map to engine API verdicts
+                engine_verdict = "Affirm" if verdict_result == "challenger" else "Deny"
+                try:
+                    memory_store.submit(handle_id, engine_verdict)
+                    log.info(
+                        "conversational adjudication: %s/%s → %s (verdict=%s)",
+                        dec_subject, dec_predicate, verdict_result, engine_verdict,
+                    )
+                except Exception as exc:
+                    log.warning("conversational adjudication submit failed: %s", exc)
+
+                # Recall the freshly-resolved belief
+                try:
+                    resolved_belief = memory_store.recall(dec_subject, dec_predicate)
+                    memory_context = _format_belief(resolved_belief)
+                except Exception:
+                    memory_context = NO_BELIEF_BLOCK.format(
+                        subject=dec_subject, predicate=dec_predicate,
+                    )
+
+                # Clear pending_decision; mark this turn as a decision turn so
+                # write_memory does not ingest the user's short pick as a new claim.
+                return {
+                    "memory_context": memory_context,
+                    "pending_decision": None,
+                    "_decision_turn": True,  # consumed by write_memory guard
+                }
+            else:
+                # User said "neither" or off-topic — leave pending, proceed normally
+                log.info(
+                    "conversational adjudication: user said 'neither' for %s/%s — staying pending",
+                    dec_subject, dec_predicate,
+                )
+
+        # ── Step 2: Normal recall ─────────────────────────────────────────────
         subject, predicate = _extract_canonical_key(latest_human, _key_extractor_llm)
 
         if not subject or not predicate:
@@ -125,12 +204,58 @@ def make_nodes(
 
         try:
             belief = memory_store.recall(subject, predicate)
-            memory_context = _format_belief(belief)
         except Exception:
-            # Graceful degradation — don't crash on recall failure
-            memory_context = NO_BELIEF_BLOCK.format(subject=subject, predicate=predicate)
+            return {"memory_context": NO_BELIEF_BLOCK.format(subject=subject, predicate=predicate)}
 
-        return {"memory_context": memory_context}
+        # ── Step 3: Auto-reconcile (silent, deterministic) ────────────────────
+        if belief.status in ("Contested", "Conflict"):
+            try:
+                memory_store.reconcile(subject, predicate)
+                belief = memory_store.recall(subject, predicate)
+                log.info(
+                    "auto-reconcile %s/%s → status=%s",
+                    subject, predicate, belief.status,
+                )
+            except Exception as exc:
+                log.warning("auto-reconcile failed for %s/%s: %s", subject, predicate, exc)
+
+        # ── Step 4: Conversational adjudication setup (residual tie) ──────────
+        new_pending: Optional[PendingDecision] = None
+        if belief.status in ("Contested", "Conflict"):
+            try:
+                pending_list = memory_store.list_pending()
+            except AttributeError:
+                # memory_store does not implement list_pending (base MemoryStore)
+                pending_list = []
+            except Exception as exc:
+                log.warning("list_pending failed: %s", exc)
+                pending_list = []
+
+            # Find a pending adjudication for this (subject, predicate)
+            for pending_item in pending_list:
+                # The engine does not attach subject/predicate to pending items directly;
+                # correlate via the incumbent/challenger values present in the belief.
+                # A pending item matches when its incumbent_value appears in the belief
+                # candidates (belief has no primary when Contested — candidates in alternatives).
+                inc_val = pending_item.get("incumbent_value")
+                chal_val = pending_item.get("challenger_value")
+                handle_id = pending_item.get("handle_id", "")
+                if inc_val and chal_val and handle_id:
+                    # PendingDecision is a TypedDict (serializable plain dict at runtime)
+                    new_pending = {
+                        "subject": subject,
+                        "predicate": predicate,
+                        "handle_id": handle_id,
+                        "incumbent_value": str(inc_val),
+                        "challenger_value": str(chal_val),
+                    }
+                    break  # take the first matching pending item
+
+        memory_context = _format_belief(belief)
+        result: dict = {"memory_context": memory_context}
+        if new_pending is not None:
+            result["pending_decision"] = new_pending
+        return result
 
     # ── Node B: respond ───────────────────────────────────────────────────────
 
@@ -155,8 +280,18 @@ def make_nodes(
         - The AI restating previously-recalled facts cannot create duplicate ingests.
         - HITL /review fires correctly for conflicting user-stated facts.
 
+        Decision-turn guard: if retrieve_memory set _decision_turn=True, the user's
+        message was a short adjudication answer ("Bob", "the first one", "incumbent").
+        Ingesting it as a factual claim would create a spurious belief.  Skip the
+        entire extraction step for that turn.
+
         Returns {} (no state mutation) — this is a side-effect-only node.
         """
+        # Decision-turn guard: message was "Bob" / "the first one" etc. — not a claim.
+        if state.get("_decision_turn"):
+            log.debug("write_memory: skipping — decision-turn guard active")
+            return {}
+
         messages = state.get("messages", [])
         last_human_content = ""
         for msg in reversed(messages):
@@ -227,6 +362,45 @@ def make_nodes(
         return {}
 
     return retrieve_memory, respond, write_memory
+
+
+def _make_default_decision_classifier(llm: Any) -> Callable[[str], DecisionClassifyResult]:
+    """Bind llm.with_structured_output(DecisionClassifyResult) for production use."""
+    classifier_llm = llm.with_structured_output(DecisionClassifyResult)
+
+    def _classify(prompt: str) -> DecisionClassifyResult:
+        return classifier_llm.invoke(prompt)
+
+    return _classify
+
+
+def _classify_decision(
+    user_message: str,
+    incumbent: str,
+    challenger: str,
+    classifier_fn: Callable[[str], DecisionClassifyResult],
+) -> str:
+    """
+    Use the injected classifier_fn to determine whether the user picked the
+    incumbent, the challenger, or neither.  Returns one of: "challenger",
+    "incumbent", "neither".  Defaults to "neither" on any failure.
+    """
+    if not user_message or not user_message.strip():
+        return "neither"
+    try:
+        prompt = DECISION_CLASSIFY_PROMPT.format(
+            incumbent=incumbent,
+            challenger=challenger,
+            user_message=user_message,
+        )
+        result: DecisionClassifyResult = classifier_fn(prompt)
+        verdict = (result.verdict or "neither").strip().lower()
+        if verdict in ("challenger", "incumbent"):
+            return verdict
+        return "neither"
+    except Exception as exc:
+        log.warning("decision classifier failed: %s", exc)
+        return "neither"
 
 
 def _make_default_extractor(llm: Any) -> Callable[[str], ClaimExtractResult]:

@@ -59,3 +59,19 @@ class KeyExtractResult(BaseModel):
             "Empty string when no predicate is identifiable."
         ),
     )
+
+
+class DecisionClassifyResult(BaseModel):
+    """
+    Result of the conversational adjudication decision classifier.
+
+    The classifier reads the user's reply when a pending_decision is set and
+    determines whether the user picked the incumbent, the challenger, or neither.
+    """
+    verdict: str = Field(
+        default="neither",
+        description=(
+            "One of: 'challenger' (new claim wins), 'incumbent' (existing belief stands), "
+            "or 'neither' (user did not pick, stay pending)."
+        ),
+    )

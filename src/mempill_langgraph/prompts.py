@@ -38,7 +38,7 @@ CONTESTED_BLOCK = """\
 Subject: {subject} | Predicate: {predicate}
   Claim A: "{value_a}"  conf={conf_a}  valid: {start_a} -> {end_a}
   Claim B: "{value_b}"  conf={conf_b}  valid: {start_b} -> {end_b}
-INSTRUCTION: Surface BOTH claims. Do NOT pick one. Ask the user to /reconcile."""
+INSTRUCTION: Surface BOTH claims. Do NOT pick one. Ask the user which is correct in plain English."""
 
 RESOLVED_BLOCK = """\
 [MEMORY STATUS: {status}]
@@ -59,7 +59,7 @@ MEMORY_SYSTEM_PREFIX = """\
 You are a helpful conversational assistant backed by mempill, a temporally-correct memory system.
 
 Memory rules (non-negotiable):
-- If memory status is CONTESTED: you MUST surface both claims to the user verbatim. Never choose between them. Suggest running /reconcile.
+- If memory status is CONTESTED: you MUST surface both claims to the user verbatim. Never choose between them. Ask the user which one is correct in plain English (e.g. "I have conflicting information: one source says X, another says Y. Which is correct?"). Do NOT suggest any slash commands.
 - If memory status is SUPERSEDED: report the current value; note prior version exists.
 - If memory status is NO_BELIEF: say you have no memory of this. Never invent a value.
 - If memory status is Committed/CommittedCheap: answer with confidence; cite the valid timeframe.
@@ -101,3 +101,25 @@ Question:
 {{user_question}}"""
 
 KEY_EXTRACTION_PROMPT = KEY_EXTRACTION_PROMPT.format(canonical_convention=CANONICAL_KEY_CONVENTION)
+
+# ── Decision classifier prompt for conversational adjudication ────────────────
+#
+# Used when `pending_decision` is set and we need to determine whether the user's
+# latest message picks the INCUMBENT, the CHALLENGER, or NEITHER.
+# The injectable `decision_classifier` seam returns a DecisionClassifyResult.
+
+DECISION_CLASSIFY_PROMPT = """\
+The user was asked to choose between two conflicting values for a fact:
+  Incumbent (existing belief): "{incumbent}"
+  Challenger (new claim):      "{challenger}"
+
+The user replied:
+  "{user_message}"
+
+Classify the user's intent:
+- "challenger" — user confirms the challenger value is correct (the new claim wins)
+- "incumbent"  — user confirms the incumbent value is correct (the existing belief stands)
+- "neither"    — user did not pick either, expressed uncertainty, or the message is off-topic
+
+Return ONLY one of the three strings: challenger, incumbent, neither.
+Do not explain your reasoning."""

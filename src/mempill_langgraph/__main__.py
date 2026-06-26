@@ -94,7 +94,8 @@ print()
 print("mempill LangGraph Agent")
 print(f"Model: {_MODEL}  |  User: {_USER_ID}  |  Thread: {thread_id}")
 print("Type 'quit', 'exit', or 'q' to exit.")
-print("Resolve conflicts:  /review  (pending oracle adjudications)  ·  /reconcile  (contested lines)")
+print("Conflicts are resolved conversationally — just answer when the agent asks which is correct.")
+print("Advanced commands (optional): /review  /reconcile  /sweep")
 print()
 
 _first_turn = True
@@ -174,4 +175,4 @@ while True:
     _pending = memory_store.list_pending()
     if _pending:
         n = len(_pending)
-        print(f"[!] {n} unresolved conflict(s) — type /review to resolve.")
+        print(f"[!] {n} unresolved conflict(s) — just tell me which is correct (or /review).")
