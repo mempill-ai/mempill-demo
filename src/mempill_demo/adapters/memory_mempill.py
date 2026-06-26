@@ -340,7 +340,7 @@ class MempillMemoryStore:
             committed_bob_ref = bob_ref
 
         q_post = engine.query_memory({"agent_id": agent_id, "subject": "acme:ceo", "predicate": "held_by"})
-        post_val = q_post.get("belief", {}).get("primary", {}).get("fact", {}).get("value")
+        post_val = ((q_post.get("belief", {}).get("primary") or {}).get("fact") or {}).get("value")
         post_status = q_post.get("belief", {}).get("status")
         print(f"  Post-review belief: \"{post_val}\"  status={post_status}")
 
@@ -360,7 +360,7 @@ class MempillMemoryStore:
             self.ingest(rr_cmd)
 
         q_after = engine.query_memory({"agent_id": agent_id, "subject": "acme:ceo", "predicate": "held_by"})
-        after_val = q_after.get("belief", {}).get("primary", {}).get("fact", {}).get("value")
+        after_val = ((q_after.get("belief", {}).get("primary") or {}).get("fact") or {}).get("value")
         after_status = q_after.get("belief", {}).get("status")
         corroboration = (q_after.get("belief", {}).get("primary") or {}).get("currency_signal", {}).get("corroboration_count", 0)
         print(f"  Belief after 5 re-entries: \"{after_val}\"  status={after_status}")

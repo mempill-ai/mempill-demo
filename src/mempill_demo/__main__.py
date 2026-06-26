@@ -84,13 +84,27 @@ def main() -> None:
     # ── Resolve DB path and optional --reset ──────────────────────────────────
     db_path = pathlib.Path(args.db)
 
+    def _remove_db(path: pathlib.Path) -> list[str]:
+        """Delete a SQLite DB plus its -wal/-shm sidecars. Leftover WAL/SHM
+        sidecars otherwise cause a 'disk I/O error' on the next open."""
+        removed = []
+        for p in (path, path.with_name(path.name + "-wal"),
+                  path.with_name(path.name + "-shm")):
+            if p.exists():
+                p.unlink()
+                removed.append(p.name)
+        return removed
+
     if args.reset:
-        if db_path.exists():
-            db_path.unlink()
-            print(f"Deleted: {db_path}")
-        else:
-            print(f"DB not found: {db_path} (nothing to delete)")
+        removed = _remove_db(db_path)
+        print(f"Deleted: {', '.join(removed)}" if removed
+              else f"DB not found: {db_path} (nothing to delete)")
         sys.exit(0)
+
+    # --scenario is an auto-play demonstration: start from a clean DB so it is
+    # reproducible and never accumulates state (duplicate claims/pendings) across runs.
+    if args.scenario:
+        _remove_db(db_path)
 
     # ── Open the engine (oracle-wired for HITL) ───────────────────────────────
     import mempill
