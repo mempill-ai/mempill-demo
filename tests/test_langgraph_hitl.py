@@ -26,7 +26,7 @@ from mempill import ProvenanceLabel
 from mempill_demo.adapters.human_oracle import HumanOracle
 from mempill_demo.adapters.memory_mempill import MempillMemoryStore
 from mempill_demo.app.review import run_review
-from mempill_langgraph.extraction import ClaimExtractResult, ExtractedClaim
+from mempill_langgraph.extraction import ClaimExtractResult, ExtractedClaim, KeyExtractResult
 from mempill_langgraph.graph import build_graph
 
 
@@ -202,6 +202,7 @@ def test_graph_with_oracle_store_no_conflict():
         memory_store=store,
         llm=fake_llm,
         extractor=lambda prompt: ClaimExtractResult(claims=[]),
+        key_extractor=lambda prompt: KeyExtractResult(subject="", predicate=""),
     )
 
     result = graph.invoke(
@@ -238,6 +239,7 @@ def test_graph_with_oracle_store_conflict_surfaces():
         memory_store=store,
         llm=fake_llm,
         extractor=lambda prompt: ClaimExtractResult(claims=[]),
+        key_extractor=lambda prompt: KeyExtractResult(subject="acme:ceo", predicate="held_by"),
     )
 
     result = graph.invoke(

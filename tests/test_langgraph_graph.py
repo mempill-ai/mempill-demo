@@ -22,7 +22,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 
 from mempill_demo.domain.models import AlternativeView, BeliefView
-from mempill_langgraph.extraction import ClaimExtractResult, ExtractedClaim
+from mempill_langgraph.extraction import ClaimExtractResult, ExtractedClaim, KeyExtractResult
 from mempill_langgraph.graph import build_graph
 
 from tests.fakes_langgraph import LGFakeMemoryStore
@@ -43,6 +43,17 @@ def _empty_extractor(prompt: str) -> ClaimExtractResult:
 def _claim_extractor(claims: list[ExtractedClaim]):
     """Extractor that returns a fixed list of claims regardless of prompt."""
     result = ClaimExtractResult(claims=claims)
+    return lambda prompt: result
+
+
+def _no_key_extractor(prompt: str) -> KeyExtractResult:
+    """Key extractor that returns empty key (greeting / no subject)."""
+    return KeyExtractResult(subject="", predicate="")
+
+
+def _fixed_key_extractor(subject: str, predicate: str):
+    """Key extractor that always returns the given canonical key."""
+    result = KeyExtractResult(subject=subject, predicate=predicate)
     return lambda prompt: result
 
 
@@ -87,6 +98,7 @@ def test_full_graph_contested_turn():
         memory_store=fake_store,
         llm=fake_llm,
         extractor=_empty_extractor,  # no new facts to extract
+        key_extractor=_fixed_key_extractor("acme:ceo", "held_by"),
     )
 
     result = graph.invoke(
@@ -130,6 +142,7 @@ def test_full_graph_greeting():
         memory_store=fake_store,
         llm=fake_llm,
         extractor=_empty_extractor,
+        key_extractor=_no_key_extractor,  # greeting → no subject/predicate
     )
 
     result = graph.invoke(
@@ -184,11 +197,14 @@ def test_full_graph_stated_fact_ingested_user_asserted():
         is_user_asserted=True,  # user-asserted: extracted from the human message
     )
 
-    # Use a fresh store so memory_context is empty (no recall reentry block)
+    # Use a fresh store so memory_context is empty (no recall reentry block).
+    # The user is making a statement, so the key_extractor returns empty
+    # (no fact to read — write path is what matters here).
     graph = build_graph(
         memory_store=fake_store,
         llm=fake_llm,
         extractor=_claim_extractor([extracted_claim]),
+        key_extractor=_no_key_extractor,
     )
 
     result = graph.invoke(
@@ -232,6 +248,7 @@ def test_full_graph_multi_turn_history_grows():
         llm=fake_llm,
         checkpointer=checkpointer,
         extractor=_empty_extractor,
+        key_extractor=_no_key_extractor,
     )
 
     config = {"configurable": {"thread_id": "multi-t1"}}
@@ -317,6 +334,7 @@ def test_conflicting_user_stated_claims_queue_adjudication():
         llm=fake_llm,
         checkpointer=checkpointer,
         extractor=_claim_extractor([alice_claim]),
+        key_extractor=_no_key_extractor,  # user is making a statement, not querying
     )
 
     config = {"configurable": {"thread_id": "conflict-adjudication-t1"}}
@@ -350,6 +368,7 @@ def test_conflicting_user_stated_claims_queue_adjudication():
         llm=fake_llm,
         checkpointer=checkpointer,
         extractor=_claim_extractor([bob_claim]),
+        key_extractor=_no_key_extractor,  # user is making a statement, not querying
     )
 
     graph_turn2.invoke(
@@ -376,12 +395,14 @@ def test_conflicting_user_stated_claims_queue_adjudication():
             f"Expected conflict-related status, got: {belief.status}"
         )
 
-    # Turn 3: a greeting → zero ingests (empty extractor path)
+    # Turn 3: a question turn → zero ingests (empty extractor path).
+    # Uses a fixed key extractor to query the same canonical key.
     graph_turn3 = build_graph(
         memory_store=store,
         llm=fake_llm,
         checkpointer=checkpointer,
         extractor=_empty_extractor,
+        key_extractor=_fixed_key_extractor("acme:ceo", "held_by"),
     )
 
     graph_turn3.invoke(
@@ -424,6 +445,7 @@ def test_real_engine_construction_offline():
         memory_store=real_store,
         llm=fake_llm,
         extractor=_empty_extractor,
+        key_extractor=_no_key_extractor,  # greeting — no subject to query
     )
 
     result = graph.invoke(
@@ -437,6 +459,106 @@ def test_real_engine_construction_offline():
 
     ai_content = result["messages"][-1].content
     assert ai_content, "Expected non-empty AI reply from real-engine offline test"
+
+
+# ── Test 7: Round-trip write→read using canonical key convention ──────────────
+
+def test_canonical_key_round_trip():
+    """
+    Proves that write_memory and retrieve_memory use the SAME canonical key.
+
+    Turn 1 (ingest): "Acme's CEO is Alice, effective 2020-01-01."
+      - fake extractor emits subject="acme:ceo", predicate="held_by", value="Alice"
+      - write_memory ingests this into the real oracle-wired store
+
+    Turn 2 (recall): "Who is Acme CEO?"  (note: NOT "CEO of Acme" — the variant
+      that used to fail with the regex reader)
+      - fake key_extractor emits subject="acme:ceo", predicate="held_by"
+      - retrieve_memory queries the store with the SAME key written in turn 1
+      - memory_context must contain "Alice" in a Resolved/CommittedCheap block
+
+    Both extractors are fake and deterministic — no live LLM needed.
+    """
+    import mempill
+    from mempill_demo.adapters.human_oracle import HumanOracle
+    from mempill_demo.adapters.memory_mempill import MempillMemoryStore
+
+    engine = mempill.open_oracle_in_memory(HumanOracle())
+    store = MempillMemoryStore(engine=engine, agent_id="round-trip-test")
+
+    checkpointer = MemorySaver()
+
+    # Turn 1: ingest Alice as Acme's CEO
+    alice_claim = ExtractedClaim(
+        subject="acme:ceo",
+        predicate="held_by",
+        value="Alice",
+        conf=0.9,
+        since="2020-01-01T00:00:00Z",
+        is_user_asserted=True,
+    )
+    reply_1 = AIMessage(content="Got it, I'll remember Alice is Acme's CEO.")
+    reply_2 = AIMessage(content="Alice is the CEO of Acme.")
+    fake_llm = _fake_llm(reply_1, reply_2)
+
+    graph_write = build_graph(
+        memory_store=store,
+        llm=fake_llm,
+        checkpointer=checkpointer,
+        extractor=_claim_extractor([alice_claim]),
+        # On the write turn, no prior memory to recall — question is a statement
+        key_extractor=_no_key_extractor,
+    )
+
+    config = {"configurable": {"thread_id": "round-trip-t1"}}
+
+    graph_write.invoke(
+        {
+            "messages": [HumanMessage(content="Acme's CEO is Alice, effective 2020-01-01.")],
+            "user_id": "u1",
+            "agent_id": "round-trip-test",
+        },
+        config=config,
+    )
+
+    # Verify write succeeded: direct recall with the canonical key
+    belief_after_write = store.recall("acme:ceo", "held_by")
+    assert belief_after_write.value == "Alice", (
+        f"Expected Alice stored under acme:ceo/held_by, got: {belief_after_write.value!r} "
+        f"(status={belief_after_write.status!r})"
+    )
+
+    # Turn 2: query "Who is Acme CEO?" — the variant the regex reader used to fail on.
+    # The fake key_extractor maps this to the SAME canonical key used above.
+    graph_read = build_graph(
+        memory_store=store,
+        llm=fake_llm,
+        checkpointer=checkpointer,
+        extractor=_empty_extractor,  # no new claims to write
+        key_extractor=_fixed_key_extractor("acme:ceo", "held_by"),
+    )
+
+    result = graph_read.invoke(
+        {"messages": [HumanMessage(content="Who is Acme CEO?")]},
+        config=config,
+    )
+
+    memory_ctx = result.get("memory_context", "")
+
+    # The recalled memory must mention Alice (Resolved or CommittedCheap)
+    assert "Alice" in memory_ctx, (
+        f"Round-trip FAILED: 'Alice' not found in memory_context.\n"
+        f"memory_context={memory_ctx!r}\n"
+        f"This means the read key did not match the write key."
+    )
+    assert "NO_BELIEF" not in memory_ctx, (
+        f"Round-trip FAILED: got NO_BELIEF — key mismatch or ingest did not commit.\n"
+        f"memory_context={memory_ctx!r}"
+    )
+
+    # AI reply should reference Alice
+    ai_content = result["messages"][-1].content
+    assert ai_content, "Expected non-empty AI reply"
 
 
 # ── Live smoke test (skipped without API key) ─────────────────────────────────

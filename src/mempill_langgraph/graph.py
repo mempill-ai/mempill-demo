@@ -12,7 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.store.memory import InMemoryStore
 
 from mempill_demo.ports.memory import MemoryStore
-from mempill_langgraph.extraction import ClaimExtractResult
+from mempill_langgraph.extraction import ClaimExtractResult, KeyExtractResult
 from mempill_langgraph.nodes import make_nodes
 from mempill_langgraph.state import AgentState
 
@@ -22,6 +22,7 @@ def build_graph(
     llm: Any,
     checkpointer: Optional[Any] = None,
     extractor: Optional[Callable[[str], ClaimExtractResult]] = None,
+    key_extractor: Optional[Callable[[str], KeyExtractResult]] = None,
 ):
     """
     Construct and compile the mempill LangGraph conversational agent.
@@ -36,7 +37,12 @@ def build_graph(
         checkpointer: Optional LangGraph checkpointer for multi-turn history.
                       Defaults to a new MemorySaver() if not provided.
         extractor: Optional callable (str -> ClaimExtractResult) to override the
-                   default llm.with_structured_output binding. Used in offline tests.
+                   default llm.with_structured_output binding for write_memory.
+                   Used in offline tests.
+        key_extractor: Optional callable (str -> KeyExtractResult) to override the
+                       default LLM-backed canonical key extractor for retrieve_memory.
+                       Uses the SAME canonical key convention as extractor.
+                       Used in offline tests.
 
     Returns:
         Compiled StateGraph ready for invocation.
@@ -45,6 +51,7 @@ def build_graph(
         memory_store=memory_store,
         llm=llm,
         extractor=extractor,
+        key_extractor=key_extractor,
     )
 
     builder = StateGraph(AgentState)
