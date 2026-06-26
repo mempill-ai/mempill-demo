@@ -9,7 +9,7 @@ import logging
 import re
 from typing import Any, Callable, Optional
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.store.base import BaseStore
 
@@ -171,31 +171,36 @@ def make_nodes(
 
     def write_memory(state: AgentState) -> dict:
         """
-        Extract new factual claims from the latest AI reply using structured output
-        and ingest each into the MemoryStore with mapped provenance.
+        Extract new factual claims from the latest human/user message using structured
+        output and ingest each into the MemoryStore with mapped provenance.
+
+        Extraction source is the USER's message (not the AI reply) so that:
+        - Facts the user stated are ingested as UserAsserted (External) provenance.
+        - The AI restating previously-recalled facts cannot create duplicate ingests.
+        - HITL /review fires correctly for conflicting user-stated facts.
 
         Returns {} (no state mutation) — this is a side-effect-only node.
         """
         messages = state.get("messages", [])
-        last_ai_content = ""
+        last_human_content = ""
         for msg in reversed(messages):
-            if isinstance(msg, AIMessage):
-                last_ai_content = msg.content or ""
+            if isinstance(msg, HumanMessage):
+                last_human_content = msg.content or ""
                 break
-            if msg.__class__.__name__ == "AIMessage":
-                last_ai_content = msg.content or ""
+            if msg.__class__.__name__ == "HumanMessage":
+                last_human_content = msg.content or ""
                 break
 
-        if not last_ai_content:
+        if not last_human_content:
             return {}
 
-        # Recall re-entry firewall: if the AI reply merely restates the primary
+        # Recall re-entry firewall: if the user message merely restates the primary
         # value from memory_context, treat as RECALL_REENTRY, not INGEST.
         memory_context = state.get("memory_context", "")
 
         try:
             result: ClaimExtractResult = _extractor_llm(
-                EXTRACTION_PROMPT.format(assistant_message=last_ai_content)
+                EXTRACTION_PROMPT.format(user_message=last_human_content)
             )
         except Exception as exc:
             # Never crash write_memory — graceful no-op on extraction failure
@@ -215,7 +220,11 @@ def make_nodes(
                 continue
 
             kind = CommandKind.INGEST
-            provenance_str = "UserAsserted" if claim.is_user_asserted else "ModelDerived"
+            # Claims extracted from the user's own message are always UserAsserted —
+            # the user is the source of truth for what they stated directly.
+            # This maps to prov={'type':'External','kind':'UserAsserted'} in the engine,
+            # ensuring conflicts trigger QueuedForAdjudication (HITL /review).
+            provenance_str = "UserAsserted"
 
             cmd = ParsedCommand(
                 kind=kind,
