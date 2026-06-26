@@ -93,7 +93,9 @@ config = {"configurable": {"thread_id": thread_id}}
 print()
 print("mempill LangGraph Agent")
 print(f"Model: {_MODEL}  |  User: {_USER_ID}  |  Thread: {thread_id}")
-print("Type 'quit', 'exit', or 'q' to exit.  Type '/review' to resolve conflicts.")
+print("Type 'quit', 'exit', or 'q' to exit.")
+print("Conflicts are resolved conversationally — just answer when the agent asks which is correct.")
+print("Advanced commands (optional): /review  /reconcile  /sweep")
 print()
 
 _first_turn = True
@@ -125,6 +127,33 @@ while True:
             print("[/sweep] No expired adjudications to sweep.")
         continue
 
+    # ── /reconcile command — resolve a Contested subject line via the reconciler ──
+    # Use this for a belief that is Contested but has no pending adjudication (e.g. two
+    # claims that each only conflicted with a third). /review handles the oracle queue;
+    # /reconcile re-runs the conflict classifier (valid-time succession etc.) on a line.
+    if user_input.lower().startswith("/reconcile"):
+        parts = user_input.split()
+        if len(parts) >= 3:
+            subj, pred = parts[1], parts[2]
+        else:
+            last = memory_store.last_recalled()
+            subj, pred = last if last else (None, None)
+        if not subj:
+            print("[/reconcile] No subject line yet — ask about a fact first, "
+                  "or use: /reconcile <subject> <predicate>")
+            continue
+        outcomes = memory_store.reconcile(subj, pred)
+        if outcomes:
+            print(f"[/reconcile] {subj} / {pred} — {len(outcomes)} outcome(s):")
+            for o in outcomes:
+                print(f"  {o.claim_ref[:8]}… → {o.disposition}")
+        else:
+            print(f"[/reconcile] {subj} / {pred}: nothing to reconcile.")
+        b = memory_store.recall(subj, pred)
+        current = b.value if b.value is not None else [a.value for a in b.alternatives]
+        print(f"  → now: status={b.status}  belief={current}")
+        continue
+
     invoke_payload: dict = {"messages": [HumanMessage(content=user_input)]}
     # Supply user_id and agent_id on the first turn only; checkpointer restores them thereafter.
     if _first_turn:
@@ -146,4 +175,4 @@ while True:
     _pending = memory_store.list_pending()
     if _pending:
         n = len(_pending)
-        print(f"[!] {n} unresolved conflict(s) — type /review to resolve.")
+        print(f"[!] {n} unresolved conflict(s) — just tell me which is correct (or /review).")

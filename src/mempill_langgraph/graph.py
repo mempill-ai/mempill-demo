@@ -12,7 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.store.memory import InMemoryStore
 
 from mempill_demo.ports.memory import MemoryStore
-from mempill_langgraph.extraction import ClaimExtractResult, KeyExtractResult
+from mempill_langgraph.extraction import ClaimExtractResult, DecisionClassifyResult, KeyExtractResult
 from mempill_langgraph.nodes import make_nodes
 from mempill_langgraph.state import AgentState
 
@@ -23,6 +23,7 @@ def build_graph(
     checkpointer: Optional[Any] = None,
     extractor: Optional[Callable[[str], ClaimExtractResult]] = None,
     key_extractor: Optional[Callable[[str], KeyExtractResult]] = None,
+    decision_classifier: Optional[Callable[[str], DecisionClassifyResult]] = None,
 ):
     """
     Construct and compile the mempill LangGraph conversational agent.
@@ -43,6 +44,9 @@ def build_graph(
                        default LLM-backed canonical key extractor for retrieve_memory.
                        Uses the SAME canonical key convention as extractor.
                        Used in offline tests.
+        decision_classifier: Optional callable (str -> DecisionClassifyResult) to
+                             override the default LLM-backed decision classifier used
+                             for conversational adjudication.  Used in offline tests.
 
     Returns:
         Compiled StateGraph ready for invocation.
@@ -52,6 +56,7 @@ def build_graph(
         llm=llm,
         extractor=extractor,
         key_extractor=key_extractor,
+        decision_classifier=decision_classifier,
     )
 
     builder = StateGraph(AgentState)

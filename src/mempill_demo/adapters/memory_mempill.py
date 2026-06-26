@@ -85,6 +85,9 @@ class MempillMemoryStore:
         # Needed because audit entries carry claim_ref but NOT subject/predicate/value.
         self._registry: dict[str, ClaimMeta] = {}
         self._stats = SessionStats()
+        # The (subject, predicate) of the most recent recall — lets /reconcile target
+        # the line the user was just asking about without re-typing it.
+        self._last_recalled: "Optional[tuple[str, str]]" = None
 
     @property
     def stats(self) -> SessionStats:
@@ -192,7 +195,13 @@ class MempillMemoryStore:
             "← status=%s primary=%r alternatives=%r",
             status, primary_val, alts,
         )
+        if subject and predicate:
+            self._last_recalled = (subject, predicate)
         return self._map_belief(resp, subject, predicate)
+
+    def last_recalled(self) -> "Optional[tuple[str, str]]":
+        """The (subject, predicate) of the most recent recall — used by /reconcile."""
+        return self._last_recalled
 
     def reconcile(self, subject: str, predicate: str) -> list[ReconcileOutcome]:
         """Run reconciliation; return list of ReconcileOutcome domain objects."""
