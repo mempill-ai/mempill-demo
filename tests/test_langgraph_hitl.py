@@ -26,8 +26,14 @@ from mempill import ProvenanceLabel
 from mempill_demo.adapters.human_oracle import HumanOracle
 from mempill_demo.adapters.memory_mempill import MempillMemoryStore
 from mempill_demo.app.review import run_review
-from mempill_langgraph.extraction import ClaimExtractResult, ExtractedClaim, KeyExtractResult
+from mempill_langgraph.extraction import ClaimExtractResult, DecisionClassifyResult, ExtractedClaim, KeyExtractResult
 from mempill_langgraph.graph import build_graph
+
+
+def _fixed_decision_classifier(verdict: str):
+    """Return a decision classifier that always emits the given verdict."""
+    result = DecisionClassifyResult(verdict=verdict)
+    return lambda prompt: result
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -235,11 +241,15 @@ def test_graph_with_oracle_store_conflict_surfaces():
     fake_reply = AIMessage(content="I have conflicting information about the CEO.")
     fake_llm = FakeMessagesListChatModel(responses=[fake_reply])
 
+    # decision_classifier=neither: "Who is the CEO?" is a fresh query, not a verdict pick.
+    # Without this, the new engine-correlation gate would invoke llm.with_structured_output()
+    # on FakeMessagesListChatModel (which raises NotImplementedError).
     graph = build_graph(
         memory_store=store,
         llm=fake_llm,
         extractor=lambda prompt: ClaimExtractResult(claims=[]),
         key_extractor=lambda prompt: KeyExtractResult(subject="acme:ceo", predicate="held_by"),
+        decision_classifier=_fixed_decision_classifier("neither"),
     )
 
     result = graph.invoke(
