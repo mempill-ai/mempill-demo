@@ -2,7 +2,7 @@
 
 A runnable demonstration of mempill's temporal-validity memory engine and its MCP integration. Runs entirely offline — no LLM, no vector DB, no network. All intelligence is structural.
 
-**Honest status:** this demo uses the local mempill wheel built from the private sibling repo (`mempill/`). It depends on an unpublished Rust/PyO3 package built via maturin. The demo will not run without the sibling repo present (see layout below).
+**Honest status:** `mempill` is published on PyPI. The console + LangGraph demos run with just `pip install` — no Rust, no sibling repo required. The **MCP integration** additionally needs the sibling `../mempill/mempill-mcp/` (pure Python, not yet on PyPI), but that part is optional.
 
 ---
 
@@ -31,22 +31,20 @@ mempill-demo/             ← this repo
   README.md
   .gitignore
 
-../mempill/               ← sibling repo (required; not included here)
-  mempill-python/         # Rust/PyO3 wheel source
-  mempill-mcp/            # FastMCP server (pure Python)
+../mempill/               ← sibling repo (optional — only needed for the MCP demo)
+  mempill-mcp/            # FastMCP server (pure Python, not on PyPI)
 ```
 
-The two repos must be checked out side by side under the same parent directory.
+The sibling repo is only needed for the MCP demo. The console + LangGraph demos run without it.
 
 ---
 
 ## Prerequisites
 
-- **Rust toolchain** (stable): https://rustup.rs
 - **Python 3.11+**
 - **uv** (Python package manager): https://docs.astral.sh/uv/
 
-Rust is required to build the mempill wheel (Rust/PyO3 via maturin). The build happens automatically during setup via PEP-517.
+No Rust toolchain required. `mempill` ships as a prebuilt wheel on PyPI. The optional MCP demo additionally needs the sibling `../mempill/mempill-mcp/` repo, but `mempill-mcp` is pure Python — still no Rust.
 
 ---
 
@@ -59,18 +57,21 @@ bash scripts/setup.sh
 
 The setup script:
 1. Creates a `.venv` (if absent)
-2. Builds and installs the mempill wheel from `../mempill/mempill-python/` (PEP-517 / maturin — ~1-2 min on first run)
-3. Installs `mempill-mcp` (editable) from `../mempill/mempill-mcp/`
-4. Installs `mcp>=1.9,<2`
-5. Installs `mempill-demo` (editable)
-6. Installs LangGraph conversational-agent dependencies by DEFAULT
+2. Installs `mempill-demo` (editable) — `mempill` is pulled from PyPI automatically
+3. Installs LangGraph conversational-agent dependencies by DEFAULT
+4. Installs `mempill-mcp` (editable) from `../mempill/mempill-mcp/` **if the sibling repo is present** — otherwise prints a notice and continues successfully
 
 For a lean install without LangGraph:
 ```bash
 SKIP_LANGGRAPH=true bash scripts/setup.sh
 ```
 
-Verify the install:
+Verify the core install:
+```bash
+uv run python -c "import mempill, mcp; print('imports OK')"
+```
+
+Verify with MCP (only if sibling repo was present during setup):
 ```bash
 uv run python -c "import mempill, mempill_mcp, mcp; print('imports OK')"
 ```
@@ -101,7 +102,7 @@ Exit code 0 = success. Use `--verify` flag for CI-friendly exit code mode.
 
 ### Connect to Claude Desktop
 
-The config uses the demo venv's Python directly (not `uv run`) because `mempill-mcp` depends on the locally-built mempill wheel which is not on PyPI.
+The config uses the demo venv's Python directly (not `uv run`) because `mempill-mcp` is path-installed from the sibling repo and is not on PyPI.
 
 1. Copy `mcp/claude_desktop_config.json.example` to:
    - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
