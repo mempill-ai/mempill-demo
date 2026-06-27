@@ -43,9 +43,9 @@ async def verify() -> None:
             "Expected layout: ../mempill/mempill-mcp/ (sibling of this repo)"
         )
 
-    # Use the demo venv's Python directly so we share the already-built mempill
-    # wheel. Using `uv run --project mempill-mcp` would create a NEW venv for that
-    # project and fail to find the unpublished mempill wheel (not on PyPI).
+    # Use the demo venv's Python directly so we share the path-installed mempill-mcp
+    # package. Using `uv run --project mempill-mcp` would create a NEW venv for that
+    # project and fail to find mempill-mcp (not on PyPI).
     demo_python = DEMO_DIR / ".venv" / "bin" / "python"
     if not demo_python.exists():
         raise RuntimeError(

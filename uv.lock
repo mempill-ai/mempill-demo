@@ -687,12 +687,26 @@ wheels = [
 ]
 
 [[package]]
+name = "mempill"
+version = "0.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c1/23/41275d986f1da55f46ef3b57589525c236a1f8c0abb68d1ca4d123e7cee6/mempill-0.2.1.tar.gz", hash = "sha256:9efc1a1b84f125fb908f518b869db6bf7be7cca8b3f273a900aed550f7efcebc", size = 270840, upload-time = "2026-06-27T14:25:26.881Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/45/b5/e60b1a27d698a16749b01fd7dd473fa5dc57993c3174a94cd64412076a5e/mempill-0.2.1-cp311-abi3-macosx_10_12_x86_64.whl", hash = "sha256:692fe5b3fbe9e6c6290efe2fb216e40f4792da8ef4723fb9473ddd68699270dd", size = 1923780, upload-time = "2026-06-27T14:25:18.927Z" },
+    { url = "https://files.pythonhosted.org/packages/10/c8/0c192d5d932427ac14f5229157e7754380b440e7cc5b12bd6abffa86cf94/mempill-0.2.1-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:8ced1baf86efaadd1a344708b815509a11b283af9148b4d7d0e325a8c7d1f1fd", size = 1859573, upload-time = "2026-06-27T14:25:20.989Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/6e/e10e6fdbc92e66cbd955e6ff3e3a550d6657df4812f8eaeba8559f386fa4/mempill-0.2.1-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2ea31cdae5b3f0932a715c13a5ae7ceb6763ffbbbe8b884f364d394de8b4ca8a", size = 1923599, upload-time = "2026-06-27T14:25:22.603Z" },
+    { url = "https://files.pythonhosted.org/packages/3f/8c/0acdc072376a399ff76f20be55c3ad2d72b3004b714bbd1c39a2e8e907bf/mempill-0.2.1-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:dbc63a5a7f466b1131192f74619f41565d10289347e4b93757ab6245b6c85084", size = 2056642, upload-time = "2026-06-27T14:25:24.146Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/a4/56e8186edf59fb63b3cbd5c6077864a6b66fed109350d104bb4991d96a33/mempill-0.2.1-cp311-abi3-win_amd64.whl", hash = "sha256:f1e9df40538ea3aadd093c1752d0c339496aec2846bc487d96a6728ed2e8a512", size = 1750073, upload-time = "2026-06-27T14:25:25.434Z" },
+]
+
+[[package]]
 name = "mempill-demo"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "mcp" },
+    { name = "mempill" },
     { name = "python-dotenv" },
     { name = "rich" },
 ]
@@ -713,6 +727,7 @@ requires-dist = [
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.2.6,<2" },
     { name = "langgraph-prebuilt", marker = "extra == 'langgraph'", specifier = ">=1.1.0,<2" },
     { name = "mcp", specifier = ">=1.9,<2" },
+    { name = "mempill", specifier = ">=0.2.1,<0.3" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "rich", specifier = ">=13" },
 ]
