@@ -59,5 +59,6 @@ class AgentState(MessagesState):
     pending_decision: Optional[PendingDecision] # set when awaiting user's pick between contested values
     contested: Optional[ContestedInfo]          # set on ANY contested turn; drives LLM bypass in respond
     _decision_turn: bool                        # True when the user's message was a decision answer (write guard)
+    _resolved_reply: Optional[str]              # deterministic resolution text from queue-driven adjudication; respond uses it directly
     last_subject: Optional[str]                 # canonical subject from the most-recent resolved key (for follow-up turns)
     last_predicate: Optional[str]               # canonical predicate from the most-recent resolved key (for follow-up turns)

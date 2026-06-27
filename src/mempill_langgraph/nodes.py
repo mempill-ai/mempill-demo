@@ -148,12 +148,24 @@ def make_nodes(
            IMPORTANT: when we process a decision-turn, set a flag so write_memory
            does NOT ingest the user's short answer as a new claim.
 
+        1b. QUEUE-DRIVEN ADJUDICATION: After extracting (subject, predicate) for the
+            current message, probe list_pending() to find an active pending adjudication
+            for this subject — even if pending_decision was NOT pre-seeded in state.
+            This handles the normal ingest-born conflict case: the prior turn's
+            write_memory returned QueuedForAdjudication but retrieve_memory never
+            set pending_decision because the conflict was born after recall.
+            When a matching pending item is found AND the belief is Contested/
+            QueuedForAdjudication, run the same verdict classification and submit.
+            This fires BEFORE auto-reconcile so a human verdict always wins.
+
         2. Extract (subject, predicate) from the latest human message and recall.
 
         3. AUTO-RECONCILE (silent, deterministic): if belief.status == "Contested",
            call memory_store.reconcile(subject, predicate) then recall again.
            Valid-time succession (most-recent wins) resolves the line without any
            user action.  Only a genuine tie remains Contested after this step.
+           SKIPPED when an unresolved pending adjudication for this subject exists —
+           a human verdict must never be overridden by valid-time succession.
 
         4. CONVERSATIONAL ADJUDICATION (residual tie): if, after auto-reconcile,
            the belief is STILL Contested AND list_pending() has an entry for this
@@ -203,20 +215,32 @@ def make_nodes(
                     log.warning("conversational adjudication submit failed: %s", exc)
 
                 # Recall the freshly-resolved belief
+                resolved_value_step1: Optional[str] = None
                 try:
                     resolved_belief = memory_store.recall(dec_subject, dec_predicate)
+                    resolved_value_step1 = resolved_belief.value or (
+                        inc_val if verdict_result == "incumbent" else chal_val
+                    )
                     memory_context = _format_belief(resolved_belief)
                 except Exception:
+                    resolved_value_step1 = inc_val if verdict_result == "incumbent" else chal_val
                     memory_context = NO_BELIEF_BLOCK.format(
                         subject=dec_subject, predicate=dec_predicate,
                     )
 
-                # Clear pending_decision; mark this turn as a decision turn so
-                # write_memory does not ingest the user's short pick as a new claim.
+                det_reply_step1 = (
+                    f'✅ Resolved: "{dec_subject}/{dec_predicate}" is now {resolved_value_step1}.'
+                )
+
+                # Clear pending_decision and contested; mark this turn as a decision
+                # turn so write_memory does not ingest the user's short pick as a claim.
+                # _resolved_reply carries the deterministic reply so respond bypasses LLM.
                 return {
                     "memory_context": memory_context,
                     "pending_decision": None,
+                    "contested": None,
                     "_decision_turn": True,  # consumed by write_memory guard
+                    "_resolved_reply": det_reply_step1,
                 }
             else:
                 # User said "neither" or off-topic — leave pending, proceed normally
@@ -237,15 +261,99 @@ def make_nodes(
 
         if not subject or not predicate:
             # No subject from this turn AND no carry-over — genuine greeting / small-talk
-            return {"memory_context": EMPTY_BLOCK}
+            return {"memory_context": EMPTY_BLOCK, "_resolved_reply": None, "_decision_turn": False}
 
         try:
             belief = memory_store.recall(subject, predicate)
         except Exception:
-            return {"memory_context": NO_BELIEF_BLOCK.format(subject=subject, predicate=predicate)}
+            return {
+                "memory_context": NO_BELIEF_BLOCK.format(subject=subject, predicate=predicate),
+                "_resolved_reply": None,
+                "_decision_turn": False,
+            }
+
+        # ── Step 1b: Queue-driven adjudication (pending_decision NOT in state) ─
+        # Handles the ingest-born conflict case: write_memory created a pending
+        # adjudication AFTER retrieve_memory ran on the prior turn, so pending_decision
+        # was never set in state.  We probe list_pending() now (after recall, so we
+        # have the belief candidates to correlate against).
+        #
+        # GATE: engine-truth + classifier (wording-independent).
+        # Step 1b fires when ALL of:
+        #   (a) Step 1 did NOT already handle a state-based pending_decision, AND
+        #   (b) _find_pending_for_subject() returns a correlated pending item for the
+        #       CURRENT subject — i.e. the engine actually has an unresolved adjudication
+        #       whose incumbent/challenger values match this belief's candidates.
+        # This correlation IS the reliable signal that the current turn concerns a
+        # contested subject — no prior-message wording check is needed.
+        #
+        # The classifier handles the "fresh query misread as verdict" concern:
+        # if the user's message is not a verdict answer, the classifier returns "neither"
+        # and we fall through without submitting (re-surfacing the conflict instead).
+        _has_unresolved_pending_from_queue = False
+        queue_pending = _find_pending_for_subject(memory_store, belief) if existing_decision is None and latest_human else None
+        if queue_pending is not None:
+            # A pending adjudication exists for this subject.
+            inc_val = queue_pending["incumbent_value"]
+            chal_val = queue_pending["challenger_value"]
+            handle_id = queue_pending["handle_id"]
+
+            verdict_result = _classify_decision(
+                latest_human,
+                inc_val,
+                chal_val,
+                _get_decision_classifier(),
+            )
+            if verdict_result in ("challenger", "incumbent"):
+                engine_verdict = "Affirm" if verdict_result == "challenger" else "Deny"
+                try:
+                    memory_store.submit(handle_id, engine_verdict)
+                    log.info(
+                        "queue-driven adjudication: %s/%s → %s (verdict=%s, handle=%s)",
+                        subject, predicate, verdict_result, engine_verdict, handle_id,
+                    )
+                except Exception as exc:
+                    log.warning("queue-driven adjudication submit failed: %s", exc)
+
+                # Recall the freshly-resolved belief and return deterministically.
+                # Auto-reconcile is skipped — the human verdict IS the resolution.
+                try:
+                    resolved_belief = memory_store.recall(subject, predicate)
+                    resolved_value = resolved_belief.value or (
+                        inc_val if verdict_result == "incumbent" else chal_val
+                    )
+                    memory_context = _format_belief(resolved_belief)
+                except Exception:
+                    resolved_value = inc_val if verdict_result == "incumbent" else chal_val
+                    memory_context = NO_BELIEF_BLOCK.format(subject=subject, predicate=predicate)
+
+                det_reply = (
+                    f'✅ Resolved: "{subject}/{predicate}" is now {resolved_value}.'
+                )
+                return {
+                    "memory_context": memory_context,
+                    "pending_decision": None,
+                    "_decision_turn": True,
+                    "_resolved_reply": det_reply,
+                    "last_subject": subject,
+                    "last_predicate": predicate,
+                }
+            else:
+                # "neither" / off-topic — surface the conflict again; fall through
+                # to Step 3/4.  Flag the unresolved pending so Step 3 skips
+                # auto-reconcile (human verdict must not be replaced by succession).
+                log.info(
+                    "queue-driven adjudication: user said 'neither' for %s/%s — re-surfacing",
+                    subject, predicate,
+                )
+                _has_unresolved_pending_from_queue = True
 
         # ── Step 3: Auto-reconcile (silent, deterministic) ────────────────────
-        if belief.status in ("Contested", "Conflict"):
+        # GUARD: skip auto-reconcile when an unresolved pending adjudication for this
+        # subject exists — a human verdict must never be overridden by valid-time
+        # succession.  _has_unresolved_pending_from_queue is True only when Step 1b
+        # found a pending item and the user said "neither" (fall-through path).
+        if belief.status in ("Contested", "Conflict") and not _has_unresolved_pending_from_queue:
             try:
                 memory_store.reconcile(subject, predicate)
                 belief = memory_store.recall(subject, predicate)
@@ -255,6 +363,11 @@ def make_nodes(
                 )
             except Exception as exc:
                 log.warning("auto-reconcile failed for %s/%s: %s", subject, predicate, exc)
+        elif belief.status in ("Contested", "Conflict") and _has_unresolved_pending_from_queue:
+            log.info(
+                "auto-reconcile SKIPPED for %s/%s — unresolved pending adjudication present",
+                subject, predicate,
+            )
 
         # ── Step 3b: Timeline injection ───────────────────────────────────────
         # Fetch the full ordered history for this (subject, predicate) and append a
@@ -346,6 +459,9 @@ def make_nodes(
             "memory_context": memory_context,
             "last_subject": subject,
             "last_predicate": predicate,
+            # Clear verdict-turn state so it doesn't bleed into subsequent turns.
+            "_resolved_reply": None,
+            "_decision_turn": False,
         }
         if new_pending is not None:
             result["pending_decision"] = new_pending
@@ -374,6 +490,14 @@ def make_nodes(
         For all other turns, the LLM is invoked normally with the full message
         history + memory context as a SystemMessage prefix.
         """
+        # Path 0: queue-driven resolution turn — retrieve_memory already submitted the
+        # verdict and stored the deterministic reply in _resolved_reply.  Return it
+        # directly; skip LLM entirely so the response can never echo the wrong name.
+        resolved_reply: Optional[str] = state.get("_resolved_reply")
+        if resolved_reply:
+            log.info("respond: deterministic resolution reply (queue-driven path, LLM bypassed)")
+            return {"messages": [AIMessage(content=resolved_reply)]}
+
         pending: Optional[dict] = state.get("pending_decision")
         if pending is not None:
             # Path 1: adjudication-correlated contested turn — render from pending pair.
@@ -659,3 +783,66 @@ def _is_recall_reentry(subject: str, predicate: str, value: str, memory_context:
         if value.lower() in context_lower:
             return True
     return False
+
+
+def _find_pending_for_subject(memory_store: Any, belief: Any) -> Optional[dict]:
+    """
+    Probe the engine's pending queue for an adjudication item whose
+    incumbent_value or challenger_value correlates to the candidates in the
+    given belief.
+
+    Correlation heuristic: any pending item whose incumbent_value or
+    challenger_value appears among the belief's value/alternatives is a match.
+    This is the same value-matching strategy that Step 4 uses to build
+    PendingDecision — extracted here so Step 1b can reuse it.
+
+    Returns the first matching pending item dict, or None when no match is found
+    (or list_pending() is not implemented / raises).
+
+    Guarded by try/except AttributeError so base MemoryStore implementations
+    (which lack list_pending()) do not crash.
+    """
+    try:
+        pending_list = memory_store.list_pending()
+    except AttributeError:
+        return None
+    except Exception as exc:
+        log.warning("_find_pending_for_subject: list_pending failed: %s", exc)
+        return None
+
+    if not pending_list:
+        return None
+
+    # Collect all candidate values from the belief (primary + alternatives).
+    candidate_values: set[str] = set()
+    if belief.value is not None:
+        candidate_values.add(str(belief.value).lower())
+    for alt in (belief.alternatives or []):
+        if alt.value is not None:
+            candidate_values.add(str(alt.value).lower())
+
+    for item in pending_list:
+        inc_val = item.get("incumbent_value")
+        chal_val = item.get("challenger_value")
+        handle_id = item.get("handle_id", "")
+        if not (inc_val and chal_val and handle_id):
+            continue
+        # Match when either candidate appears in the belief's known values.
+        # Also match when the pending queue is non-empty and the belief itself
+        # is in a contested/queued state — any pending item is a candidate when
+        # no belief value is known yet (QueuedForAdjudication with no primary).
+        inc_lower = str(inc_val).lower()
+        chal_lower = str(chal_val).lower()
+        if (
+            inc_lower in candidate_values
+            or chal_lower in candidate_values
+            or (not candidate_values and belief.status in (
+                "Contested", "Conflict", "QueuedForAdjudication", "TimingUncertain"
+            ))
+        ):
+            return {
+                "handle_id": handle_id,
+                "incumbent_value": str(inc_val),
+                "challenger_value": str(chal_val),
+            }
+    return None

@@ -22,10 +22,16 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 
 from mempill_demo.domain.models import AlternativeView, BeliefView, TimelineEntry
-from mempill_langgraph.extraction import ClaimExtractResult, ExtractedClaim, KeyExtractResult
+from mempill_langgraph.extraction import ClaimExtractResult, DecisionClassifyResult, ExtractedClaim, KeyExtractResult
 from mempill_langgraph.graph import build_graph
 
 from tests.fakes_langgraph import LGFakeMemoryStore
+
+
+def _fixed_decision_classifier(verdict: str):
+    """Return a decision classifier that always emits the given verdict."""
+    result = DecisionClassifyResult(verdict=verdict)
+    return lambda prompt: result
 
 
 # ── Shared fake responses ─────────────────────────────────────────────────────
@@ -397,12 +403,16 @@ def test_conflicting_user_stated_claims_queue_adjudication():
 
     # Turn 3: a question turn → zero ingests (empty extractor path).
     # Uses a fixed key extractor to query the same canonical key.
+    # decision_classifier=neither: fresh query "Who is CEO?" is not a verdict pick;
+    # Step 1b fires (pending may exist) but "neither" prevents submit, re-surfacing
+    # the conflict correctly without crashing on FakeMessagesListChatModel.
     graph_turn3 = build_graph(
         memory_store=store,
         llm=fake_llm,
         checkpointer=checkpointer,
         extractor=_empty_extractor,
         key_extractor=_fixed_key_extractor("acme:ceo", "held_by"),
+        decision_classifier=_fixed_decision_classifier("neither"),
     )
 
     graph_turn3.invoke(
