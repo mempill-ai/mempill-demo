@@ -226,7 +226,8 @@ def make_nodes(
                 )
 
         # ── Step 2: Normal recall ─────────────────────────────────────────────
-        subject, predicate = _extract_canonical_key(latest_human, _key_extractor_llm)
+        conversation_context = _build_conversation_context(messages, latest_human)
+        subject, predicate = _extract_canonical_key(latest_human, _key_extractor_llm, conversation_context)
 
         if not subject or not predicate:
             # Key was not freshly extracted — try to fall back to the last resolved key
@@ -462,9 +463,15 @@ def make_nodes(
         # value from memory_context, treat as RECALL_REENTRY, not INGEST.
         memory_context = state.get("memory_context", "")
 
+        # Build conversation context for the claim extractor (same approach as retrieve_memory).
+        write_conversation_context = _build_conversation_context(messages, last_human_content)
+
         try:
             result: ClaimExtractResult = _extractor_llm(
-                EXTRACTION_PROMPT.format(user_message=last_human_content)
+                EXTRACTION_PROMPT.format(
+                    context=write_conversation_context,
+                    user_message=last_human_content,
+                )
             )
         except Exception as exc:
             # Never crash write_memory — graceful no-op on extraction failure
@@ -576,20 +583,59 @@ def _make_default_key_extractor(llm: Any) -> Callable[[str], KeyExtractResult]:
     return _extract_key
 
 
+def _build_conversation_context(
+    messages: list,
+    current_message: str,
+    max_messages: int = 6,
+    max_chars_per_message: int = 200,
+) -> str:
+    """
+    Build a short recent-conversation transcript from state messages, excluding
+    the current message being extracted.  Used to give both extractors enough
+    context to compose canonical keys across turns (e.g. "Who is a CEO?" + "the
+    company is Acme" → acme:ceo).
+
+    Returns an empty string when there is no prior context to include.
+    """
+    context_lines: list[str] = []
+    prior_messages = [
+        m for m in messages
+        if (m.content if hasattr(m, "content") else "") != current_message
+    ]
+    # Take up to the last `max_messages` prior messages
+    for msg in prior_messages[-max_messages:]:
+        content = (msg.content or "") if hasattr(msg, "content") else ""
+        # Truncate long messages
+        if len(content) > max_chars_per_message:
+            content = content[:max_chars_per_message] + "..."
+        msg_type = getattr(msg, "type", None) or msg.__class__.__name__
+        if msg_type == "human" or msg_type == "HumanMessage":
+            context_lines.append(f"User: {content}")
+        elif msg_type == "ai" or msg_type == "AIMessage":
+            context_lines.append(f"Assistant: {content}")
+    return "\n".join(context_lines)
+
+
 def _extract_canonical_key(
     text: str,
     key_extractor_fn: Callable[[str], KeyExtractResult],
+    context: str = "",
 ) -> tuple[Optional[str], Optional[str]]:
     """
     Use the injected key_extractor_fn to derive the canonical (subject, predicate)
     for a user question.  Returns (None, None) when no key is identifiable
     (greeting, small-talk, or extractor failure).
+
+    The `context` string is a recent-conversation transcript inserted into the
+    prompt so the extractor can compose cross-turn canonical keys (e.g. a prior
+    turn asked about a CEO role; the current turn supplies the organization).
+    The seam callable still receives a single `str` prompt — no signature change.
     """
     if not text or not text.strip():
         return None, None
     try:
         result: KeyExtractResult = key_extractor_fn(
-            KEY_EXTRACTION_PROMPT.format(user_question=text)
+            KEY_EXTRACTION_PROMPT.format(context=context, user_question=text)
         )
         subject = (result.subject or "").strip().lower() or None
         predicate = (result.predicate or "").strip().lower() or None
