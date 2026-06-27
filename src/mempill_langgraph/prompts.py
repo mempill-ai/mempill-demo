@@ -92,12 +92,21 @@ Return an empty claims list for: greetings, questions, expressions of uncertaint
 Do NOT extract claims framed as contested, uncertain, or that are merely questions about the world.
 All claims extracted from a user message are user-asserted facts — set is_user_asserted=True for every claim.
 
+IMPORTANT — clarification messages that merely narrow scope do NOT contain a value to store:
+  - If the current message only identifies an organization, role scope, or entity (e.g. "the company is Acme")
+    without asserting who holds a role or what a property's value is, return an EMPTY claims list.
+  - Only extract a claim when the message asserts a concrete VALUE for a subject
+    (e.g. "Alice is the CEO" asserts value=Alice; "the company is Acme" alone does not assert any stored value).
+
 {canonical_convention}
+
+RECENT CONVERSATION (context — use to resolve the current message):
+{{context}}
 
 Message:
 {{user_message}}"""
 
-# Render EXTRACTION_PROMPT with the canonical convention embedded
+# Render EXTRACTION_PROMPT with the canonical convention embedded (context and user_message remain as placeholders)
 EXTRACTION_PROMPT = EXTRACTION_PROMPT.format(canonical_convention=CANONICAL_KEY_CONVENTION)
 
 # ── Key-extraction prompt for retrieve_memory node ───────────────────────────
@@ -110,7 +119,16 @@ Return subject and predicate using the SAME canonical convention as the write pa
 If the question is a greeting, small-talk, or has no identifiable subject, return
 subject="" and predicate="" (empty strings).
 
+Use the conversation context to compose the canonical key:
+  - If an earlier turn asked about a role (e.g. "Who is a CEO?") and the current turn
+    supplies the organization (e.g. "The company is Acme"), emit subject="acme:ceo",
+    predicate="held_by" — composing what was missing from earlier context.
+  - Always prefer the composed key over a bare partial key when context provides the missing part.
+
 {canonical_convention}
+
+RECENT CONVERSATION (context — use to resolve the current message):
+{{context}}
 
 Question:
 {{user_question}}"""
