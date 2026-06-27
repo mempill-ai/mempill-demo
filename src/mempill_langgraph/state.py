@@ -1,7 +1,7 @@
 """mempill_langgraph.state — AgentState definition."""
 from __future__ import annotations
 
-from typing import Optional, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict
 
 from langgraph.graph import MessagesState
 
@@ -25,6 +25,26 @@ class PendingDecision(TypedDict, total=True):
     challenger_value: str
 
 
+class ContestedInfo(TypedDict, total=False):
+    """
+    Structured snapshot of a contested belief for deterministic rendering.
+
+    Set by retrieve_memory whenever belief.status is Contested or Conflict,
+    regardless of whether a pending adjudication was correlated.  The respond
+    node uses this to build a deterministic reply that lists all candidate
+    values — the LLM is NOT invoked on any contested turn.
+
+    Fields:
+      subject    — belief subject (canonical key component)
+      predicate  — belief predicate (canonical key component)
+      candidates — list of candidate dicts, each with keys:
+                     value, conf, vt_start, vt_end
+    """
+    subject: str
+    predicate: str
+    candidates: List[Dict[str, Any]]
+
+
 class AgentState(MessagesState):
     """
     Extends MessagesState with mempill-specific fields.
@@ -37,6 +57,7 @@ class AgentState(MessagesState):
     user_id: str                                # stable cross-turn identity for MemoryStore namespacing
     agent_id: str                               # mempill agent identity; passed through to the adapter
     pending_decision: Optional[PendingDecision] # set when awaiting user's pick between contested values
+    contested: Optional[ContestedInfo]          # set on ANY contested turn; drives LLM bypass in respond
     _decision_turn: bool                        # True when the user's message was a decision answer (write guard)
     last_subject: Optional[str]                 # canonical subject from the most-recent resolved key (for follow-up turns)
     last_predicate: Optional[str]               # canonical predicate from the most-recent resolved key (for follow-up turns)

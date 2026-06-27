@@ -29,6 +29,18 @@ from mempill import remember as _remember, recall as _recall, history as _histor
 
 log = logging.getLogger("mempill.demo")
 
+
+def _clip(v: object, n: int = 40) -> str:
+    """Return a truncated repr of *v* safe for INFO-level logging.
+
+    Long values are clipped at *n* characters and suffixed with '…' so that
+    full claim content (which may contain PII) is never emitted at the default
+    verbose level.  Full values are only visible at DEBUG (``--verbose --verbose``).
+    """
+    s = repr(v)
+    return s if len(s) <= n else s[:n] + "…"
+
+
 from mempill_demo.domain.models import (
     AuditEntry,
     BeliefView,
@@ -88,9 +100,10 @@ class MempillMemoryStore:
             )
 
             log.info(
-                "→ ingest_claim subject=%s predicate=%s value=%r prov=%s",
-                cmd.subject, cmd.predicate, cmd.value, prov,
+                "→ ingest_claim subject=%s predicate=%s value=%s prov=%s",
+                cmd.subject, cmd.predicate, _clip(cmd.value), prov,
             )
+            log.debug("  ingest_claim full_value=%r", cmd.value)
             receipt = _remember(self._engine, self._agent_id, cmd.subject, cmd.predicate, cmd.value, opts_rr)
             disp = str(receipt.disposition)
             ref = receipt.claim_ref
@@ -126,9 +139,10 @@ class MempillMemoryStore:
         )
 
         log.info(
-            "→ ingest_claim subject=%s predicate=%s value=%r prov=%s",
-            cmd.subject, cmd.predicate, cmd.value, prov,
+            "→ ingest_claim subject=%s predicate=%s value=%s prov=%s",
+            cmd.subject, cmd.predicate, _clip(cmd.value), prov,
         )
+        log.debug("  ingest_claim full_value=%r", cmd.value)
 
         try:
             receipt = _remember(self._engine, self._agent_id, cmd.subject, cmd.predicate, cmd.value, opts)
@@ -177,9 +191,10 @@ class MempillMemoryStore:
         primary_val = result.primary.value if result.primary else None
         alt_vals = [c.value for c in result.candidates]
         log.info(
-            "← status=%s primary=%r alternatives=%r",
-            result.status, primary_val, alt_vals,
+            "← status=%s primary=%s alternatives=%s",
+            result.status, _clip(primary_val), [_clip(v) for v in alt_vals],
         )
+        log.debug("  recall full_primary=%r full_alternatives=%r", primary_val, alt_vals)
         if subject and predicate:
             self._last_recalled = (subject, predicate)
 

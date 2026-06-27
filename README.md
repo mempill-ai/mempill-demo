@@ -218,7 +218,7 @@ The selftest uses `open_in_memory()` — never touches the persistent DB.
 
 ### Verbose logging
 
-Pass `--verbose` (or set `MEMPILL_VERBOSE=1`) to print engine call summaries to stderr. Pass `--verbose --verbose` (or `MEMPILL_VERBOSE=2`) to also print raw request/response payloads at DEBUG level.
+Pass `--verbose` (or set `MEMPILL_VERBOSE=1`) to print engine call summaries to stderr. Pass `--verbose --verbose` (or `MEMPILL_VERBOSE=2`) to also print raw request/response payloads at DEBUG level. **Note:** verbose mode echoes stored claim content (truncated to 40 chars) to stderr — avoid using it in shared terminals where stored values may be sensitive.
 
 ```bash
 # INFO — one line per engine call + result

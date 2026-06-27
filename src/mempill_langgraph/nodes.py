@@ -28,7 +28,7 @@ from mempill_langgraph.prompts import (
     TIMELINE_BLOCK,
     TIMELINE_ENTRY_LINE,
 )
-from mempill_langgraph.state import AgentState, PendingDecision
+from mempill_langgraph.state import AgentState, ContestedInfo, PendingDecision
 
 log = logging.getLogger("mempill.demo")
 
@@ -277,7 +277,38 @@ def make_nodes(
 
         # ── Step 4: Conversational adjudication setup (residual tie) ──────────
         new_pending: Optional[PendingDecision] = None
+        new_contested: Optional[ContestedInfo] = None
+
         if belief.status in ("Contested", "Conflict"):
+            # Build the candidate list from the same recall data used by _format_belief.
+            # This is set UNCONDITIONALLY whenever the belief is Contested/Conflict so
+            # that respond can short-circuit to a deterministic reply regardless of
+            # whether a pending adjudication item was correlated (closes the M1 gap).
+            raw_candidates = []
+            if belief.value is not None:
+                raw_candidates.append({
+                    "value": belief.value,
+                    "conf": belief.conf,
+                    "vt_start": belief.vt_start or "",
+                    "vt_end": belief.vt_end or "",
+                })
+            for alt in (belief.alternatives or []):
+                raw_candidates.append({
+                    "value": alt.value,
+                    "conf": alt.conf,
+                    "vt_start": alt.vt_start or "",
+                    "vt_end": alt.vt_end or "",
+                })
+            new_contested = {
+                "subject": subject,
+                "predicate": predicate,
+                "candidates": raw_candidates,
+            }
+            log.info(
+                "retrieve_memory: contested %s/%s — %d candidate(s)",
+                subject, predicate, len(raw_candidates),
+            )
+
             try:
                 pending_list = memory_store.list_pending()
             except AttributeError:
@@ -317,12 +348,72 @@ def make_nodes(
         }
         if new_pending is not None:
             result["pending_decision"] = new_pending
+        if new_contested is not None:
+            result["contested"] = new_contested
         return result
 
     # ── Node B: respond ───────────────────────────────────────────────────────
 
     def respond(state: AgentState) -> dict:
-        """Call the LLM with full message history + memory context as SystemMessage prefix."""
+        """
+        Build the AI reply.
+
+        M1 SECURITY SHORT-CIRCUIT: when the recalled belief is Contested/Conflict,
+        the reply is ALWAYS built deterministically in Python — the LLM is NEVER
+        invoked for a contested turn. Two paths:
+
+          1. pending_decision is set (adjudication item correlated): render from
+             incumbent/challenger pair (today's behavior; drives the next-turn verdict).
+
+          2. contested is set but pending_decision is None (no correlated adjudication
+             item, or list_pending returned []): render from contested["candidates"]
+             listing all values generically — closes the M1 gap where a prompt-injection
+             could previously reach the LLM when the value-matching heuristic missed.
+
+        For all other turns, the LLM is invoked normally with the full message
+        history + memory context as a SystemMessage prefix.
+        """
+        pending: Optional[dict] = state.get("pending_decision")
+        if pending is not None:
+            # Path 1: adjudication-correlated contested turn — render from pending pair.
+            subject = pending.get("subject", "?")
+            predicate = pending.get("predicate", "?")
+            incumbent = pending.get("incumbent_value", "?")
+            challenger = pending.get("challenger_value", "?")
+            det_text = (
+                f'⚖️ "{subject} / {predicate}" is contested — I cannot choose:\n'
+                f"   • {incumbent}\n"
+                f"   • {challenger}\n"
+                "Which is correct?"
+            )
+            log.info(
+                "respond: deterministic contested reply (pending) for %s/%s (LLM bypassed)",
+                subject, predicate,
+            )
+            return {"messages": [AIMessage(content=det_text)]}
+
+        contested: Optional[dict] = state.get("contested")
+        if contested is not None:
+            # Path 2: contested belief with no correlated adjudication item.
+            # Render all candidate values deterministically — LLM is bypassed.
+            subject = contested.get("subject", "?")
+            predicate = contested.get("predicate", "?")
+            candidates: list = contested.get("candidates", [])
+            bullet_lines = "\n".join(
+                f"   • {c.get('value', '?')}" for c in candidates
+            ) if candidates else "   • (no candidates)"
+            det_text = (
+                f'⚖️ "{subject} / {predicate}" is contested — I cannot choose:\n'
+                f"{bullet_lines}\n"
+                "Which is correct?"
+            )
+            log.info(
+                "respond: deterministic contested reply (no-pending) for %s/%s "
+                "— %d candidate(s) (LLM bypassed)",
+                subject, predicate, len(candidates),
+            )
+            return {"messages": [AIMessage(content=det_text)]}
+
         memory_context = state.get("memory_context", "")
         system_content = MEMORY_SYSTEM_PREFIX.format(memory_context=memory_context)
         system_msg = SystemMessage(content=system_content)
