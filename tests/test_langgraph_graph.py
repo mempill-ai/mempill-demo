@@ -689,6 +689,156 @@ def test_retrieve_memory_no_timeline_block_for_single_entry():
     assert "Alice" in ctx, f"Expected Alice in resolved belief block, got: {ctx!r}"
 
 
+# ── Test 9: Follow-up / pronoun turn falls back to last_subject/last_predicate ─
+
+def test_followup_turn_uses_subject_carryover():
+    """
+    Turn 1: explicit question → key extractor returns acme:ceo/held_by →
+            retrieve_memory recalls + injects timeline → stores last_subject/last_predicate.
+    Turn 2: pronoun follow-up ("were some persons before him?") → key extractor
+            returns EMPTY → retrieve_memory falls back to last_subject/last_predicate →
+            recall() + timeline_history() run again → [MEMORY TIMELINE] in memory_context.
+
+    Uses LGFakeMemoryStore with a multi-entry timeline so the timeline block fires.
+    Uses injected key_extractor that returns the real key on turn 1, empty on turn 2.
+    """
+    resolved_belief = BeliefView(
+        subject="acme:ceo",
+        predicate="held_by",
+        status="Committed",
+        value="Bob",
+        conf=0.95,
+        vt_start="2025-01-01T00:00:00Z",
+        vt_end="open",
+        provenance="EXT",
+        claim_ref="ref-bob",
+        corroboration=0,
+        alternatives=[],
+    )
+    timeline = [
+        TimelineEntry(
+            value="Alice",
+            valid_from="2020-01-01T00:00:00Z",
+            valid_until="2025-01-01T00:00:00Z",
+            status="Superseded",
+            claim_ref="ref-alice",
+        ),
+        TimelineEntry(
+            value="Bob",
+            valid_from="2025-01-01T00:00:00Z",
+            valid_until=None,
+            status="Current",
+            claim_ref="ref-bob",
+        ),
+    ]
+    fake_store = LGFakeMemoryStore(belief=resolved_belief, timeline_entries=timeline)
+
+    reply_1 = AIMessage(content="Acme's CEO is Bob. Previously it was Alice (2020-2025).")
+    reply_2 = AIMessage(content="Before Bob, Alice was CEO from 2020 to 2025.")
+    fake_llm = _fake_llm(reply_1, reply_2)
+
+    checkpointer = MemorySaver()
+
+    # Turn 1: extractor resolves the key
+    turn = [0]  # mutable counter to switch extractor behaviour
+
+    def _switching_key_extractor(prompt: str) -> KeyExtractResult:
+        turn[0] += 1
+        if turn[0] == 1:
+            return KeyExtractResult(subject="acme:ceo", predicate="held_by")
+        # Turn 2 and beyond: empty (pronoun / follow-up)
+        return KeyExtractResult(subject="", predicate="")
+
+    graph = build_graph(
+        memory_store=fake_store,
+        llm=fake_llm,
+        checkpointer=checkpointer,
+        extractor=_empty_extractor,
+        key_extractor=_switching_key_extractor,
+    )
+
+    config = {"configurable": {"thread_id": "carryover-t1"}}
+
+    # Turn 1: explicit question
+    result1 = graph.invoke(
+        {
+            "messages": [HumanMessage(content="Who is Acme's CEO?")],
+            "user_id": "u1",
+            "agent_id": "test",
+        },
+        config=config,
+    )
+
+    # Turn 1 must have injected the timeline
+    ctx1 = result1["memory_context"]
+    assert "MEMORY TIMELINE" in ctx1, (
+        f"Turn 1: expected [MEMORY TIMELINE] in memory_context, got: {ctx1!r}"
+    )
+    # State must carry last_subject / last_predicate
+    assert result1.get("last_subject") == "acme:ceo", (
+        f"Turn 1: expected last_subject='acme:ceo', got: {result1.get('last_subject')!r}"
+    )
+    assert result1.get("last_predicate") == "held_by", (
+        f"Turn 1: expected last_predicate='held_by', got: {result1.get('last_predicate')!r}"
+    )
+
+    recall_after_t1 = fake_store.recall_calls
+
+    # Turn 2: pronoun follow-up — key extractor returns empty
+    result2 = graph.invoke(
+        {"messages": [HumanMessage(content="were some persons before him?")]},
+        config=config,
+    )
+
+    ctx2 = result2["memory_context"]
+    # retrieve_memory must have called recall() again (fallback fired)
+    assert fake_store.recall_calls > recall_after_t1, (
+        f"Turn 2: expected additional recall() call via carryover fallback, "
+        f"recall_calls before={recall_after_t1}, after={fake_store.recall_calls}"
+    )
+    # Timeline must be injected on the follow-up turn too
+    assert "MEMORY TIMELINE" in ctx2, (
+        f"Turn 2: expected [MEMORY TIMELINE] in memory_context (carryover), got: {ctx2!r}"
+    )
+    assert "Alice" in ctx2, f"Turn 2: expected Alice in timeline, got: {ctx2!r}"
+    assert "Bob" in ctx2, f"Turn 2: expected Bob in timeline, got: {ctx2!r}"
+
+
+def test_genuine_greeting_with_no_prior_subject_yields_empty_block():
+    """
+    When there is NO prior last_subject in state AND the key extractor returns empty,
+    retrieve_memory must return EMPTY_BLOCK (the greeting case is unaffected by carryover).
+    """
+    fake_store = LGFakeMemoryStore()
+
+    fake_reply = AIMessage(content="Hello! How can I help you today?")
+    fake_llm = _fake_llm(fake_reply)
+
+    graph = build_graph(
+        memory_store=fake_store,
+        llm=fake_llm,
+        extractor=_empty_extractor,
+        key_extractor=_no_key_extractor,
+    )
+
+    result = graph.invoke(
+        {
+            "messages": [HumanMessage(content="Hi there!")],
+            "user_id": "u1",
+            "agent_id": "test",
+        },
+        config={"configurable": {"thread_id": "greeting-carryover-t1"}},
+    )
+
+    assert result["memory_context"] == "", (
+        f"Expected empty memory_context for greeting with no prior subject, "
+        f"got: {result['memory_context']!r}"
+    )
+    assert fake_store.recall_calls == 0, (
+        f"Expected 0 recall calls for greeting, got {fake_store.recall_calls}"
+    )
+
+
 # ── Live smoke test (skipped without API key) ─────────────────────────────────
 
 @pytest.mark.skipif(

@@ -38,3 +38,5 @@ class AgentState(MessagesState):
     agent_id: str                               # mempill agent identity; passed through to the adapter
     pending_decision: Optional[PendingDecision] # set when awaiting user's pick between contested values
     _decision_turn: bool                        # True when the user's message was a decision answer (write guard)
+    last_subject: Optional[str]                 # canonical subject from the most-recent resolved key (for follow-up turns)
+    last_predicate: Optional[str]               # canonical predicate from the most-recent resolved key (for follow-up turns)

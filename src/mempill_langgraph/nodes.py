@@ -229,7 +229,13 @@ def make_nodes(
         subject, predicate = _extract_canonical_key(latest_human, _key_extractor_llm)
 
         if not subject or not predicate:
-            # No identifiable subject — greeting or small-talk
+            # Key was not freshly extracted — try to fall back to the last resolved key
+            # (handles follow-up / pronoun turns: "were some persons before him?")
+            subject = state.get("last_subject") or None
+            predicate = state.get("last_predicate") or None
+
+        if not subject or not predicate:
+            # No subject from this turn AND no carry-over — genuine greeting / small-talk
             return {"memory_context": EMPTY_BLOCK}
 
         try:
@@ -304,7 +310,11 @@ def make_nodes(
         memory_context = _format_belief(belief)
         if timeline_block:
             memory_context = memory_context + "\n\n" + timeline_block
-        result: dict = {"memory_context": memory_context}
+        result: dict = {
+            "memory_context": memory_context,
+            "last_subject": subject,
+            "last_predicate": predicate,
+        }
         if new_pending is not None:
             result["pending_decision"] = new_pending
         return result
