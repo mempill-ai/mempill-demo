@@ -6,6 +6,8 @@ AgentResponse. The MemoryStore port is imported by Protocol reference only.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from mempill_demo.domain.models import (
     AgentResponse,
     BeliefView,
@@ -28,6 +30,18 @@ mempill Console Agent — command grammar:
 
   RECALL <subject> <predicate>
     Recall the current belief for a subject/predicate pair.
+
+  RECALL <subject> <predicate> valid=<YYYY-MM-DD>
+    Point-in-time recall: which claim was valid at that date?
+    (valid-time axis — ignores when beliefs were recorded)
+
+  RECALL <subject> <predicate> tx=<YYYY-MM-DD>
+    Historical recall: what did we believe as of that transaction date?
+    (transaction-time axis — ignores what was valid then)
+
+  RECALL <subject> <predicate> valid=<YYYY-MM-DD> tx=<YYYY-MM-DD>
+    Bi-temporal recall: what was valid at <valid> as we knew it at <tx>?
+    Use this to recover superseded beliefs before a reconcile.
 
   RECALL_REENTRY <subject> <predicate> "<value>" <source_claim_ref>
     Re-ingest a recalled value (tests the amplification firewall).
@@ -133,8 +147,26 @@ def _handle_recall(
     stats: SessionStats,
 ) -> AgentResponse:
     stats.n_queries += 1
-    belief = store.recall(cmd.subject, cmd.predicate)
-    text = _apply_agent_rules(belief, cmd.subject, cmd.predicate, stats)
+    has_temporal = bool(cmd.valid_at or cmd.as_of_tx_time)
+
+    if has_temporal:
+        recall_at_fn = getattr(store, "recall_at", None)
+        if recall_at_fn is None:
+            return AgentResponse(
+                text="[error] This store does not support point-in-time recall (valid=/tx=).",
+                kind=cmd.kind,
+            )
+        belief = recall_at_fn(
+            cmd.subject, cmd.predicate,
+            valid_at=cmd.valid_at,
+            as_of_tx_time=cmd.as_of_tx_time,
+        )
+        text = _apply_agent_rules_temporal(belief, cmd.subject, cmd.predicate, stats,
+                                           valid_at=cmd.valid_at, as_of_tx_time=cmd.as_of_tx_time)
+    else:
+        belief = store.recall(cmd.subject, cmd.predicate)
+        text = _apply_agent_rules(belief, cmd.subject, cmd.predicate, stats)
+
     return AgentResponse(text=text, kind=cmd.kind)
 
 
@@ -201,6 +233,78 @@ def _apply_agent_rules(
     lines = [f"Memory: {subject} {predicate} = \"{value}\"  status={status}"]
     if vt_start:
         lines.append(f"  valid: {vt_start} → {vt_end}")
+    return "\n".join(lines)
+
+
+def _apply_agent_rules_temporal(
+    belief: BeliefView,
+    subject: str,
+    predicate: str,
+    stats: SessionStats,
+    valid_at: "Optional[str]" = None,
+    as_of_tx_time: "Optional[str]" = None,
+) -> str:
+    """Format a point-in-time (bi-temporal) RECALL result for human readability.
+
+    The header explains which axes were queried so the reader understands the context.
+    NoBelief, Contested, and committed results all receive appropriate labels.
+    """
+    # Build context label
+    parts: list[str] = []
+    if valid_at:
+        date_str = valid_at[:10]
+        parts.append(f"valid at {date_str}")
+    if as_of_tx_time:
+        date_str = as_of_tx_time[:10]
+        parts.append(f"as we believed at tx {date_str}")
+    if not parts:
+        parts.append("current")
+    context = "(" + ", ".join(parts) + ")"
+
+    status = belief.status
+    value = belief.value
+
+    if value is None or status in ("NoBelief", "UNKNOWN"):
+        return (
+            f"Belief {context}: NoBelief — no claim covers this point in time.\n"
+            f"  subject={subject} predicate={predicate}\n"
+            "  Tip: try a different date or check /history for the valid-time windows."
+        )
+
+    vt_start = belief.vt_start
+    vt_end = belief.vt_end or "open"
+    ref = belief.claim_ref[:8] if belief.claim_ref else ""
+    conf_s = _conf_str(belief.conf) if belief.conf is not None else "N/A"
+
+    if status in ("Committed", "CommittedCheap", "CommittedInferred", "Reinstated", "Resolved"):
+        lines = [f"Belief {context}: \"{value}\" (conf {conf_s})"]
+        lines.append(f"  subject={subject} predicate={predicate}")
+        lines.append(f"  claim valid: {vt_start or '?'} → {vt_end}  ref={ref}...")
+        lines.append(f"  status: {status}")
+        return "\n".join(lines)
+
+    if status in ("Contested", "PendingConflict"):
+        lines = [f"[CONTESTED] {context}: {subject} {predicate} has conflicting claims:"]
+        lines.append(f"  Primary:  \"{value}\" conf={conf_s}  valid: {vt_start or '?'} → {vt_end}  ref={ref}...")
+        for alt in belief.alternatives:
+            lines.append(
+                f"  Conflict: \"{alt.value}\" conf={_conf_str(alt.conf)}"
+                f"  valid: {alt.vt_start or '?'} → {alt.vt_end or 'open'}"
+                f"  ref={alt.claim_ref[:8] if alt.claim_ref else ''}..."
+            )
+        return "\n".join(lines)
+
+    if status in ("Superseded", "Invalidated"):
+        lines = [f"Belief {context}: \"{value}\" (conf {conf_s})  [SUPERSEDED at this tx-time]"]
+        lines.append(f"  subject={subject} predicate={predicate}")
+        if vt_start or vt_end != "open":
+            lines.append(f"  claim valid: {vt_start or '?'} → {vt_end}")
+        lines.append("  Use /history to see the full timeline.")
+        return "\n".join(lines)
+
+    # Fallback
+    lines = [f"Belief {context}: \"{value}\"  status={status}"]
+    lines.append(f"  subject={subject} predicate={predicate}")
     return "\n".join(lines)
 
 

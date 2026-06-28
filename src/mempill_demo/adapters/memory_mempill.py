@@ -184,6 +184,75 @@ class MempillMemoryStore:
 
     # ── Read paths ────────────────────────────────────────────────────────────
 
+    def recall_at(
+        self,
+        subject: str,
+        predicate: str,
+        valid_at: "Optional[str]" = None,
+        as_of_tx_time: "Optional[str]" = None,
+    ) -> "BeliefView":
+        """Point-in-time query via raw engine.query_memory (ergonomic recall lacks valid_at).
+
+        valid_at:       ISO-8601 UTC string — selects the claim valid at that instant.
+        as_of_tx_time:  ISO-8601 UTC string — as-of transaction-time (default = now).
+        Both axes are independent; combining them gives full bi-temporal semantics.
+        """
+        log.info(
+            "→ query_memory subject=%s predicate=%s valid_at=%s as_of_tx_time=%s",
+            subject, predicate, valid_at, as_of_tx_time,
+        )
+        req: dict = {"agent_id": self._agent_id, "subject": subject, "predicate": predicate}
+        if valid_at is not None:
+            req["valid_at"] = valid_at
+        if as_of_tx_time is not None:
+            req["as_of_tx_time"] = as_of_tx_time
+
+        raw = self._engine.query_memory(req)
+        belief_raw = raw.get("belief", {})
+        status = belief_raw.get("status", "UNKNOWN")
+        primary_raw = belief_raw.get("primary") or {}
+        log.info("← status=%s primary=%s", status, _clip((primary_raw.get("fact") or {}).get("value")))
+
+        if subject and predicate:
+            self._last_recalled = (subject, predicate)
+
+        candidates = belief_raw.get("alternatives") or []
+        alternatives = [
+            AlternativeView(
+                value=(c.get("fact") or {}).get("value"),
+                conf=(c.get("confidence") or {}).get("value_confidence"),
+                vt_start=(c.get("valid_time") or {}).get("start") or "",
+                vt_end=(c.get("valid_time") or {}).get("end") or "open",
+                claim_ref=str(c.get("claim_ref") or ""),
+            )
+            for c in candidates
+        ]
+
+        if not primary_raw:
+            return BeliefView(
+                subject=subject, predicate=predicate, value=None,
+                status=status, conf=None, vt_start="", vt_end="",
+                provenance="", claim_ref="", corroboration=0, alternatives=alternatives,
+            )
+
+        fact = primary_raw.get("fact") or {}
+        vt = primary_raw.get("valid_time") or {}
+        conf_raw = primary_raw.get("confidence") or {}
+        currency = primary_raw.get("currency_signal") or {}
+        return BeliefView(
+            subject=subject,
+            predicate=predicate,
+            value=fact.get("value"),
+            status=status,
+            conf=conf_raw.get("value_confidence"),
+            vt_start=vt.get("start") or "",
+            vt_end=vt.get("end") or "open",
+            provenance=_prov_abbr(primary_raw.get("provenance")),
+            claim_ref=str(primary_raw.get("claim_ref") or ""),
+            corroboration=currency.get("corroboration_count", 0),
+            alternatives=alternatives,
+        )
+
     def recall(self, subject: str, predicate: str) -> BeliefView:
         """Query the engine and map to a BeliefView domain object."""
         log.info("→ query_memory subject=%s predicate=%s", subject, predicate)

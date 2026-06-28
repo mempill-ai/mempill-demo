@@ -45,6 +45,9 @@ class ParsedCommand:
     raw: str = ""
     error: Optional[str] = None
     extra: dict[str, Any] = field(default_factory=dict)
+    # Point-in-time recall modifiers (bi-temporal axes)
+    valid_at: Optional[str] = None        # ISO-8601 UTC — valid-time axis
+    as_of_tx_time: Optional[str] = None   # ISO-8601 UTC — transaction-time axis
 
 
 # ── Memory domain types ───────────────────────────────────────────────────────
