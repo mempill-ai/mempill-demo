@@ -59,6 +59,9 @@ class AlternativeView:
     vt_start: str
     vt_end: str
     claim_ref: str
+    # Honest granularity display strings (None = use raw vt_start/vt_end)
+    vt_start_display: Optional[str] = None
+    vt_end_display: Optional[str] = None
 
 
 @dataclass
@@ -74,6 +77,9 @@ class BeliefView:
     claim_ref: str
     corroboration: int
     alternatives: list[AlternativeView]
+    # Honest granularity display strings (None = use raw vt_start/vt_end)
+    vt_start_display: Optional[str] = None
+    vt_end_display: Optional[str] = None
 
 
 @dataclass
@@ -154,6 +160,25 @@ def _prov_abbr(prov: Any) -> str:
         if "ModelDerived" in prov or "Model" in prov:
             return "LLM"
     return str(prov)[:6] if prov else ""
+
+
+def _granularity_display(raw_date: Optional[str], granularity: Optional[str]) -> Optional[str]:
+    """Render a date string at the given granularity level.
+
+    Granularity values: "year" → YYYY, "month" → YYYY-MM, "day"/"instant" → YYYY-MM-DD.
+    Falls back to the raw date string (first 10 chars) if granularity is None or unknown.
+    Returns None if raw_date is None.
+    """
+    if raw_date is None:
+        return None
+    # Take the date portion (first 10 chars) as base
+    date_part = raw_date[:10] if len(raw_date) >= 10 else raw_date
+    if granularity == "year" and len(date_part) >= 4:
+        return date_part[:4]
+    if granularity == "month" and len(date_part) >= 7:
+        return date_part[:7]
+    # "day", "instant", or unknown — use full date
+    return date_part
 
 
 def _conf_str(c: Any) -> str:

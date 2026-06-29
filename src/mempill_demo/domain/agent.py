@@ -16,6 +16,7 @@ from mempill_demo.domain.models import (
     SessionStats,
     _conf_str,
     _prov_abbr,
+    _granularity_display,
 )
 from mempill_demo.ports.memory import MemoryStore
 
@@ -25,8 +26,10 @@ from mempill_demo.ports.memory import MemoryStore
 _HELP_TEXT = """\
 mempill Console Agent — command grammar:
 
-  INGEST <subject> <predicate> "<value>" [SINCE <ISO>] [UNTIL <ISO>] [CONF <0-1>]
+  INGEST <subject> <predicate> "<value>" [SINCE <date>] [UNTIL <date>] [CONF <0-1>]
     Ingest a claim into the memory engine.
+    <date> supports partial precision: YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339.
+    Partial dates preserve granularity: "2020-03" shows as "2020-03", "2023" as "2023".
 
   RECALL <subject> <predicate>
     Recall the current belief for a subject/predicate pair.
@@ -188,8 +191,9 @@ def _apply_agent_rules(
 
     value = belief.value
     conf_val = belief.conf
-    vt_start = belief.vt_start
-    vt_end = belief.vt_end or "open"
+    # Use honest display strings when available (granularity-aware)
+    vt_start = belief.vt_start_display or (belief.vt_start[:10] if belief.vt_start else "")
+    vt_end = belief.vt_end_display or (belief.vt_end[:10] if belief.vt_end and belief.vt_end != "open" else belief.vt_end or "open")
     ref = belief.claim_ref[:8] if belief.claim_ref else ""
     corroboration = belief.corroboration
 
@@ -212,9 +216,11 @@ def _apply_agent_rules(
             f"  valid: {vt_start or '?'} → {vt_end}  ref={ref}..."
         )
         for alt in belief.alternatives:
+            alt_vf = alt.vt_start_display or (alt.vt_start[:10] if alt.vt_start else "?")
+            alt_vu = alt.vt_end_display or (alt.vt_end[:10] if alt.vt_end and alt.vt_end != "open" else alt.vt_end or "open")
             lines.append(
                 f"  Conflict: \"{alt.value}\" conf={_conf_str(alt.conf)}"
-                f"  valid: {alt.vt_start or '?'} → {alt.vt_end or 'open'}  ref={alt.claim_ref[:8] if alt.claim_ref else ''}..."
+                f"  valid: {alt_vf} → {alt_vu}  ref={alt.claim_ref[:8] if alt.claim_ref else ''}..."
             )
         lines.append("  Use /reconcile to resolve. Agent will NOT guess.")
         return "\n".join(lines)
@@ -271,8 +277,9 @@ def _apply_agent_rules_temporal(
             "  Tip: try a different date or check /history for the valid-time windows."
         )
 
-    vt_start = belief.vt_start
-    vt_end = belief.vt_end or "open"
+    # Use honest display strings when available (granularity-aware)
+    vt_start = belief.vt_start_display or (belief.vt_start[:10] if belief.vt_start else "")
+    vt_end = belief.vt_end_display or (belief.vt_end[:10] if belief.vt_end and belief.vt_end != "open" else belief.vt_end or "open")
     ref = belief.claim_ref[:8] if belief.claim_ref else ""
     conf_s = _conf_str(belief.conf) if belief.conf is not None else "N/A"
 
@@ -287,9 +294,11 @@ def _apply_agent_rules_temporal(
         lines = [f"[CONTESTED] {context}: {subject} {predicate} has conflicting claims:"]
         lines.append(f"  Primary:  \"{value}\" conf={conf_s}  valid: {vt_start or '?'} → {vt_end}  ref={ref}...")
         for alt in belief.alternatives:
+            alt_vf = alt.vt_start_display or (alt.vt_start[:10] if alt.vt_start else "?")
+            alt_vu = alt.vt_end_display or (alt.vt_end[:10] if alt.vt_end and alt.vt_end != "open" else alt.vt_end or "open")
             lines.append(
                 f"  Conflict: \"{alt.value}\" conf={_conf_str(alt.conf)}"
-                f"  valid: {alt.vt_start or '?'} → {alt.vt_end or 'open'}"
+                f"  valid: {alt_vf} → {alt_vu}"
                 f"  ref={alt.claim_ref[:8] if alt.claim_ref else ''}..."
             )
         return "\n".join(lines)

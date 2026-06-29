@@ -2,7 +2,9 @@
 mempill_demo.adapters.inference_deterministic — keyword-insensitive grammar parser.
 
 Grammar:
-  INGEST <subject> <predicate> "<value>" [SINCE <ISO>] [UNTIL <ISO>] [CONF <0-1>]
+  INGEST <subject> <predicate> "<value>" [SINCE <date>] [UNTIL <date>] [CONF <0-1>]
+    <date> accepts: YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339 (YYYY-MM-DDTHH:MM:SSZ)
+    Partial precision is preserved: "2020-03" stays as-is for Month granularity.
   RECALL <subject> <predicate>
   RECALL <subject> <predicate> valid=<YYYY-MM-DD>
   RECALL <subject> <predicate> tx=<YYYY-MM-DD>
@@ -210,10 +212,10 @@ class DeterministicParser:
         while i < len(tokens):
             tok = tokens[i]
             if tok == "SINCE" and i + 1 < len(original_tokens):
-                since = self._normalise_iso(original_tokens[i + 1])
+                since = self._accept_date(original_tokens[i + 1])
                 i += 2
             elif tok == "UNTIL" and i + 1 < len(original_tokens):
-                until = self._normalise_iso(original_tokens[i + 1])
+                until = self._accept_date(original_tokens[i + 1])
                 i += 2
             elif tok == "CONF" and i + 1 < len(original_tokens):
                 try:
@@ -227,7 +229,25 @@ class DeterministicParser:
         return since, until, conf
 
     @staticmethod
+    def _accept_date(date_str: str) -> str:
+        """Accept partial or full ISO-8601 date strings, passing them through as-is.
+
+        The memory adapter (_infer_granularity + _to_rfc3339) handles expansion and
+        granularity inference so the original precision is preserved.
+
+        Accepts: YYYY, YYYY-MM, YYYY-MM-DD, YYYY-MM-DDTHH:MM:SSZ (pass-through).
+        Unknown formats are passed through; the adapter will catch UnparsableDateError.
+        """
+        return date_str
+
+    @staticmethod
     def _normalise_iso(date_str: str) -> str:
+        """Normalize a full YYYY-MM-DD to RFC3339 (used only for valid=/tx= modifiers).
+
+        SINCE/UNTIL now use _accept_date which preserves partial precision.
+        This method is kept for valid=/tx= RECALL modifiers where full-date expansion
+        is expected (the user is querying a specific point, not a period).
+        """
         if len(date_str) == 10 and re.match(r"\d{4}-\d{2}-\d{2}$", date_str):
             return date_str + "T00:00:00Z"
         return date_str
