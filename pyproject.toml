@@ -25,12 +25,20 @@ langgraph = [
     "langchain-core>=1.4.8,<2",
     "langchain-anthropic>=1.4.7,<2",
 ]
+crewai = [
+    "crewai>=1.0,<2",
+]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mempill_demo", "src/mempill_langgraph"]
+packages = ["src/mempill_demo", "src/mempill_langgraph", "src/mempill_showcase"]
 
 [tool.hatch.build]
 sources = ["src"]
 
 [project.scripts]
 mempill-console = "mempill_demo.__main__:main"
+
+[tool.pytest.ini_options]
+markers = [
+    "live: marks tests that require a live API key (deselect with '-m not live')",
+]
