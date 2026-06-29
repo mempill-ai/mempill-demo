@@ -1,0 +1,1 @@
+# adapters.memory — MemoryStore implementations
