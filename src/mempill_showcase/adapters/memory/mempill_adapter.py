@@ -272,6 +272,36 @@ class MempillAdapter:
         raw = self._engine.query_memory(req)
         return _extract_belief_view(subject, predicate, raw)
 
+    # ── Reconcile ─────────────────────────────────────────────────────────────
+
+    def reconcile(
+        self,
+        agent_id: str,
+        subject_lines: list[list[str]],
+        max_passes: int = 3,
+    ) -> dict:
+        """Run the engine's reconcile loop for (subject, predicate) pairs.
+
+        Folds non-overlapping claim windows into CommittedCheap without oracle
+        involvement. Returns the raw engine response from the last pass.
+
+        Exposed so nodes and tools do NOT need to reach into adapter._engine.
+        """
+        req = {
+            "agent_id": agent_id,
+            "subject_lines": subject_lines,
+        }
+        last_resp: dict = {}
+        for _pass in range(max_passes):
+            last_resp = self._engine.reconcile(req)
+            if last_resp.get("oracle_escalations", 0) == 0:
+                break
+        log.debug(
+            "reconcile agent=%s subject_lines=%s passes=%d result=%s",
+            agent_id, subject_lines, _pass + 1, last_resp,
+        )
+        return last_resp
+
     # ── Audit ─────────────────────────────────────────────────────────────────
 
     def audit(self, agent_id: str, limit: int = 50) -> list[AuditEntry]:
