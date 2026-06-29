@@ -4,6 +4,9 @@ mempill_demo.adapters.inference_deterministic — keyword-insensitive grammar pa
 Grammar:
   INGEST <subject> <predicate> "<value>" [SINCE <ISO>] [UNTIL <ISO>] [CONF <0-1>]
   RECALL <subject> <predicate>
+  RECALL <subject> <predicate> valid=<YYYY-MM-DD>
+  RECALL <subject> <predicate> tx=<YYYY-MM-DD>
+  RECALL <subject> <predicate> valid=<YYYY-MM-DD> tx=<YYYY-MM-DD>
   RECALL_REENTRY <subject> <predicate> "<value>" <source_claim_ref>
   /memory
   /history <subj> <pred>
@@ -141,8 +144,29 @@ class DeterministicParser:
         if len(tokens) < 3:
             return ParsedCommand(kind=CommandKind.UNKNOWN, raw=raw,
                                  error="RECALL requires <subject> <predicate>")
-        return ParsedCommand(kind=CommandKind.RECALL, raw=raw,
-                             subject=tokens[1], predicate=tokens[2])
+        subject = tokens[1]
+        predicate = tokens[2]
+
+        # Parse optional valid= and tx= modifiers (tokens[3:])
+        valid_at: "Optional[str]" = None
+        as_of_tx_time: "Optional[str]" = None
+        for tok in tokens[3:]:
+            lower = tok.lower()
+            if lower.startswith("valid="):
+                raw_date = tok[6:]
+                valid_at = self._normalise_iso(raw_date)
+            elif lower.startswith("tx="):
+                raw_date = tok[3:]
+                as_of_tx_time = self._normalise_iso(raw_date)
+
+        return ParsedCommand(
+            kind=CommandKind.RECALL,
+            raw=raw,
+            subject=subject,
+            predicate=predicate,
+            valid_at=valid_at,
+            as_of_tx_time=as_of_tx_time,
+        )
 
     # ── RECALL_REENTRY parser ─────────────────────────────────────────────────
 
