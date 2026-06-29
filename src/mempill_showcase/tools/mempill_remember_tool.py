@@ -164,6 +164,11 @@ class MempillRememberTool(BaseTool):
 
         # ── Succession encapsulation (recall-then-close) ──────────────────────
         # Only attempt when we have a valid_from (needed to determine temporal order).
+        # Track whether a close-step was performed: if yes, the engine's contested_with
+        # on the NEW write is an expected artifact of the succession fold (the old open
+        # claim still exists until reconcile supersedes it), NOT a genuine conflict.
+        close_step_performed = False
+
         if valid_from and cardinality == "Functional":
             incumbent = self.adapter.recall(agent_id, subject, predicate)
             if (
@@ -195,27 +200,39 @@ class MempillRememberTool(BaseTool):
                         criticality=criticality,
                     )
                     self.adapter.write_claim(agent_id, close_claim)
+                    close_step_performed = True
 
         receipt: WriteReceipt = self.adapter.write_claim(agent_id, claim)
 
         # Trigger engine succession fold after writing the challenger.
-        # For Functional predicates with a new valid_from, reconcile() resolves
-        # non-overlapping windows into CommittedCheap without oracle involvement.
-        # Multiple reconcile passes may be needed: the first pass Supersedes the
-        # open-ended incumbent; the second pass promotes the challenger to CommittedCheap.
-        if valid_from and cardinality == "Functional":
+        #
+        # When to reconcile:
+        #   (a) Clean write (no contested_with) — always reconcile.
+        #   (b) close_step_performed — the contested_with refs are the old open
+        #       incumbent, which the close-step bounded. Reconcile will supersede
+        #       the open incumbent and promote bounded+challenger to CommittedCheap.
+        #
+        # When NOT to reconcile:
+        #   (c) contested_with non-empty AND no close-step — this is a genuine
+        #       overlapping conflict requiring HITL. Auto-resolving it via reconcile
+        #       would silently pick a winner without human confirmation.
+        initial_contested = bool(receipt.contested_with)
+        should_reconcile = (
+            valid_from
+            and cardinality == "Functional"
+            and (not initial_contested or close_step_performed)
+        )
+
+        if should_reconcile:
             try:
-                reconcile_req = {
-                    "agent_id": agent_id,
-                    "subject_lines": [[subject, predicate]],
-                }
-                for _pass in range(3):  # up to 3 passes; normal succession needs 2
-                    resp = self.adapter._engine.reconcile(reconcile_req)
-                    if resp.get("oracle_escalations", 0) == 0:
-                        break
+                self.adapter.reconcile(
+                    agent_id=agent_id,
+                    subject_lines=[[subject, predicate]],
+                    max_passes=3,
+                )
                 log.debug(
-                    "MempillRememberTool: reconcile complete for %s/%s (passes=%d)",
-                    subject, predicate, _pass + 1,
+                    "MempillRememberTool: reconcile complete for %s/%s",
+                    subject, predicate,
                 )
                 # Re-read the final disposition from engine state
                 final_belief = self.adapter.recall(agent_id, subject, predicate)
@@ -226,6 +243,15 @@ class MempillRememberTool(BaseTool):
             except Exception as exc:
                 log.debug("MempillRememberTool: reconcile skipped: %s", exc)
                 final_disposition = receipt.disposition
+        elif initial_contested and not close_step_performed:
+            # Genuine conflict: return Contested without auto-resolution.
+            # HITL node is responsible for submitting adjudication.
+            final_disposition = "Contested"
+            log.debug(
+                "MempillRememberTool: skipping reconcile for %s/%s — genuine conflict "
+                "(contested_with=%s, no close-step), escalating to HITL",
+                subject, predicate, receipt.contested_with,
+            )
         else:
             final_disposition = receipt.disposition
 
