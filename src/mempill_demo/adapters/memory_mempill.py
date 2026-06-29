@@ -7,16 +7,16 @@ Encapsulates all SDK quirks:
   - reconcile() returns only winner; loser is in audit ledger
   - Oracle wiring: open_oracle / open_oracle_in_memory for HITL adjudication queue
 
-This adapter is now fully on the ergonomic API (remember() / recall()) for all
-write and read paths, including RECALL_REENTRY (derived_from is forwarded via
-RememberOptions).  Oracle, reconcile, and audit methods remain on the raw engine
-API as those surfaces have no ergonomic equivalents.
+Granularity-aware ingest (0.3.0):
+  - Partial dates (YYYY, YYYY-MM) preserve precision via start_granularity/end_granularity
+    in the raw ingest_claim call.  The ergonomic remember() facade is used only for
+    RECALL_REENTRY (no dates).  For UserAsserted/ModelDerived claims with dates, the
+    adapter calls ingest_claim directly so it can forward granularity tags.
+  - Display strings are sourced from valid_from_display/valid_until_display on the
+    raw query_memory response (pre-rendered by the engine at the recorded precision).
 
-Date normalization (valid_time) is delegated to mempill.remember() via
-RememberOptions, which handles the RFC3339 expansion internally and raises
-UnparsableDateError for natural-language dates.  The ingest() method catches that
-error and retries without the date window — preserving the "omit window, still
-ingest" fallback that existed when _to_rfc3339() returned None.
+Date normalization (valid_time) uses mempill.ergonomic._to_rfc3339 for expansion.
+UnparsableDateError is caught and the command is re-submitted without the date window.
 """
 from __future__ import annotations
 
@@ -26,8 +26,31 @@ from typing import Any, Optional
 import mempill
 from mempill import Disposition, ProvenanceLabel
 from mempill import remember as _remember, recall as _recall, history as _history, RememberOptions, UnparsableDateError
+from mempill.ergonomic import _to_rfc3339
 
 log = logging.getLogger("mempill.demo")
+
+
+def _infer_granularity(date_str: Optional[str]) -> Optional[str]:
+    """Infer date granularity from the raw user-supplied string.
+
+    Returns "year", "month", "day", or None (no date / unknown).
+    This must be called BEFORE _to_rfc3339 expansion so we see the original precision.
+    """
+    if not date_str:
+        return None
+    s = date_str.strip()
+    if "T" in s:
+        return "instant"
+    import re
+    m = re.match(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$", s)
+    if not m:
+        return None
+    if m.group(3):
+        return "day"
+    if m.group(2):
+        return "month"
+    return "year"
 
 
 def _clip(v: object, n: int = 40) -> str:
@@ -125,18 +148,13 @@ class MempillMemoryStore:
             self._registry[ref] = meta
             return meta
 
-        # ── Ergonomic path: UserAsserted / ModelDerived ───────────────────────
+        # ── Granularity-aware path: UserAsserted / ModelDerived ─────────────────
+        # We call ingest_claim directly (not remember()) so we can forward
+        # start_granularity/end_granularity inferred from the raw date string.
+        # This lets the engine store + return honest display strings like "2020-03"
+        # and "2023" instead of fabricating full precision "2020-03-01"/"2023-01-01".
         prov = ProvenanceLabel.model_derived() if prov_str == "ModelDerived" else ProvenanceLabel.external_user_asserted()
         conf_val = cmd.conf
-
-        opts = RememberOptions(
-            valid_from=cmd.since or None,
-            valid_until=cmd.until or None,
-            confidence=conf_val,
-            cardinality=cardinality,
-            provenance=prov,
-            criticality="Medium",
-        )
 
         log.info(
             "→ ingest_claim subject=%s predicate=%s value=%s prov=%s",
@@ -144,37 +162,74 @@ class MempillMemoryStore:
         )
         log.debug("  ingest_claim full_value=%r", cmd.value)
 
-        try:
-            receipt = _remember(self._engine, self._agent_id, cmd.subject, cmd.predicate, cmd.value, opts)
-        except UnparsableDateError as exc:
-            # Natural-language date (e.g. "March 2020") — omit the window and
-            # re-submit so the fact is still stored (matches pre-refactor behavior
-            # where _to_rfc3339 returned None and the bound was silently skipped).
-            log.warning("  unparseable date %r — retrying without valid_time window", exc.input)
-            opts_no_date = RememberOptions(
-                confidence=conf_val,
-                cardinality=cardinality,
-                provenance=prov,
-                criticality="Medium",
-            )
-            receipt = _remember(self._engine, self._agent_id, cmd.subject, cmd.predicate, cmd.value, opts_no_date)
+        since_raw = cmd.since or None
+        until_raw = cmd.until or None
 
-        disp = str(receipt.disposition)
-        ref = receipt.claim_ref
-        contested = receipt.contested_with
+        # Infer granularity BEFORE RFC3339 expansion (original user string)
+        start_gran = _infer_granularity(since_raw)
+        end_gran = _infer_granularity(until_raw)
+
+        # Expand partial dates to RFC3339 for storage
+        try:
+            since_rfc = _to_rfc3339(since_raw) if since_raw else None
+        except UnparsableDateError as exc:
+            log.warning("  unparseable since date %r — ignoring", exc.input)
+            since_rfc = None
+            since_raw = None
+            start_gran = None
+
+        try:
+            until_rfc = _to_rfc3339(until_raw) if until_raw else None
+        except UnparsableDateError as exc:
+            log.warning("  unparseable until date %r — ignoring", exc.input)
+            until_rfc = None
+            until_raw = None
+            end_gran = None
+
+        has_date = bool(since_rfc or until_rfc)
+        vtc = conf_val if has_date else 0.0
+
+        valid_time: dict[str, Any] = {"valid_time_confidence": vtc}
+        if since_rfc:
+            valid_time["start"] = since_rfc
+            if start_gran:
+                valid_time["start_granularity"] = start_gran
+        if until_rfc:
+            valid_time["end"] = until_rfc
+            if end_gran:
+                valid_time["end_granularity"] = end_gran
+
+        request: dict[str, Any] = {
+            "agent_id": self._agent_id,
+            "subject": cmd.subject,
+            "predicate": cmd.predicate,
+            "value": cmd.value,
+            "provenance": prov,
+            "cardinality": cardinality,
+            "valid_time": valid_time,
+            "confidence": {
+                "value_confidence": conf_val,
+                "valid_time_confidence": vtc,
+            },
+            "criticality": "Medium",
+            "derived_from": [],
+        }
+
+        resp = self._engine.ingest_claim(request)
+        disp = str(resp["disposition"])
+        ref = resp["claim_ref"]
+        contested = resp.get("contested_with") or []
         log.info(
             "← disposition=%s claim_ref=%s contested_with=%s",
             disp, ref[:8], [r[:8] for r in contested] if contested else [],
         )
 
-        # Reconstruct valid_time for ClaimMeta (only for display purposes in registry)
-        has_date = bool(cmd.since or cmd.until)
         meta = ClaimMeta(
             subject=cmd.subject,
             predicate=cmd.predicate,
             value=cmd.value,
             provenance=prov,
-            valid_time={"valid_from": cmd.since, "valid_until": cmd.until} if has_date else None,
+            valid_time={"valid_from": since_raw, "valid_until": until_raw} if has_date else None,
             conf=conf_val,
             disposition=disp,
             claim_ref=ref,
@@ -224,6 +279,8 @@ class MempillMemoryStore:
                 vt_start=(c.get("valid_time") or {}).get("start") or "",
                 vt_end=(c.get("valid_time") or {}).get("end") or "open",
                 claim_ref=str(c.get("claim_ref") or ""),
+                vt_start_display=c.get("valid_from_display"),
+                vt_end_display=c.get("valid_until_display"),
             )
             for c in candidates
         ]
@@ -251,42 +308,61 @@ class MempillMemoryStore:
             claim_ref=str(primary_raw.get("claim_ref") or ""),
             corroboration=currency.get("corroboration_count", 0),
             alternatives=alternatives,
+            vt_start_display=primary_raw.get("valid_from_display"),
+            vt_end_display=primary_raw.get("valid_until_display"),
         )
 
     def recall(self, subject: str, predicate: str) -> BeliefView:
-        """Query the engine and map to a BeliefView domain object."""
+        """Query the engine and map to a BeliefView domain object.
+
+        Uses raw query_memory (not the ergonomic facade) so we can extract
+        valid_from_display/valid_until_display for honest granularity rendering.
+        """
         log.info("→ query_memory subject=%s predicate=%s", subject, predicate)
-        result = _recall(self._engine, self._agent_id, subject, predicate)
-        primary_val = result.primary.value if result.primary else None
-        alt_vals = [c.value for c in result.candidates]
+        raw = self._engine.query_memory({
+            "agent_id": self._agent_id,
+            "subject": subject,
+            "predicate": predicate,
+        })
+        belief_raw = raw.get("belief", {})
+        status = belief_raw.get("status", "UNKNOWN")
+        primary_raw = belief_raw.get("primary") or {}
         log.info(
-            "← status=%s primary=%s alternatives=%s",
-            result.status, _clip(primary_val), [_clip(v) for v in alt_vals],
+            "← status=%s primary=%s",
+            status, _clip((primary_raw.get("fact") or {}).get("value")),
         )
-        log.debug("  recall full_primary=%r full_alternatives=%r", primary_val, alt_vals)
         if subject and predicate:
             self._last_recalled = (subject, predicate)
 
-        # Map candidates → AlternativeView (populated for Contested/Conflict and
-        # also for non-contested alternatives).
+        # Map candidates/alternatives → AlternativeView with display strings
+        candidates_raw = []
+        if status in ("Contested", "Conflict"):
+            # For contested, engine puts both in alternatives + possibly primary
+            if primary_raw:
+                candidates_raw.append(primary_raw)
+            candidates_raw.extend(b for b in (belief_raw.get("alternatives") or []) if b)
+        else:
+            candidates_raw = belief_raw.get("alternatives") or []
+
         alternatives = [
             AlternativeView(
-                value=c.detail.value,
-                conf=c.detail.value_confidence,
-                vt_start=c.detail.valid_from or "",
-                vt_end=c.detail.valid_until or "open",
-                claim_ref=c.detail.claim_ref,
+                value=(c.get("fact") or {}).get("value"),
+                conf=(c.get("confidence") or {}).get("value_confidence"),
+                vt_start=(c.get("valid_time") or {}).get("start") or "",
+                vt_end=(c.get("valid_time") or {}).get("end") or "open",
+                claim_ref=str(c.get("claim_ref") or ""),
+                vt_start_display=c.get("valid_from_display"),
+                vt_end_display=c.get("valid_until_display"),
             )
-            for c in result.candidates
+            for c in candidates_raw
         ]
 
-        if result.primary is None:
-            # NoBelief, Contested, or TimingUncertain — no resolved primary.
+        if not primary_raw or status in ("NoBelief", "Contested", "Conflict", "TimingUncertain"):
             return BeliefView(
                 subject=subject,
                 predicate=predicate,
-                value=None,
-                status=result.status,
+                value=None if (not primary_raw or status in ("NoBelief", "TimingUncertain")) else (primary_raw.get("fact") or {}).get("value"),
+                status=status,
                 conf=None,
                 vt_start="",
                 vt_end="",
@@ -296,19 +372,24 @@ class MempillMemoryStore:
                 alternatives=alternatives,
             )
 
-        p = result.primary
+        fact = primary_raw.get("fact") or {}
+        vt = primary_raw.get("valid_time") or {}
+        conf_raw = primary_raw.get("confidence") or {}
+        currency = primary_raw.get("currency_signal") or {}
         return BeliefView(
             subject=subject,
             predicate=predicate,
-            value=p.value,
-            status=result.status,
-            conf=p.value_confidence,
-            vt_start=p.valid_from or "",
-            vt_end=p.valid_until or "open",
-            provenance=_prov_abbr(p.provenance),
-            claim_ref=p.claim_ref,
-            corroboration=p.corroboration_count,
+            value=fact.get("value"),
+            status=status,
+            conf=conf_raw.get("value_confidence"),
+            vt_start=vt.get("start") or "",
+            vt_end=vt.get("end") or "open",
+            provenance=_prov_abbr(primary_raw.get("provenance")),
+            claim_ref=str(primary_raw.get("claim_ref") or ""),
+            corroboration=currency.get("corroboration_count", 0),
             alternatives=alternatives,
+            vt_start_display=primary_raw.get("valid_from_display"),
+            vt_end_display=primary_raw.get("valid_until_display"),
         )
 
     def last_recalled(self) -> "Optional[tuple[str, str]]":

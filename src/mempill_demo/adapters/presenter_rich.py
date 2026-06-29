@@ -27,6 +27,7 @@ from mempill_demo.domain.models import (
     SessionStats,
     _conf_str,
     _prov_abbr,
+    _granularity_display,
 )
 
 
@@ -98,10 +99,13 @@ class RichPresenter:
                 status = b.status
                 label, color = _BADGE.get(status, (status[:8], "white"))
                 cv_str = _conf_str(b.conf) if b.conf is not None else ""
+                # Use honest display strings when available (granularity-aware)
+                vf_display = b.vt_start_display or (b.vt_start[:10] if b.vt_start else "")
+                vu_display = b.vt_end_display or (b.vt_end[:10] if b.vt_end and b.vt_end != "open" else b.vt_end or "open")
                 beliefs_table.add_row(
                     b.subject, b.predicate, str(b.value),
                     Text(label, style=color),
-                    b.vt_start, b.vt_end, cv_str, b.provenance,
+                    vf_display, vu_display, cv_str, b.provenance,
                 )
         elif registry:
             # Fallback: show registry entries when beliefs not yet fetched
