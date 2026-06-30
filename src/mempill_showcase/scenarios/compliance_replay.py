@@ -452,7 +452,15 @@ def _render_narrative(report: ComplianceReport) -> str:
 # ── CLI entry ─────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    """CLI entry point: python -m mempill_showcase.scenarios.compliance_replay"""
+    """CLI entry point: python -m mempill_showcase.scenarios.compliance_replay
+
+    On startup, loads ``.env`` from the working directory so that LANGSMITH_*
+    and ANTHROPIC_API_KEY values set there take effect (LangSmith tracing,
+    LLM supervisor selection). Safe no-op when ``.env`` is absent.
+    """
+    from mempill_showcase.config.bootstrap import bootstrap
+    bootstrap()
+
     report = run_compliance_replay()
     print_compliance_report(report)
 

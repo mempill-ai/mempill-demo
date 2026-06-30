@@ -636,7 +636,14 @@ def main() -> None:
 
     Runs the full 8-beat executive-assistant scenario and prints a summary.
     No API key required — the scenario runner uses MockSupervisor internally.
+
+    On startup, loads ``.env`` from the working directory so that LANGSMITH_*
+    and ANTHROPIC_API_KEY values set there take effect (LangSmith tracing,
+    LLM supervisor selection). Safe no-op when ``.env`` is absent.
     """
+    from mempill_showcase.config.bootstrap import bootstrap
+    bootstrap()
+
     from rich.console import Console
     from rich.panel import Panel
     from rich.table import Table

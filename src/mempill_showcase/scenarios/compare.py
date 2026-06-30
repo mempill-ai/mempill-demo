@@ -335,7 +335,15 @@ def print_comparison(result: ComparisonResult) -> None:
 # ── CLI entry ─────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    """CLI entry point: python -m mempill_showcase.scenarios.compare"""
+    """CLI entry point: python -m mempill_showcase.scenarios.compare
+
+    On startup, loads ``.env`` from the working directory so that LANGSMITH_*
+    and ANTHROPIC_API_KEY values set there take effect (LangSmith tracing,
+    LLM supervisor selection). Safe no-op when ``.env`` is absent.
+    """
+    from mempill_showcase.config.bootstrap import bootstrap
+    bootstrap()
+
     result = run_comparison()
     print_comparison(result)
 

@@ -99,10 +99,50 @@ without faking past dates.
 .venv/bin/python -m pytest src/mempill_showcase/tests/ -v -m "not live"
 ```
 
-Runs all non-live tests (no API key required). Expected result: **238 passed**.
+Runs all non-live tests (no API key required). Expected result: **246 passed**.
 
 Tests are located in `src/mempill_showcase/tests/`. The `-m "not live"` flag
 excludes tests that require `ANTHROPIC_API_KEY`.
+
+---
+
+### LangSmith tracing and Anthropic API key (`.env` auto-load)
+
+The CLI entry points (`mempill-showcase`, `mempill-showcase-compare`,
+`mempill-showcase-audit`) automatically load a `.env` file from the current
+working directory at startup. This means you can place your LangSmith and
+Anthropic credentials in a `.env` file at the repo root and they will be
+picked up without any shell export.
+
+**Supported `.env` keys:**
+
+```dotenv
+# LangSmith observability (all optional — tracing is a no-op without a key)
+LANGSMITH_API_KEY=ls__...        # your LangSmith API key
+LANGSMITH_TRACING=true           # set to true to enable trace export
+LANGSMITH_PROJECT=mempill-demo   # project name in LangSmith UI (default: mempill-showcase)
+
+# Anthropic (required only for the live LLM supervisor — MockSupervisor is used otherwise)
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+When `LANGSMITH_API_KEY` and `LANGSMITH_TRACING=true` are present, running any
+CLI scenario will produce LangSmith traces in the named project. Each scenario
+run generates:
+
+- A top-level LangGraph run with all graph nodes as child spans.
+- `mempill.remember`, `mempill.recall`, `mempill.audit` tool spans (tagged
+  with `run_type="tool"`).
+- `mempill.contested` spans whenever a Functional write triggers a conflict
+  (shows the incumbent vs. challenger values in the LangSmith UI).
+
+The `.env` load is handled by `mempill_showcase.config.bootstrap.bootstrap()`,
+which is called only inside CLI `main()` functions — never at module import
+time. Test code that imports scenario or tool modules will never accidentally
+pick up a developer's local `.env`.
+
+**Shell env vars take precedence over `.env`:** if `LANGSMITH_API_KEY` is
+already set in your shell, the `.env` value is ignored (dotenv `override=False`).
 
 ---
 
