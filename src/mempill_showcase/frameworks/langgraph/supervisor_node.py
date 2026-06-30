@@ -5,6 +5,9 @@ Architecture:
   - Defines a `SupervisorClassifier` Protocol — any implementation works (mock, LLM, etc.).
   - `MockSupervisor` is a deterministic keyword/fixture classifier; NO API key, NO model call.
     It is the default implementation used in tests and the W3 graph.
+  - `LLMSupervisor` (W6) calls a real Anthropic model via langchain_anthropic.ChatAnthropic.
+    It is OPTIONAL: only instantiated when an ANTHROPIC_API_KEY is present in the environment.
+    Never call it without a key — the constructor will raise or the API call will fail.
   - `supervisor_node` is the LangGraph node function: classifies intent and sets `route`.
 
 Intent → Route mapping:
@@ -18,11 +21,16 @@ W6 seam:
   Replace MockSupervisor with an LLMSupervisor that calls a real model.
   The node function (`supervisor_node`) and the protocol do not change.
   Swap the classifier at graph build time via `build_graph(classifier=LLMSupervisor(...))`.
+
+Environment variables (LLMSupervisor):
+  ANTHROPIC_API_KEY  — required when using LLMSupervisor (raises at call time if absent).
+  ANTHROPIC_MODEL    — optional; default is "claude-3-5-haiku-20241022".
 """
 from __future__ import annotations
 
 import logging
-from typing import Protocol, runtime_checkable
+import os
+from typing import Optional, Protocol, runtime_checkable
 
 from mempill_showcase.frameworks.langgraph.state import ExecAssistantState, IntentLabel
 
@@ -142,6 +150,93 @@ class MockSupervisor:
         # 3. Default
         log.debug("MockSupervisor: no keyword match, defaulting to RECALL_HISTORY")
         return IntentLabel.RECALL_HISTORY
+
+
+# ── LLM classifier (W6 — OPTIONAL, requires ANTHROPIC_API_KEY) ───────────────
+
+_LLM_SYSTEM_PROMPT = """You are an intent classifier for an executive assistant system.
+Classify the user's message into exactly one of these intents:
+- UPDATE_CONTACT: user is reporting a new or updated fact about a contact (city, role, employer, etc.)
+- RESEARCH: user wants to look up or research external information
+- PREPARE_BRIEFING: user wants a briefing, summary, or draft for a meeting/email/event
+- RECALL_HISTORY: user is asking about a historical or past state ("what was X in Q1?", "as of January...")
+- COMPLIANCE_AUDIT: user wants an audit trail, compliance check, or belief-state history
+
+Reply with ONLY the intent label (one of the five above), nothing else.
+"""
+
+_LLM_VALID_LABELS = frozenset(IntentLabel.ALL)
+
+
+class LLMSupervisor:
+    """Real-LLM intent classifier using langchain_anthropic.ChatAnthropic.
+
+    This classifier is OPTIONAL and should only be instantiated when ANTHROPIC_API_KEY
+    is present. The default graph path always uses MockSupervisor so no API key is
+    required for tests or CI.
+
+    Construction:
+        model_name — Anthropic model string (default: env ANTHROPIC_MODEL or
+                     "claude-3-5-haiku-20241022" as a cost-effective classifier).
+        temperature — generation temperature (default 0.0 for determinism).
+
+    Falls back to RECALL_HISTORY on any API error to avoid crashing the graph.
+    """
+
+    def __init__(
+        self,
+        model_name: Optional[str] = None,
+        temperature: float = 0.0,
+    ) -> None:
+        from langchain_anthropic import ChatAnthropic
+
+        resolved_model = (
+            model_name
+            or os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+        )
+        self._llm = ChatAnthropic(model=resolved_model, temperature=temperature)
+        self._model_name = resolved_model
+        log.info("LLMSupervisor: initialised with model=%s", resolved_model)
+
+    def classify(self, user_input: str) -> str:
+        """Call the Anthropic model to classify *user_input* into an IntentLabel.
+
+        Returns one of the five IntentLabel constants.
+        Falls back to RECALL_HISTORY on any exception (safe default — read-only).
+        """
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        try:
+            messages = [
+                SystemMessage(content=_LLM_SYSTEM_PROMPT),
+                HumanMessage(content=user_input),
+            ]
+            response = self._llm.invoke(messages)
+            raw = response.content.strip().upper()
+            # Normalise: take first word/token in case the model adds punctuation
+            token = raw.split()[0].rstrip(".,;:") if raw else ""
+            if token in _LLM_VALID_LABELS:
+                log.debug("LLMSupervisor: classified %r → %s", user_input[:80], token)
+                return token
+            # Partial match fallback — model said e.g. "UPDATE" instead of "UPDATE_CONTACT"
+            for label in _LLM_VALID_LABELS:
+                if label.startswith(token) or token in label:
+                    log.debug(
+                        "LLMSupervisor: partial match %r → %s (raw=%r)",
+                        user_input[:80], label, raw,
+                    )
+                    return label
+            log.warning(
+                "LLMSupervisor: unrecognised label %r from model; defaulting to RECALL_HISTORY",
+                raw,
+            )
+            return IntentLabel.RECALL_HISTORY
+        except Exception as exc:
+            log.warning(
+                "LLMSupervisor: API call failed (%s); defaulting to RECALL_HISTORY",
+                exc,
+            )
+            return IntentLabel.RECALL_HISTORY
 
 
 # ── LangGraph node ────────────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
+from mempill_showcase.observability import traceable_mempill
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ class MempillAuditTool(BaseTool):
 
     adapter: MempillAdapter
 
+    @traceable_mempill(name="mempill.audit")
     def _run(
         self,
         agent_id: str,
