@@ -24,6 +24,19 @@ W6 additions:
     - adapter=None: creates a fresh in-memory MempillAdapter internally.
     - adapter=<existing>: reuse a pre-seeded adapter (tests / CLI).
 
+W7 additions:
+  build_mempill_adapter(in_memory=True, oracle_backed=True)
+    oracle_backed=True (NEW DEFAULT for showcase):
+      Opens engine with open_oracle_in_memory(HumanOracle()) so that genuine
+      conflicting Functional writes return QueuedForAdjudication (not bare Contested)
+      and sit in the pending queue until submit_adjudication() resolves them.
+      The adapter gains list_pending_adjudications() and submit_adjudication().
+    oracle_backed=False:
+      Falls back to open_in_memory() (non-oracle engine, W1-W6 behaviour).
+      Genuine conflicts still return Contested; oracle methods raise AttributeError.
+    Tests that need predictable CommittedCheap-only behaviour may pass
+    oracle_backed=False explicitly.
+
 Environment variables (W6):
   ANTHROPIC_API_KEY  — required for LLMSupervisor; absent = MockSupervisor.
   ANTHROPIC_MODEL    — Anthropic model for LLMSupervisor (default: claude-3-5-haiku-20241022).
@@ -44,19 +57,32 @@ class AdapterMode(str, Enum):
     NAIVE = "naive"
 
 
-def build_mempill_adapter(in_memory: bool = True):
+def build_mempill_adapter(in_memory: bool = True, oracle_backed: bool = True):
     """Build a MempillAdapter wrapping a real mempill engine.
 
-    in_memory=True  → ephemeral in-memory engine (for tests and demos)
-    in_memory=False → raises NotImplementedError (file-backed not wired in W1)
+    Args:
+        in_memory:     True → ephemeral in-memory engine (for tests and demos).
+                       False → raises NotImplementedError (file-backed not wired).
+        oracle_backed: True (default) → open_oracle_in_memory(HumanOracle()) so that
+                       genuine conflicting Functional writes return QueuedForAdjudication
+                       and queue for human adjudication via list_pending_adjudications /
+                       submit_adjudication.
+                       False → open_in_memory() (non-oracle, W1-W6 behaviour).
+                       Genuine conflicts return Contested; oracle methods raise AttributeError.
     """
-    from mempill import open_in_memory
+    import mempill
     from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
+    from mempill_showcase.core.ports.oracle import HumanOracle
 
     if not in_memory:
-        raise NotImplementedError("File-backed mempill engine not wired in W1; use in_memory=True")
+        raise NotImplementedError("File-backed mempill engine not wired; use in_memory=True")
 
-    engine = open_in_memory()
+    if oracle_backed:
+        oracle = HumanOracle()
+        engine = mempill.open_oracle_in_memory(oracle)
+    else:
+        engine = mempill.open_in_memory()
+
     return MempillAdapter(engine)
 
 

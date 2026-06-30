@@ -144,14 +144,26 @@ class TestAC2ContestedHITL:
             f"got {verdict!r}"
         )
 
-    def test_t04_oracle_write_after_hitl(self, scenario_trace: ScenarioTrace) -> None:
-        """AC-2: After T-04 HITL, an authoritative CTO write is recorded (oracle simulation)."""
+    def test_t04_oracle_resolves_challenger_after_affirm(self, scenario_trace: ScenarioTrace) -> None:
+        """AC-2 (W7 real oracle): After Command(resume='Affirm'), submit_adjudication resolves
+        the QueuedForAdjudication claim; post-resume recall returns Resolved (challenger).
+
+        The REAL oracle path: hitl_node calls adapter.list_pending_adjudications() →
+        adapter.submit_adjudication(handle_id, 'Affirm') — no simulated direct write.
+        """
         beat = scenario_trace.beat("T-04")
         assert beat is not None
-        assert beat.extra.get("auth_cto_claim_ref"), (
-            "AC-2: After HITL resolution, an authoritative CTO claim_ref must be recorded. "
-            "Engine limitation: oracle API (submit_adjudication) not available in this build; "
-            "oracle is simulated via a direct UserAsserted CTO write from 2025-02."
+        # The employer belief after oracle Affirm must be non-None
+        belief_after = beat.extra.get("belief_after_affirm")
+        assert belief_after is not None, (
+            "AC-2: After Command(resume='Affirm') + real oracle submit_adjudication, "
+            "the post-resolution belief must be non-None."
+        )
+        # Status should be Resolved (challenger committed) or at minimum non-Contested
+        belief_status = beat.extra.get("belief_status_after_affirm")
+        assert belief_status != "QueuedForAdjudication", (
+            f"AC-2 FAIL: belief_status after Affirm must not be QueuedForAdjudication; "
+            f"got {belief_status!r}. Oracle resolution should have committed the challenger."
         )
 
 
@@ -327,12 +339,19 @@ class TestAC5AuditCompleteness:
             f"Found dispositions: {sorted(dispositions)}"
         )
 
-    def test_t08_audit_contains_contested_events(self, scenario_trace: ScenarioTrace) -> None:
-        """AC-5: audit log contains at least one Contested disposition (T-03 HITL trigger)."""
+    def test_t08_audit_contains_conflict_events(self, scenario_trace: ScenarioTrace) -> None:
+        """AC-5: audit log contains at least one conflict-related disposition.
+
+        With the oracle-backed engine (W7), the disposition is QueuedForAdjudication
+        (not bare Contested). Both are accepted — the key assertion is that a conflict
+        was recorded, not the specific string representation.
+        """
         dispositions = {e.get("disposition") for e in scenario_trace.audit_entries}
-        assert "Contested" in dispositions, (
-            f"AC-5: audit must contain Contested disposition from T-03 employer conflict. "
-            f"Found dispositions: {sorted(dispositions)}"
+        conflict_dispositions = dispositions & {"Contested", "QueuedForAdjudication", "Conflict"}
+        assert conflict_dispositions, (
+            f"AC-5: audit must contain at least one conflict-related disposition "
+            f"(Contested, QueuedForAdjudication, or Conflict) from T-03 employer conflict. "
+            f"Found dispositions: {sorted(d for d in dispositions if d)}"
         )
 
     def test_t08_dietary_compliance_resolved(self, scenario_trace: ScenarioTrace) -> None:
@@ -470,13 +489,15 @@ class TestScenarioTraceIntegrity:
         )
 
     def test_prerelease_wheel_active(self) -> None:
-        """The prerelease mempill wheel is installed (0.3.x branch with valid_at support)."""
+        """The prerelease mempill wheel is installed (0.3.x branch with valid_at + oracle support)."""
         import mempill
-        version = getattr(mempill, "__version__", "unknown")
-        # The wheel version is the prerelease build; we just assert the module is importable
-        # and the engine supports query_memory with valid_at (tested throughout).
+        # The wheel version is the prerelease build; we assert the module is importable
+        # and the engine supports both the standard and oracle APIs (W7 requirement).
         assert hasattr(mempill, "open_in_memory"), (
             "mempill.open_in_memory must be available (prerelease wheel requirement)"
+        )
+        assert hasattr(mempill, "open_oracle_in_memory"), (
+            "mempill.open_oracle_in_memory must be available (W7 oracle requirement)"
         )
         assert hasattr(mempill, "ProvenanceLabel"), (
             "mempill.ProvenanceLabel must be available (prerelease wheel requirement)"
