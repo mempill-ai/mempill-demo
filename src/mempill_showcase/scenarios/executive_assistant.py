@@ -378,8 +378,16 @@ def run_scenario(
     trace.mempill_write_count_t03 = 2  # acme-corp/cto (direct) + crew_b distil write
 
     # Step C: crew_a graph write alice-chen/employer=CTO with same valid_from as VP Eng
-    # (2023-06) → genuine temporal overlap → oracle queues adjudication →
+    # (2023-06) → genuine same-period contradiction → oracle queues adjudication →
     # graph routes to hitl_node → graph PAUSES here.
+    #
+    # CONSTRUCTION CHOICE: "same valid_from = 2023-06" is used instead of an undated
+    # claim because:
+    #   - Undated (valid_from=None) claims: after Affirm the engine returns
+    #     TimingUncertain on current recall (no temporal anchor to determine currency).
+    #   - Same valid_from (2023-06): genuine same-period contradiction → Contested →
+    #     after Affirm the challenger is CommittedCheap with a known start date →
+    #     current recall returns Resolved with value = "Acme Corp / CTO".
     # This is the HITL trigger thread used by T-04 Command(resume='Affirm').
     cfg_t03 = {"configurable": {"thread_id": "t03-hitl"}}
     state_t03_hitl = {

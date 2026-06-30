@@ -233,9 +233,11 @@ def _build_pending_contested(
 
 # ── LLM extractor (W10 — single structured call, ANTHROPIC_API_KEY required) ──
 
-_EXTRACTOR_SYSTEM = """You are a claim extraction engine for a bi-temporal memory system.
+_EXTRACTOR_SYSTEM_TEMPLATE = """You are a claim extraction engine for a bi-temporal memory system.
 
 Given a natural-language sentence, extract ONE atomic fact and return it as a JSON object.
+
+Today's date (UTC): {today}
 
 Known canonical entity keys:
   alice-chen   → Alice Chen, alice
@@ -264,16 +266,27 @@ DISAMBIGUATION RULE — person's title vs company's officer:
 Rules:
 - Return ONLY a JSON object — no prose, no markdown, no extra text.
 - If you cannot confidently extract the entity or predicate, set them to null.
-- valid_from: ISO date in YYYY, YYYY-MM, or YYYY-MM-DD format. "now" or no explicit date → null.
+- valid_from: ISO date in YYYY, YYYY-MM, or YYYY-MM-DD format.
+  Temporal keywords that mean TODAY → use today's date ({today}) as valid_from:
+    "now", "is now", "currently", "today", "at the moment", "as of now", "as of today"
+  Example: "Alice is now the CTO" → valid_from = "{today}" (today's date).
+  Only use null if there is genuinely no temporal anchor at all (no mention of time).
 - value: a short descriptive string.
 
 JSON schema:
-{
+{{
   "entity":     "<canonical entity key or null>",
   "predicate":  "<canonical predicate key or null>",
   "value":      "<claim value string>",
   "valid_from": "<YYYY[-MM[-DD]] or null>"
-}"""
+}}"""
+
+
+def _extractor_system_prompt() -> str:
+    """Build the LLMExtractor system prompt with today's date injected."""
+    from datetime import date
+    today = date.today().isoformat()
+    return _EXTRACTOR_SYSTEM_TEMPLATE.format(today=today)
 
 
 class LLMExtractor:
@@ -310,8 +323,9 @@ class LLMExtractor:
             from langchain_anthropic import ChatAnthropic
             from langchain_core.messages import HumanMessage, SystemMessage
             llm = ChatAnthropic(model=self._model, temperature=0.0)
+            # Build prompt with today's date so "is now" maps to a real valid_from
             messages = [
-                SystemMessage(content=_EXTRACTOR_SYSTEM),
+                SystemMessage(content=_extractor_system_prompt()),
                 HumanMessage(content=f"Sentence: {sentence}"),
             ]
             response = llm.invoke(messages)

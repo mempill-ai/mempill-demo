@@ -1,7 +1,20 @@
 # mempill Studio Demo Script
 
 Exhaustive demo covering every route in the ExecAssistant graph.
-Verified end-to-end with real LLM (`claude-haiku-4-5-20251001`) on 2026-06-30.
+Verified end-to-end with real LLM (`claude-haiku-4-5`) on 2026-06-30.
+
+**Key fixes (2026-06-30):**
+- Bug 1 (resolved conflict is answerable): Conflict construction changed to same-period
+  overlap (see Turn 7 below). Undated challengers return `TimingUncertain` after Affirm
+  because the engine has no temporal anchor — use a dated claim with the same `valid_from`
+  as the incumbent to guarantee `Resolved` status after adjudication.
+- Bug 2 (role/title phrasing): `resolve_predicate('role')`, `resolve_predicate('title')`,
+  `resolve_predicate('position')`, and `resolve_predicate('job')` now all map to `'employer'`.
+  "What role is Alice holding?" returns the same belief as "Who is Alice's employer?".
+- LLMExtractor: "now"/"is now"/"currently" temporal keywords now map to today's date as
+  `valid_from` (previously mapped to `null`). "Alice is now the CTO" → dated CTO claim →
+  clean CommittedCheap succession when today > incumbent's `valid_from`. Use the
+  same-period phrasing (Turn 7) when you want to demonstrate the HITL conflict flow.
 
 ---
 
@@ -163,24 +176,31 @@ Summary: Acme Corp is a mid-market technology company founded in 2015 that produ
 ### Turn 7 — UPDATE → Contested → HITL interrupt (R7)
 **Node path:** supervisor → crew_a → hitl_node ← **PAUSED**
 
-**User Input:**
+**User Input (use this exact phrasing to guarantee HITL):**
 ```
-Alice is now the CTO of Acme Corp
+Alice has actually been CTO of Acme since June 2023, not VP Engineering
 ```
+
+> **Why this phrasing?** The LLMExtractor extracts `valid_from=2023-06` — the SAME start date
+> as the incumbent VP Engineering (2023-06-01). A same-period overlap is a genuine contradiction
+> → QueuedForAdjudication → HITL. Using "Alice is now the CTO" (without a date) previously
+> caused `TimingUncertain` after resolution (no temporal anchor). After the 2026-06-30 fix,
+> "Alice is now the CTO" maps "is now" → today's date → clean CommittedCheap succession
+> (no conflict, no HITL). Use the above phrasing to force the conflict demonstration.
 
 **What lights up:** `supervisor` (UPDATE_CONTACT) → `crew_a` → `hitl_node` (red/orange — INTERRUPTED)
 
 **What happens:**
-- `LLMExtractor` extracts: `alice-chen/employer=Acme Corp / CTO`
-- Current belief: `Acme Corp / VP Engineering` (same subject/predicate, no clear succession)
-- No `valid_from` → overlapping temporal claim → **Contested** → QueuedForAdjudication
+- `LLMExtractor` extracts: `alice-chen/employer=Acme Corp / CTO, valid_from=2023-06`
+- Current belief: `Acme Corp / VP Engineering` (same period, genuine temporal overlap)
+- Same `valid_from=2023-06` → genuine same-period contradiction → **Contested** → QueuedForAdjudication
 - Graph **pauses** at `hitl_node`
 
 **Interrupt payload shown in Studio (Interrupts panel):**
 ```
 Conflict on alice-chen/employer:
   Incumbent:  'Acme Corp / VP Engineering' (valid from 2023-06, source: UserAsserted)
-  Challenger: 'Acme Corp / CTO' (valid from unknown, source: UserAsserted)
+  Challenger: 'Acme Corp / CTO' (valid from 2023-06, source: UserAsserted)
 Which is correct? Reply: 'Affirm' (challenger wins), 'Deny' (incumbent wins), or 'Abstain' (defer).
 ```
 
@@ -206,16 +226,17 @@ Pasting `Acme Corp / CTO` → maps to `Affirm`; pasting `Acme Corp / VP Engineer
 
 **Expected output:**
 ```
-HITL resolved alice-chen/employer: 'Acme Corp / CTO' (challenger wins, verdict=Affirm) [from adjudication outcome — temporal window ambiguous]
+HITL resolved alice-chen/employer: 'Acme Corp / CTO' (challenger wins, verdict=Affirm) status=Resolved
 ```
 > **Verified:** `hitl_node` calls `adapter.list_pending_adjudications()` → finds the queued handle
 > → calls `adapter.submit_adjudication(handle_id, "Affirm")` → oracle engine resolves the conflict.
 > The challenger (CTO) is committed; the incumbent (VP Engineering) is superseded.
-> Post-resolution `recall_tool` confirms the belief is resolved.
+> Post-resolution recall confirms `status=Resolved, value='Acme Corp / CTO'` (not TimingUncertain).
 >
-> Note: if `valid_from` was not provided in Turn 7, mempill may report `TimingUncertain`
-> (the oracle accepted the Affirm but the temporal window is ambiguous). This is expected
-> behavior — the fact was resolved, time anchor is unknown.
+> **Why Resolved (not TimingUncertain)?** The CTO claim has `valid_from=2023-06` — the same
+> period as the incumbent. After Affirm, the engine knows the temporal anchor and can determine
+> the current belief. An undated claim (no `valid_from`) would return `TimingUncertain` after
+> Affirm because the engine has no anchor. Use same-period phrasing to get `Resolved` recall.
 >
 > **Invalid verdicts are safe:** if you type something unrecognized (e.g. `xyz`), `hitl_node`
 > returns `"Invalid verdict 'xyz'. Reply 'Affirm'...'` and keeps the claim Contested — it
@@ -335,29 +356,33 @@ crew_c [recall_history]: alice-chen/travel_preference='business class' status=Re
 
 ### Step (d) — Contested Claim → HITL Interrupt
 
-**User Input:**
+**User Input (use this exact phrasing to force same-period conflict):**
 ```
-Alice is now the CTO of Acme Corp
+Alice has actually been CTO of Acme since June 2023, not VP Engineering
 ```
+
+> **Why this phrasing?** "Alice is now the CTO" maps "is now" → today's date (2026-06-30)
+> → dated CTO claim → clean CommittedCheap succession (no conflict, no HITL) because
+> today > VP's valid_from (2023-06-01). The same-period phrasing forces `valid_from=2023-06`
+> which overlaps with VP Engineering (same period) → genuine contradiction → HITL.
 
 **Expected node path:** supervisor → crew_a → hitl_node ← **PAUSED**
 
 **Expected state:**
 - `intent=UPDATE_CONTACT`
 - `__interrupt__` in state (graph paused)
-- `pending_contested=None` is NOT set yet (set inside hitl_node interrupt payload)
+- `pending_contested` populated with incumbent (VP Engineering) and challenger (CTO)
 
 **Interrupt payload shown in Studio (Interrupts panel):**
 ```
 Conflict on alice-chen/employer:
-  Incumbent:  'Acme Corp / VP Engineering' (valid from 2023-06-01, source: UserAsserted)
-  Challenger: 'Acme Corp / CTO' (valid from None, source: ExternalFirstHand)
+  Incumbent:  'Acme Corp / VP Engineering' (valid from 2023-06, source: UserAsserted)
+  Challenger: 'Acme Corp / CTO' (valid from 2023-06, source: UserAsserted)
 Which is correct? Reply: 'Affirm' (challenger wins), 'Deny' (incumbent wins), or 'Abstain' (defer).
 ```
 
-> `route=hitl CONFIRMED`. The claim is undated ("Alice is now...") → no valid_from →
-> temporal overlap with the incumbent VP Engineering claim → QueuedForAdjudication →
-> graph routes to hitl_node → interrupt fires.
+> `route=hitl CONFIRMED`. Same-period `valid_from=2023-06` on both claims → genuine
+> temporal contradiction → QueuedForAdjudication → graph routes to hitl_node → interrupt fires.
 
 ---
 
@@ -382,10 +407,10 @@ Garbage strings (e.g. `xyz`) return an error message and keep the claim Conteste
 
 **Expected output:**
 ```
-HITL resolved alice-chen/employer: verdict=Affirm → resolved: alice-chen/employer = 'Acme Corp / CTO' (verdict=Affirm) [from adjudication outcome — temporal window ambiguous]
+HITL resolved alice-chen/employer: 'Acme Corp / CTO' (challenger wins, verdict=Affirm) status=Resolved
 ```
 
-**Expected state (non-null resolved belief):**
+**Expected state:**
 ```json
 {
   "hitl_verdict": "Affirm",
@@ -393,23 +418,18 @@ HITL resolved alice-chen/employer: verdict=Affirm → resolved: alice-chen/emplo
     "subject": "alice-chen",
     "predicate": "employer",
     "value": "Acme Corp / CTO",
-    "status": "Resolved",
-    "disposition": "CommittedCheap",
-    "source": "adjudication_outcome",
-    "note": "Post-resolution recall returned TimingUncertain (undated conflict). Winner determined from adjudication: verdict=Affirm."
+    "status": "Resolved"
   },
   "pending_contested": null
 }
 ```
 
-> **`hitl_resolved_belief` is non-null** — the conflict resolved to `"Acme Corp / CTO"`.
+> **`hitl_resolved_belief` is non-null and `status=Resolved`** — the conflict resolved to
+> `"Acme Corp / CTO"` with a clean Resolved status (not TimingUncertain) because the CTO
+> claim has a temporal anchor (`valid_from=2023-06`).
 >
-> The post-resolution recall returns `TimingUncertain` (because the undated claim
-> has no temporal anchor, so the engine cannot determine which window is current).
-> The FIX ensures `hitl_resolved_belief` falls back to the adjudication outcome
-> (`challenger_value` for Affirm, `incumbent_value` for Deny) which is always available.
->
-> The user can now clearly see: **the conflict resolved to CTO**.
+> The user can now clearly see: **the conflict resolved to CTO, and the next recall
+> returns CTO with Resolved status**.
 
 ---
 
@@ -419,10 +439,10 @@ To demonstrate the Deny path, start a **new thread** in Studio (click "New Threa
 
 **User Input:**
 ```
-Alice is now the CTO of Acme Corp
+Alice has actually been CTO of Acme since June 2023, not VP Engineering
 ```
 
-→ Graph pauses at `hitl_node` (same Contested scenario).
+→ Graph pauses at `hitl_node` (same Contested scenario — same-period conflict).
 
 **Resume payload:**
 ```
@@ -449,19 +469,17 @@ What is Alice's current employer?
 
 **Expected node path:** supervisor → crew_c → END
 
-**Expected output (after Affirm):**
+**Expected output (after Affirm with same-period construction):**
 ```
-crew_c [recall_history]: alice-chen/employer=None status=TimingUncertain
+crew_c [recall_history]: alice-chen/employer='Acme Corp / CTO' status=Resolved
 ```
 
-> **Why TimingUncertain?** The undated challenger (CTO) was accepted by the oracle (Affirm),
-> but without a temporal anchor the engine cannot determine which valid-time window is current.
-> The HITL turn output (step e) already surfaced the winner = CTO from the adjudication outcome.
+> **Why Resolved?** The CTO claim was written with `valid_from=2023-06` (same-period
+> construction). After Affirm, the engine knows the temporal anchor → `Resolved` recall.
 >
-> **If you want a clean Resolved recall:** demonstrate step (d) with a dated claim:
-> `"Alice has been CTO of Acme since January 2025"` — this gives the CTO claim a valid_from
-> of 2025-01, which clearly supersedes VP Engineering (2023-06). The post-resolution recall
-> then returns `Resolved` with value `"Acme Corp / CTO"`.
+> **Also works: role/title phrasing.** "What role is Alice holding now?" now returns the same
+> belief as "What is Alice's current employer?" — both map to the `employer` predicate via
+> `canonical_keys.resolve_predicate('role')` → `'employer'`. Bug 2 is fixed.
 
 ---
 
@@ -487,9 +505,9 @@ rm -f .mempill/showcase_1.db
 | R4    | RECALL_HISTORY  | supervisor → crew_c            | bi-temporal: city@2024 = Austin TX        | PASS   |
 | R5    | PREPARE_BRIEFING| supervisor → crew_c            | Briefing: employer + city + dietary       | PASS   |
 | R6    | RESEARCH        | supervisor → crew_b            | RAG+411 chars; 2 claims distilled         | PASS   |
-| R7    | UPDATE_CONTACT  | supervisor → crew_a → hitl_node| Contested → INTERRUPTED                   | PASS   |
-| R8    | HITL Affirm     | hitl_node resume               | CTO accepted; oracle Affirm submitted     | PASS   |
-| R9    | HITL Deny       | hitl_node resume (fresh thread)| VP Engineering survives; oracle Deny      | PASS   |
+| R7    | UPDATE_CONTACT  | supervisor → crew_a → hitl_node| Contested → INTERRUPTED (same-period)     | PASS   |
+| R8    | HITL Affirm     | hitl_node resume               | CTO wins; recall→Resolved (not TimingUncertain) | PASS   |
+| R9    | HITL Deny       | hitl_node resume (fresh thread)| VP Engineering survives; recall→Resolved  | PASS   |
 | R10   | COMPLIANCE_AUDIT| supervisor → crew_c            | 12+ audit entries returned               | PASS   |
 
 ---

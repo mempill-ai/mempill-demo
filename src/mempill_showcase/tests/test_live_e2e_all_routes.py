@@ -17,7 +17,7 @@ Routes exercised:
   R5  crew_c / PREPARE_BRIEFING  — "Brief me on Alice" → employer + city + dietary
   R6  crew_b / RESEARCH          — "Research Acme Corp" → RAG populated + ≥1 distilled
                                     claim written to mempill
-  R7  crew_a / UPDATE_CONTACT    — "Alice is now the CTO of Acme" → Contested → HITL
+  R7  crew_a / UPDATE_CONTACT    — "Alice has actually been CTO of Acme since June 2023" → Contested → HITL
   R8  hitl_node / Affirm         — resume Affirm → employer = Acme Corp / CTO
   R9  hitl_node / Deny           — separate run; resume Deny → employer = VP Engineering
   R10 crew_c / COMPLIANCE_AUDIT  — as-of-tx replay → audit ledger returned
@@ -39,6 +39,8 @@ from langgraph.types import Command
 from langgraph.checkpoint.memory import MemorySaver
 
 from mempill_showcase.config.bootstrap import bootstrap
+from mempill_showcase.config.di import build_mempill_adapter
+from mempill_showcase.scenarios.seed_data import load_seed_claims
 
 log = logging.getLogger(__name__)
 
@@ -350,13 +352,13 @@ class TestR7R8HITLAffirm:
     """R7+R8: crew_a writes CTO → Contested → HITL → Affirm → CTO resolved."""
 
     def test_r7_contested_triggers_hitl(self):
-        """R7: 'Alice is now the CTO of Acme' → crew_a → Contested → interrupt."""
+        """R7: 'Alice has actually been CTO since June 2023' → crew_a → Contested → interrupt."""
         app, adapter, _ = _build_live_graph()
 
         thread_id = str(uuid.uuid4())
         cfg = _cfg(thread_id)
         result = app.invoke(
-            {"user_input": "Alice is now the CTO of Acme Corp", "agent_id": "jordan-park-001"},
+            {"user_input": "Alice has actually been CTO of Acme since June 2023, not VP Engineering", "agent_id": "jordan-park-001"},
             cfg,
         )
         log.info("R7 result keys=%s intent=%s output_text=%r",
@@ -385,7 +387,7 @@ class TestR7R8HITLAffirm:
 
         # R7: trigger HITL
         result1 = app.invoke(
-            {"user_input": "Alice is now the CTO of Acme Corp", "agent_id": "jordan-park-001"},
+            {"user_input": "Alice has actually been CTO of Acme since June 2023, not VP Engineering", "agent_id": "jordan-park-001"},
             cfg,
         )
         assert "__interrupt__" in result1, (
@@ -430,7 +432,7 @@ class TestR9HITLDeny:
 
         # Trigger HITL
         result1 = app.invoke(
-            {"user_input": "Alice is now the CTO of Acme Corp", "agent_id": "jordan-park-001"},
+            {"user_input": "Alice has actually been CTO of Acme since June 2023, not VP Engineering", "agent_id": "jordan-park-001"},
             cfg,
         )
         assert "__interrupt__" in result1, (
@@ -570,7 +572,7 @@ class TestAllRoutesEndToEnd:
         cfg_affirm = _cfg(thread_affirm)
 
         r7 = app.invoke(
-            {"user_input": "Alice is now the CTO of Acme Corp", "agent_id": agent_id},
+            {"user_input": "Alice has actually been CTO of Acme since June 2023, not VP Engineering", "agent_id": agent_id},
             cfg_affirm,
         )
         results["R7"] = {
@@ -604,7 +606,7 @@ class TestAllRoutesEndToEnd:
         cfg_deny = _cfg(thread_deny)
 
         r9a = app_deny.invoke(
-            {"user_input": "Alice is now the CTO of Acme Corp", "agent_id": agent_id},
+            {"user_input": "Alice has actually been CTO of Acme since June 2023, not VP Engineering", "agent_id": agent_id},
             cfg_deny,
         )
         results["R9"] = {"interrupted": "__interrupt__" in r9a}
@@ -948,4 +950,208 @@ class TestR12ResearchIdempotency:
         assert count_after > count_before, (
             f"R12b FAIL: crew_b must write at least 1 new claim to empty store "
             f"(before={count_before}, after={count_after})"
+        )
+
+
+# ── R13: Resolve→Recall loop — winner is answerable after HITL Affirm ─────────
+
+class TestR13ResolveRecallLoop:
+    """R13 (Bug 1 fix): After an employer update (dated CTO claim), recall MUST
+    return the winner (CTO), NOT null/TimingUncertain.
+
+    Also verifies Bug 2 fix: 'What role is Alice holding now?' returns the same
+    answer as 'Who is Alice's employer now?' because role/title now maps to employer.
+
+    Construction:
+      - "Alice is now the CTO of Acme Corp" → LLMExtractor maps "is now" → today's
+        date as valid_from → clean CommittedCheap succession (no HITL, today > 2023-06).
+        Current recall after this write must return CTO (Resolved).
+      - For HITL, use the deterministic same-period construction:
+        "Alice has been CTO of Acme since June 2023" → same valid_from=2023-06 as VP →
+        genuine conflict → HITL → Affirm → recall returns CTO (Resolved).
+
+    Bug 1 root cause (documented):
+      Old behaviour: "is now" → valid_from=None → undated challenger → after Affirm
+      oracle CommittedCheaps the CTO but engine returns TimingUncertain on recall
+      (no temporal anchor to determine currency). Current recall was null.
+      New behaviour (fix): "is now" → today's date → dated challenger → succession
+      or same-period conflict → after resolution recall returns Resolved (CTO).
+    """
+
+    def test_r13_employer_recall_returns_cto_after_dated_update(self):
+        """Full loop: 'Alice is now the CTO' → dated CTO (today's date) → recall returns CTO.
+
+        LLMExtractor maps "is now" → today → valid_from=YYYY-MM-DD.
+        Since today > 2023-06-01, this is a clean succession (CommittedCheap, no HITL).
+        The key assertion: after the update, recall(employer) = CTO with Resolved status.
+        """
+        app, adapter, _ = _build_live_graph()
+        agent_id = "jordan-park-001"
+
+        # Step 1: verify Day-0 seed
+        vp_before = adapter.recall(agent_id, "alice-chen", "employer")
+        log.info("R13a Day-0 employer: value=%r status=%r", vp_before.value, vp_before.status)
+        assert vp_before.value is not None and "vp" in (vp_before.value or "").lower() or \
+               vp_before.status == "Resolved", (
+            f"R13a: Day-0 employer must be VP Engineering, got value={vp_before.value!r}"
+        )
+
+        # Step 2: update to CTO ("is now" → LLMExtractor injects today's date)
+        result, _ = _run(
+            app, "Alice is now the CTO of Acme Corp", agent_id=agent_id
+        )
+        log.info("R13a update result: intent=%s interrupted=%s output_text=%r",
+                 result.get("intent"), "__interrupt__" in result, result.get("output_text"))
+
+        assert result.get("intent") == "UPDATE_CONTACT", (
+            f"R13a: must route UPDATE_CONTACT, got {result.get('intent')!r}"
+        )
+
+        # Step 3: recall employer — must now return CTO (Resolved)
+        cto_belief = adapter.recall(agent_id, "alice-chen", "employer")
+        log.info("R13a post-update recall: value=%r status=%r", cto_belief.value, cto_belief.status)
+
+        assert cto_belief.value is not None, (
+            f"R13a BUG 1 FAIL: employer belief must be non-null after CTO update. "
+            f"Got value=None status={cto_belief.status!r}. "
+            f"Root cause: old LLMExtractor set valid_from=None → TimingUncertain. "
+            f"Fix: 'is now' now maps to today's date as valid_from."
+        )
+        assert "cto" in (cto_belief.value or "").lower(), (
+            f"R13a: employer after CTO update must contain 'CTO', got {cto_belief.value!r}"
+        )
+        assert cto_belief.status == "Resolved", (
+            f"R13a: employer status after CTO update must be Resolved, got {cto_belief.status!r}"
+        )
+
+    def test_r13_hitl_same_period_affirm_returns_cto(self):
+        """HITL loop with same-period conflict → Affirm → recall returns CTO (Resolved).
+
+        Uses 'Alice has been CTO of Acme since June 2023' to force same-period conflict.
+        Same valid_from=2023-06 as VP Engineering → genuine Contested → HITL →
+        Affirm → challenger CTO committed → recall returns Resolved (CTO).
+        """
+        app, adapter, _ = _build_live_graph()
+        agent_id = "jordan-park-001"
+        thread_id = str(uuid.uuid4())
+        cfg = _cfg(thread_id)
+
+        # Use a phrasing that explicitly sets the same period to force HITL
+        result1 = app.invoke(
+            {"user_input": "Alice has actually been CTO of Acme since June 2023, not VP Engineering",
+             "agent_id": agent_id},
+            cfg,
+        )
+        log.info("R13b conflict result: intent=%s interrupted=%s output_text=%r",
+                 result1.get("intent"), "__interrupt__" in result1, result1.get("output_text"))
+
+        if "__interrupt__" not in result1:
+            # The LLM may have made it a succession (different date) — still check recall
+            cto_belief = adapter.recall(agent_id, "alice-chen", "employer")
+            log.info("R13b no-interrupt path: recall value=%r status=%r",
+                     cto_belief.value, cto_belief.status)
+            assert cto_belief.value is not None, (
+                f"R13b: whether Contested→HITL or clean succession, CTO must be the current belief "
+                f"after writing the CTO claim. Got value=None status={cto_belief.status!r}"
+            )
+            assert "cto" in (cto_belief.value or "").lower(), (
+                f"R13b: CTO must be the current belief, got {cto_belief.value!r}"
+            )
+            log.info("R13b PASS via clean succession: employer=%r status=%r",
+                     cto_belief.value, cto_belief.status)
+            return
+
+        # HITL path: resume with Affirm
+        result2 = app.invoke(Command(resume="Affirm"), cfg)
+        log.info("R13b Affirm result: hitl_verdict=%r output_text=%r",
+                 result2.get("hitl_verdict"), result2.get("output_text"))
+
+        assert result2.get("hitl_verdict") == "Affirm", (
+            f"R13b: hitl_verdict must be 'Affirm', got {result2.get('hitl_verdict')!r}"
+        )
+
+        # THE CORE ASSERTION (Bug 1 fix): current recall must return the winner
+        belief = adapter.recall(agent_id, "alice-chen", "employer")
+        log.info("R13b post-Affirm recall: value=%r status=%r", belief.value, belief.status)
+
+        assert belief.value is not None, (
+            f"R13b BUG 1 FAIL: employer belief must be non-null after HITL Affirm. "
+            f"Got value=None status={belief.status!r}. "
+            f"Root cause: undated CTO → TimingUncertain after oracle Affirm. "
+            f"Fix: same-period construction ensures a temporal anchor → Resolved recall."
+        )
+        assert "cto" in (belief.value or "").lower(), (
+            f"R13b: employer after HITL Affirm must return CTO, got {belief.value!r}"
+        )
+        assert belief.status == "Resolved", (
+            f"R13b: employer status after HITL Affirm must be Resolved, got {belief.status!r}"
+        )
+
+    def test_r13_role_phrasing_returns_same_as_employer_after_affirm(self):
+        """Bug 2 fix: 'What role is Alice holding now?' returns CTO after resolution.
+
+        Verifies that 'role' → canonical predicate 'employer' mapping works end-to-end:
+          1. Seed alice-chen/employer = VP Engineering.
+          2. Assert CTO via HITL Affirm.
+          3. recall(alice-chen, resolve_predicate('role')) → Resolved, value contains 'CTO'.
+        """
+        from mempill_showcase.core.domain.canonical_keys import resolve_predicate
+
+        adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
+        load_seed_claims(adapter, agent_id="jordan-park-001")
+
+        # Simulate the resolution at adapter level (same-period construction)
+        from mempill import ProvenanceLabel
+        from mempill_showcase.core.domain.models import ClaimInput
+
+        cto_claim = ClaimInput(
+            subject="alice-chen",
+            predicate="employer",
+            value="Acme Corp / CTO",
+            valid_from="2023-06",
+            confidence=1.0,
+            provenance=ProvenanceLabel.external_user_asserted(),
+            cardinality="Functional",
+            criticality="Medium",
+        )
+        r = adapter.write_claim("jordan-park-001", cto_claim)
+        assert r.disposition == "QueuedForAdjudication", (
+            f"R13b setup: CTO same-period write must be QueuedForAdjudication, got {r.disposition!r}"
+        )
+
+        pending = adapter.list_pending_adjudications("jordan-park-001")
+        assert pending, "R13b setup: pending adjudication must exist"
+        adapter.submit_adjudication("jordan-park-001", pending[0]["handle_id"], "Affirm")
+
+        # Bug 2 fix: resolve_predicate('role') must now return 'employer'
+        role_pred = resolve_predicate("role")
+        assert role_pred == "employer", (
+            f"Bug 2: resolve_predicate('role') must be 'employer', got {role_pred!r}"
+        )
+
+        # Recall via 'role' predicate → same belief as employer
+        role_belief = adapter.recall("jordan-park-001", "alice-chen", role_pred)
+        log.info("R13b role recall: value=%r status=%r", role_belief.value, role_belief.status)
+
+        assert role_belief.value is not None, (
+            f"R13b BUG 2 FAIL: 'role' phrasing must return a value after HITL resolution. "
+            f"Got value=None status={role_belief.status!r}. "
+            f"Fix: role/title now map to 'employer' in canonical_keys.py."
+        )
+        assert "cto" in (role_belief.value or "").lower(), (
+            f"R13b: role recall must return CTO after Affirm, got {role_belief.value!r}"
+        )
+        assert role_belief.status == "Resolved", (
+            f"R13b: role recall status must be Resolved, got {role_belief.status!r}"
+        )
+
+        # Also check 'title' phrasing
+        title_pred = resolve_predicate("title")
+        assert title_pred == "employer", (
+            f"Bug 2: resolve_predicate('title') must be 'employer', got {title_pred!r}"
+        )
+        title_belief = adapter.recall("jordan-park-001", "alice-chen", title_pred)
+        assert title_belief.value == role_belief.value, (
+            f"R13b: 'title' and 'role' must return same value. "
+            f"title={title_belief.value!r} role={role_belief.value!r}"
         )

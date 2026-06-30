@@ -80,11 +80,15 @@ _PREDICATE_ALIASES: dict[str, str] = {
     # CTO
     "cto":                  "cto",
     "chief technology officer": "cto",
-    # role / title
-    "title":                "title",
-    "role":                 "title",
-    "job title":            "title",
-    "position":             "title",
+    # role / title / position — person's job/title is stored under "employer"
+    # (seed + all writes use "employer" as "Company / Job Title").
+    # These aliases map to "employer" so "what role does Alice hold?" resolves
+    # the same belief as "who is Alice's employer?".
+    "title":                "employer",
+    "role":                 "employer",
+    "job title":            "employer",
+    "position":             "employer",
+    "job":                  "employer",
 }
 
 
