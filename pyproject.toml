@@ -10,6 +10,7 @@ dependencies = [
     "anthropic>=0.111,<1",
     "mcp>=1.9,<2",
     "mempill>=0.2.1,<0.3",
+    "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
     "rich>=13",
 ]
@@ -47,6 +48,9 @@ sources = ["src"]
 
 [project.scripts]
 mempill-console = "mempill_demo.__main__:main"
+mempill-showcase = "mempill_showcase.scenarios.executive_assistant:main"
+mempill-showcase-compare = "mempill_showcase.scenarios.compare:main"
+mempill-showcase-audit = "mempill_showcase.scenarios.compliance_replay:main"
 
 [tool.pytest.ini_options]
 markers = [

@@ -629,6 +629,68 @@ def run_scenario(
     return trace
 
 
+# ── CLI entry ─────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    """CLI entry point: mempill-showcase console command.
+
+    Runs the full 8-beat executive-assistant scenario and prints a summary.
+    No API key required — the scenario runner uses MockSupervisor internally.
+    """
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich import box
+
+    from mempill_showcase.config.di import build_mempill_adapter
+
+    console = Console()
+    console.print()
+    console.print(Panel(
+        "[bold white]mempill Executive Assistant Scenario[/bold white]\n"
+        "[dim]8-beat deterministic run (no API key required)[/dim]",
+        border_style="blue",
+    ))
+
+    adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
+    trace = run_scenario(adapter)
+
+    table = Table(
+        title="[bold]Beat Results[/bold]",
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold cyan",
+        expand=True,
+    )
+    table.add_column("Beat", width=6, style="bold")
+    table.add_column("Description", ratio=2)
+    table.add_column("Op", width=20)
+    table.add_column("Value / Result", ratio=2)
+    table.add_column("Status", width=14)
+
+    for beat in trace.beats:
+        value_str = beat.value or "-"
+        if len(value_str) > 40:
+            value_str = value_str[:37] + "..."
+        status_style = "green" if beat.status in ("Resolved", "audit_complete") else "yellow"
+        table.add_row(
+            beat.beat_id,
+            beat.description[:60] + "…" if len(beat.description) > 60 else beat.description,
+            beat.mempill_op,
+            value_str,
+            f"[{status_style}]{beat.status or '-'}[/{status_style}]",
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]tx_before_nyc_write: {trace.tx_before_nyc_write}[/dim]")
+    console.print(f"[dim]audit_entries: {len(trace.audit_entries)}[/dim]")
+    console.print(
+        "\n[bold green]Scenario complete.[/bold green] "
+        "Run [cyan]mempill-showcase-compare[/cyan] for naive-vs-mempill contrast, "
+        "or [cyan]mempill-showcase-audit[/cyan] for the compliance replay.\n"
+    )
+
+
 # ── Utility: filter query_history entries by a valid_at timestamp ─────────────
 
 def _find_value_at(entries: list[dict], valid_at_iso: str) -> Optional[str]:

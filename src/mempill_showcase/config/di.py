@@ -37,6 +37,13 @@ W7 additions:
     Tests that need predictable CommittedCheap-only behaviour may pass
     oracle_backed=False explicitly.
 
+W9 additions:
+  build_app_from_settings(settings)
+    Settings-driven factory that selects the adapter based on NAIVE_MODE.
+    settings.naive_mode=False (default) → MempillAdapter (bi-temporal, oracle-backed)
+    settings.naive_mode=True            → NaiveAdapter (last-write-wins, no bi-temporal)
+    Returns (app, adapter) — same contract as build_app().
+
 Environment variables (W6):
   ANTHROPIC_API_KEY  — required for LLMSupervisor; absent = MockSupervisor.
   ANTHROPIC_MODEL    — Anthropic model for LLMSupervisor (default: claude-3-5-haiku-20241022).
@@ -165,6 +172,53 @@ def build_langgraph(
 
     app = build_graph(adapter=adapter, tools=tools, classifier=classifier, crews=crews)
     return app, adapter
+
+
+# ── W9: build_app_from_settings (NAIVE_MODE toggle) ──────────────────────────
+
+def build_app_from_settings(settings=None):
+    """W9 settings-driven factory: select adapter based on NAIVE_MODE.
+
+    Args:
+        settings: a Settings instance (or compatible object with .naive_mode).
+                  If None, loads from environment via get_settings().
+
+    Returns:
+        (app, adapter) — compiled LangGraph app + the chosen adapter.
+
+    Adapter selection:
+        settings.naive_mode=False (default) → MempillAdapter (bi-temporal, oracle-backed)
+        settings.naive_mode=True            → NaiveAdapter (last-write-wins, no bi-temporal)
+
+    Example — default (mempill):
+        app, adapter = build_app_from_settings()
+        # adapter is MempillAdapter
+
+    Example — naive mode via env (NAIVE_MODE=true):
+        import os; os.environ["NAIVE_MODE"] = "true"
+        app, adapter = build_app_from_settings()
+        # adapter is NaiveAdapter — watch it misbehave
+
+    Example — explicit settings:
+        from mempill_showcase.config.settings import Settings
+        app, adapter = build_app_from_settings(Settings(naive_mode=True))
+    """
+    if settings is None:
+        from mempill_showcase.config.settings import get_settings
+        settings = get_settings()
+
+    if settings.naive_mode:
+        # Naive mode: return the NaiveAdapter without a LangGraph app.
+        # The NaiveAdapter is intentionally NOT a BiTemporalMemoryStore, so the
+        # mempill-specific LangChain tools (MempillRememberTool etc.) cannot be
+        # built against it. Callers in naive mode should interact with the adapter
+        # directly (write_claim / recall / audit) or via naive_baseline.py.
+        # We return (None, adapter) so callers can still inspect the adapter.
+        adapter = build_naive_adapter()
+        return None, adapter
+    else:
+        adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
+        return build_app(adapter=adapter)
 
 
 def build_app(
