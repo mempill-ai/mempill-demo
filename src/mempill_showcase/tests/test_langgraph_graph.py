@@ -467,3 +467,66 @@ class TestStudioGraph:
             "LangGraph Studio rejects graphs with custom checkpointers. "
             f"Got checkpointer={type(checkpointer).__name__!r}"
         )
+
+    def test_studio_graph_adapter_seeded_with_day0_data(self) -> None:
+        """Importing studio_graph seeds the adapter: alice-chen/city returns Austin TX."""
+        from mempill_showcase.frameworks.langgraph.studio_graph import studio_adapter
+        from mempill_showcase.scenarios.seed_data import AGENT_ID
+
+        belief = studio_adapter.recall(AGENT_ID, "alice-chen", "city")
+        assert belief is not None, "recall must return a belief (not None)"
+        assert belief.value == "Austin TX", (
+            f"Day-0 seed city should be 'Austin TX', got {belief.value!r}"
+        )
+        assert belief.status == "Resolved", (
+            f"Day-0 belief status should be 'Resolved', got {belief.status!r}"
+        )
+
+    def test_studio_graph_adapter_seeded_dietary(self) -> None:
+        """Seeded adapter also has alice-chen/dietary_restriction=vegetarian."""
+        from mempill_showcase.frameworks.langgraph.studio_graph import studio_adapter
+        from mempill_showcase.scenarios.seed_data import AGENT_ID
+
+        belief = studio_adapter.recall(AGENT_ID, "alice-chen", "dietary_restriction")
+        assert belief is not None
+        assert belief.value == "vegetarian", (
+            f"Expected 'vegetarian', got {belief.value!r}"
+        )
+
+    def test_studio_graph_agent_id_defaulting(self) -> None:
+        """supervisor_with_default injects agent_id='jordan-park-001' when state is empty."""
+        import uuid
+        from mempill_showcase.frameworks.langgraph.studio_graph import graph
+        from mempill_showcase.scenarios.seed_data import AGENT_ID
+
+        cfg = {"configurable": {"thread_id": str(uuid.uuid4())}}
+        # Invoke with user_input only — no agent_id — should not crash and should default
+        result = graph.invoke({"user_input": "intent:recall_history"}, cfg)
+        # agent_id should be set to default in the final state
+        assert result.get("agent_id") == AGENT_ID, (
+            f"agent_id should default to {AGENT_ID!r}, got {result.get('agent_id')!r}"
+        )
+
+    def test_studio_graph_classifier_selection_no_key(self, monkeypatch) -> None:
+        """With no ANTHROPIC_API_KEY in env, _build_studio_graph selects MockSupervisor."""
+        import os
+        from mempill_showcase.frameworks.langgraph.supervisor_node import MockSupervisor, LLMSupervisor
+        from mempill_showcase.frameworks.langgraph.studio_graph import _build_studio_graph
+
+        # Temporarily remove the key if present
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        _, _, classifier = _build_studio_graph()
+        assert isinstance(classifier, MockSupervisor), (
+            f"Without ANTHROPIC_API_KEY, classifier should be MockSupervisor, got {type(classifier).__name__}"
+        )
+
+    def test_studio_graph_classifier_selection_with_key(self, monkeypatch) -> None:
+        """With ANTHROPIC_API_KEY set (any non-empty value), _build_studio_graph selects LLMSupervisor."""
+        from mempill_showcase.frameworks.langgraph.supervisor_node import LLMSupervisor
+        from mempill_showcase.frameworks.langgraph.studio_graph import _build_studio_graph
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key-for-selection-test")
+        _, _, classifier = _build_studio_graph()
+        assert isinstance(classifier, LLMSupervisor), (
+            f"With ANTHROPIC_API_KEY set, classifier should be LLMSupervisor, got {type(classifier).__name__}"
+        )

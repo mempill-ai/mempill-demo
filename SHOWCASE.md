@@ -93,42 +93,78 @@ without faking past dates.
 
 ---
 
-### View the graph in LangGraph Studio
+### Try it in Studio — interactive demo recipe
 
 LangGraph Studio lets you visualize and interactively run the supervisor→crews→hitl
-graph with a UI. No API key is required — MockSupervisor runs deterministically.
+graph with a UI.
 
-**One-time setup (langgraph-cli is already in the venv):**
+**Setup:**
 
-```bash
-# Skip if already installed:
-.venv/bin/python -m uv pip install "langgraph-cli[inmem]"
-```
+1. (Optional but recommended) Add your Anthropic API key to `.env` at the repo root
+   for natural-language intent routing via the real LLM supervisor:
 
-**Start Studio:**
+   ```dotenv
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
 
-```bash
-.venv/bin/langgraph dev
-```
+   Without the key, `MockSupervisor` (deterministic keyword routing) is used — the
+   demo still works, but free-form messages like "Hi" may route unexpectedly.
 
-Studio opens the local API server at `http://127.0.0.1:2024` and prints a link
-to the Studio UI at `https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024`.
+2. Start Studio:
 
-- Select the **exec_assistant** graph in the Studio sidebar.
-- The graph shows: `supervisor` → `crew_a` / `crew_b` / `crew_c` → `hitl_node`.
-- Send an input such as:
-  ```json
-  {"user_input": "prepare briefing for Alice Chen dinner", "agent_id": "demo-agent"}
-  ```
-- **MockSupervisor is the default** — no API key needed.
-- Set `ANTHROPIC_API_KEY` in `.env` to switch to the live LLM supervisor.
+   ```bash
+   .venv/bin/langgraph dev
+   ```
+
+   Studio opens at `http://127.0.0.1:2024` and prints a link to the Studio UI at
+   `https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024`.
+
+3. Select the **exec_assistant** graph in the Studio sidebar.
+
+**What happens at startup:**
+
+The graph module seeds 7 Day-0 facts for agent `jordan-park-001` automatically
+(Alice Chen: Austin, VP Engineering, vegetarian; Bob Liu: employer, travel prefs;
+Acme Corp CEO; Jordan Park hotel). The in-memory store persists across turns within
+a single `langgraph dev` session.
+
+**How to use the Input form:**
+
+Fill in **only the `User Input` field** — leave all other fields blank.
+`agent_id` defaults to `jordan-park-001` automatically.
+
+**Suggested demo sequence:**
+
+| Turn | User Input | Expected behaviour |
+|------|-----------|-------------------|
+| 1 | `What's Alice Chen's current city?` | crew_c RECALL_HISTORY → `Austin TX` (seeded Day-0) |
+| 2 | `Alice moved to New York in February 2025` | crew_a UPDATE_CONTACT → succession write; current belief becomes `New York NY` |
+| 3 | `What's Alice Chen's city now?` | crew_c → `New York NY` (succession committed in turn 2) |
+| 4 | `What was Alice's city in Q1 2024?` | crew_c RECALL_HISTORY → point-in-time query at 2024-01; returns `Austin TX` (bi-temporal, before the move) |
+| 5 | `Alice is now the CTO of Acme` | crew_a writes employer; if valid_from overlaps existing VP Engineering belief → **Contested** → graph interrupts at `hitl_node` |
+
+**Handling Contested writes (HITL interrupt):**
+
+When turn 5 triggers a conflict, Studio shows an **Interrupts** panel on the right.
+The interrupt payload describes the incumbent belief vs. the challenger claim.
+To resume:
+
+1. Open the **Interrupts** panel.
+2. Enter a verdict in the resume field: `Affirm` (accept the new claim), `Deny`
+   (keep the incumbent), or `Abstain` (leave it Contested).
+3. Click **Submit**. The graph resumes at `hitl_node`, resolves the belief, and
+   sets `hitl_verdict` in the final state.
+
+**Notes:**
+
+- Writes within a session accumulate — turn 2's NYC write is visible in turn 3.
+- The store resets when you restart `langgraph dev` (in-memory only).
+- Stop Studio with `Ctrl-C`.
 
 The `langgraph.json` manifest at the repo root points Studio to:
 ```
 src/mempill_showcase/frameworks/langgraph/studio_graph.py:graph
 ```
-
-Stop Studio with `Ctrl-C`.
 
 ---
 
@@ -138,7 +174,7 @@ Stop Studio with `Ctrl-C`.
 .venv/bin/python -m pytest src/mempill_showcase/tests/ -v -m "not live"
 ```
 
-Runs all non-live tests (no API key required). Expected result: **250 passed**.
+Runs all non-live tests (no API key required). Expected result: **255 passed**.
 
 Tests are located in `src/mempill_showcase/tests/`. The `-m "not live"` flag
 excludes tests that require `ANTHROPIC_API_KEY`.
