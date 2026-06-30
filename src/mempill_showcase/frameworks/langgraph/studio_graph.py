@@ -10,18 +10,22 @@ Design:
   - Defaults agent_id to "jordan-park-001" (the seeded agent) when the user leaves
     that field blank in Studio.
   - If ANTHROPIC_API_KEY is present in the environment (loaded via .env), uses
-    LLMSupervisor for natural-language intent routing; otherwise MockSupervisor.
+    LLMSupervisor for natural-language intent routing AND CrewAI crews for LLM
+    extraction in crew_a/b/c nodes (full free-form input path).
+    Without a key: MockSupervisor + deterministic shell heuristics (CI-safe).
   - The graph is compiled WITHOUT a MemorySaver so LangGraph Studio / `langgraph dev`
     can attach its own checkpointer (Studio rejects graphs with a custom checkpointer).
+  - Default model: claude-haiku-4-5 (overridable via ANTHROPIC_MODEL env var).
 
 Usage (LangGraph Studio):
-  1. Optionally set ANTHROPIC_API_KEY in .env for best results (natural language routing).
+  1. Set ANTHROPIC_API_KEY in .env to enable LLM routing + CrewAI extraction.
+     Without a key, MockSupervisor + shell heuristics are used (deterministic, no API).
   2. .venv/bin/langgraph dev          # Studio opens at http://127.0.0.1:2024
   3. In Studio, select the "exec_assistant" graph.
   4. Fill ONLY the "User Input" field — agent_id defaults to "jordan-park-001".
   5. The Day-0 seed is already loaded; try e.g.:
        "What's Alice Chen's current city?"   → Austin TX (seeded)
-       "Alice moved to New York in February 2025" → succession write
+       "Alice moved to New York in February 2025" → succession write (UPDATE_CONTACT)
 
 Nodes:
   supervisor  — intent classification + routing (with default agent_id injection)
@@ -51,6 +55,7 @@ from mempill_showcase.frameworks.langgraph.graph import (
 )
 from mempill_showcase.frameworks.langgraph.hitl_node import make_hitl_node
 from mempill_showcase.frameworks.langgraph.state import ExecAssistantState
+from mempill_showcase.frameworks.langgraph.crew_nodes import LLMExtractor
 from mempill_showcase.frameworks.langgraph.supervisor_node import (
     MockSupervisor,
     make_supervisor_node,
@@ -73,6 +78,7 @@ def _build_studio_graph():
       2. Build oracle-backed in-memory MempillAdapter.
       3. Seed Day-0 claims so the store has real facts from turn 1.
       4. Select LLMSupervisor (if ANTHROPIC_API_KEY present) or MockSupervisor.
+         When a key is present, also build CrewAI crews for LLM extraction in nodes.
       5. Wrap the supervisor node to inject default agent_id when blank.
       6. Compile the graph without a MemorySaver (Studio manages persistence).
 
@@ -121,6 +127,29 @@ def _build_studio_graph():
     # Step 5: build nodes
     tools = build_tools(adapter)
 
+    # When API key is available, build a focused LLMExtractor for crew_a.
+    # The LLMExtractor makes ONE structured Anthropic call to extract
+    # {entity, predicate, value, valid_from} from free-form text, then the
+    # Python remember_tool writes to mempill (reliable — no tool-loop, no
+    # hallucinated JSON).  CrewAI crew kickoff was evaluated and found
+    # unreliable: agents fabricate "Final Answer" JSON without calling tools.
+    # Without an API key, extractor=None → deterministic shell heuristics.
+    extractor = None
+    if api_key:
+        try:
+            llm_model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
+            extractor = LLMExtractor(model_name=llm_model)
+            log.info(
+                "studio_graph: LLMExtractor built with model=%r (LLM extraction path active for crew_a)",
+                llm_model,
+            )
+        except Exception as exc:
+            log.warning(
+                "studio_graph: LLMExtractor init failed (%s) — falling back to shell extraction",
+                exc,
+            )
+            extractor = None
+
     inner_supervisor_fn = make_supervisor_node(classifier)
 
     def supervisor_with_default(state: ExecAssistantState) -> dict:
@@ -142,6 +171,7 @@ def _build_studio_graph():
         date_parser=tools.date_parser,
         adapter=adapter,
         crew=None,
+        extractor=extractor,
     )
     crew_b_fn = make_crew_b_node(
         remember_tool=tools.remember_tool,
@@ -189,8 +219,9 @@ def _build_studio_graph():
     compiled = g.compile(checkpointer=None)
     log.info(
         "studio_graph: compiled ExecAssistant StateGraph "
-        "(classifier=%s, seeded=%d claims, default_agent_id=%r, no MemorySaver)",
+        "(classifier=%s, extraction=%s, seeded=%d claims, default_agent_id=%r, no MemorySaver)",
         type(classifier).__name__,
+        f"LLMExtractor({os.environ.get('ANTHROPIC_MODEL', 'claude-haiku-4-5')})" if extractor else "shell-heuristics",
         _seed_count,
         _DEFAULT_AGENT_ID,
     )

@@ -8,7 +8,7 @@ Key env vars:
   NAIVE_MODE=true          → use the NaiveAdapter instead of mempill (flip to watch it misbehave)
   MEMPILL_DB_PATH          → optional path for a file-backed engine (not wired; reserved)
   ANTHROPIC_API_KEY        → required for LLMSupervisor; absent → MockSupervisor (CI-safe)
-  ANTHROPIC_MODEL          → model string for LLMSupervisor (default: claude-3-5-haiku-20241022)
+  ANTHROPIC_MODEL          → model string for LLMSupervisor (default: claude-haiku-4-5)
   LANGSMITH_API_KEY        → enables LangSmith tracing (optional; absent → no-op)
   LANGSMITH_TRACING        → "true" to force-enable tracing
   LANGSMITH_PROJECT        → LangSmith project name (default: "mempill-showcase")
@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     anthropic_api_key: Optional[str] = None
     """Anthropic API key. Required for LLMSupervisor. Absent → MockSupervisor."""
 
-    anthropic_model: str = "claude-3-5-haiku-20241022"
+    anthropic_model: str = "claude-haiku-4-5"
     """Anthropic model for LLMSupervisor."""
 
     langsmith_api_key: Optional[str] = None

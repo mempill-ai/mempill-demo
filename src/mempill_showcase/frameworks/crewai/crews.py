@@ -55,7 +55,7 @@ def build_crews(
     Args:
         adapter: MempillAdapter (the mempill boundary; used in tool construction).
         tools:   ShowcaseTools NamedTuple from config/di.py (all W2 tool instances).
-        llm:     Optional LiteLLM model string (e.g. "anthropic/claude-3-5-sonnet-20241022")
+        llm:     Optional LiteLLM model string (e.g. "anthropic/claude-haiku-4-5")
                  or a crewai.LLM instance. When None, CrewAI uses env API keys.
 
     Returns:

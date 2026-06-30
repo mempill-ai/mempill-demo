@@ -98,17 +98,26 @@ without faking past dates.
 LangGraph Studio lets you visualize and interactively run the supervisor→crews→hitl
 graph with a UI.
 
+**Default model:** `claude-haiku-4-5` (overridable via `ANTHROPIC_MODEL` in `.env`).
+
 **Setup:**
 
-1. (Optional but recommended) Add your Anthropic API key to `.env` at the repo root
-   for natural-language intent routing via the real LLM supervisor:
+1. Add your Anthropic API key to `.env` at the repo root to enable the full LLM
+   routing + extraction path (required for free-form input to work correctly):
 
    ```dotenv
    ANTHROPIC_API_KEY=sk-ant-...
+   # Optional — override the default model:
+   # ANTHROPIC_MODEL=claude-haiku-4-5
    ```
 
-   Without the key, `MockSupervisor` (deterministic keyword routing) is used — the
-   demo still works, but free-form messages like "Hi" may route unexpectedly.
+   With `ANTHROPIC_API_KEY` set, the graph uses:
+   - `LLMSupervisor` (claude-haiku-4-5) for intent classification, and
+   - `LLMExtractor` (single structured call) to parse entity/predicate/value/valid_from
+     from free-form sentences before writing to mempill.
+
+   Without the key, `MockSupervisor` (deterministic keyword routing) + shell heuristics
+   are used — the demo still works for standard inputs but may misroute unusual phrasing.
 
 2. Start Studio:
 
@@ -124,24 +133,35 @@ graph with a UI.
 **What happens at startup:**
 
 The graph module seeds 7 Day-0 facts for agent `jordan-park-001` automatically
-(Alice Chen: Austin, VP Engineering, vegetarian; Bob Liu: employer, travel prefs;
-Acme Corp CEO; Jordan Park hotel). The in-memory store persists across turns within
-a single `langgraph dev` session.
+(Alice Chen: Austin TX, Acme Corp / VP Engineering, vegetarian; Bob Liu: Meridian
+Ventures / Partner, travel prefs; Acme Corp CEO Diane Foster; Jordan Park hotel).
+The in-memory store persists across turns within a single `langgraph dev` session.
 
 **How to use the Input form:**
 
 Fill in **only the `User Input` field** — leave all other fields blank.
 `agent_id` defaults to `jordan-park-001` automatically.
 
-**Suggested demo sequence:**
+**Verified demo sequence (with ANTHROPIC_API_KEY):**
 
 | Turn | User Input | Expected behaviour |
 |------|-----------|-------------------|
 | 1 | `What's Alice Chen's current city?` | crew_c RECALL_HISTORY → `Austin TX` (seeded Day-0) |
-| 2 | `Alice moved to New York in February 2025` | crew_a UPDATE_CONTACT → succession write; current belief becomes `New York NY` |
-| 3 | `What's Alice Chen's city now?` | crew_c → `New York NY` (succession committed in turn 2) |
-| 4 | `What was Alice's city in Q1 2024?` | crew_c RECALL_HISTORY → point-in-time query at 2024-01; returns `Austin TX` (bi-temporal, before the move) |
-| 5 | `Alice is now the CTO of Acme` | crew_a writes employer; if valid_from overlaps existing VP Engineering belief → **Contested** → graph interrupts at `hitl_node` |
+| 2 | `Alice moved to New York in February 2025` | LLMSupervisor → UPDATE_CONTACT → crew_a: LLMExtractor extracts `alice-chen/city=New York valid_from=2025-02` → mempill writes CommittedCheap succession; current belief becomes `New York` |
+| 3 | `What's Alice Chen's city now?` | crew_c → `New York` (succession committed in turn 2) |
+| 4 | `What was Alice's city in Q1 2024?` | crew_c RECALL_HISTORY → bi-temporal query at 2024-06-01 → `Austin TX` (before the move) |
+| 5 | `Alice is now CTO of Acme` | LLMExtractor maps to `alice-chen/employer=Acme Corp / CTO` (no date → overlaps open-ended VP Engineering belief) → **Contested** → graph routes to `hitl_node` |
+
+**LLM extraction details:**
+
+`LLMExtractor` makes one structured Anthropic API call per UPDATE_CONTACT turn to
+extract `{entity, predicate, value, valid_from}` from free-form text. The Python
+`mempill_remember` tool then writes to mempill (reliable — no agent tool-loops).
+
+Examples verified with `claude-haiku-4-5`:
+- `"Alice moved to New York in February 2025"` → `alice-chen / city = "New York" @ 2025-02` → CommittedCheap (clean succession over Austin TX 2023-06..2025-02)
+- `"Alice is now CTO of Acme"` → `alice-chen / employer = "Acme Corp / CTO" @ null` → Contested vs VP Engineering (no date → overlapping) → HITL
+- Bi-temporal: `query_at(alice-chen, city, valid_at=2024-06-01)` → `"Austin TX"` ✓
 
 **Handling Contested writes (HITL interrupt):**
 

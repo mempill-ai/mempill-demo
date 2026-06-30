@@ -46,7 +46,7 @@ W9 additions:
 
 Environment variables (W6):
   ANTHROPIC_API_KEY  — required for LLMSupervisor; absent = MockSupervisor.
-  ANTHROPIC_MODEL    — Anthropic model for LLMSupervisor (default: claude-3-5-haiku-20241022).
+  ANTHROPIC_MODEL    — Anthropic model for LLMSupervisor (default: claude-haiku-4-5).
   LANGSMITH_API_KEY  — enables LangSmith tracing (optional; absent = no-op).
   LANGSMITH_TRACING  — set to "true" to force-enable tracing.
   LANGSMITH_PROJECT  — LangSmith project name (default: "mempill-showcase").
@@ -156,7 +156,7 @@ def build_langgraph(
         use_crewai:  False (default) → deterministic shell path (no API key, CI-safe).
                      True → CrewAI crews are injected into crew_a/b/c nodes.
                      The shell heuristics remain as a fallback if kickoff() fails.
-        llm:         LiteLLM model string (e.g. "anthropic/claude-3-5-sonnet-20241022")
+        llm:         LiteLLM model string (e.g. "anthropic/claude-haiku-4-5")
                      or a crewai.LLM instance.  Forwarded to build_crews().
                      Ignored when use_crewai=False.
     """
@@ -247,8 +247,9 @@ def build_app(
         adapter:     Pre-built MempillAdapter to reuse (e.g. a pre-seeded adapter
                      from a test or CLI). When None, a fresh in-memory adapter
                      is created internally.
-        llm:         LiteLLM model string or crewai.LLM instance; forwarded to
-                     build_crews() when use_crewai=True. Ignored otherwise.
+        llm:         LiteLLM model string (e.g. "anthropic/claude-haiku-4-5") or
+                     crewai.LLM instance; forwarded to build_crews() when
+                     use_crewai=True. Ignored otherwise.
 
     Returns:
         (app, adapter) — compiled LangGraph app + the MempillAdapter instance.

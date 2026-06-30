@@ -24,7 +24,7 @@ W6 seam:
 
 Environment variables (LLMSupervisor):
   ANTHROPIC_API_KEY  — required when using LLMSupervisor (raises at call time if absent).
-  ANTHROPIC_MODEL    — optional; default is "claude-3-5-haiku-20241022".
+  ANTHROPIC_MODEL    — optional; default is "claude-haiku-4-5".
 """
 from __future__ import annotations
 
@@ -177,7 +177,7 @@ class LLMSupervisor:
 
     Construction:
         model_name — Anthropic model string (default: env ANTHROPIC_MODEL or
-                     "claude-3-5-haiku-20241022" as a cost-effective classifier).
+                     "claude-haiku-4-5" as a cost-effective classifier).
         temperature — generation temperature (default 0.0 for determinism).
 
     Falls back to RECALL_HISTORY on any API error to avoid crashing the graph.
@@ -192,7 +192,7 @@ class LLMSupervisor:
 
         resolved_model = (
             model_name
-            or os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+            or os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
         )
         self._llm = ChatAnthropic(model=resolved_model, temperature=temperature)
         self._model_name = resolved_model
