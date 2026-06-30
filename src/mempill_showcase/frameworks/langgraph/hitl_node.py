@@ -116,10 +116,23 @@ def make_hitl_node(adapter: "MempillAdapter", recall_tool: "MempillRecallTool"):
         log.info("hitl_node: interrupting for %s/%s — awaiting human verdict", subject, predicate)
 
         # --- GRAPH PAUSES HERE ---
-        verdict: str = interrupt(interrupt_payload)
+        raw_verdict: str = interrupt(interrupt_payload)
         # --- GRAPH RESUMES HERE with verdict from Command(resume=...) ---
 
-        log.info("hitl_node: resumed with verdict=%r for %s/%s", verdict, subject, predicate)
+        log.info("hitl_node: resumed with raw verdict=%r for %s/%s", raw_verdict, subject, predicate)
+
+        # ── Normalize / map the resume value to a canonical verdict ─────────
+        # Accepts: exact keywords (Affirm/Deny/Abstain), synonyms, and pasted
+        # candidate values (challenger_value → Affirm, incumbent_value → Deny).
+        verdict = _normalize_verdict(
+            raw_verdict,
+            challenger_value=challenger.get("value"),
+            incumbent_value=incumbent.get("value"),
+        )
+        log.info(
+            "hitl_node: normalized verdict=%r (raw=%r) for %s/%s",
+            verdict, raw_verdict, subject, predicate,
+        )
 
         resolved_belief_json: str | None = None
 
@@ -178,32 +191,133 @@ def make_hitl_node(adapter: "MempillAdapter", recall_tool: "MempillRecallTool"):
             log.info(
                 "hitl_node: human abstained — leaving %s/%s as Contested", subject, predicate
             )
-        else:
-            log.warning("hitl_node: unrecognised verdict %r — treating as Abstain", verdict)
+        elif verdict == "_invalid_":
+            log.warning(
+                "hitl_node: unrecognised verdict raw=%r for %s/%s — not resolving",
+                raw_verdict, subject, predicate,
+            )
+        # (no else — all canonical verdicts handled above)
 
-        output = f"HITL resolved {subject}/{predicate}: verdict={verdict}"
-        if resolved_belief_json:
-            try:
-                rb = json.loads(resolved_belief_json)
-                resolved_val = rb.get("value")
-                resolved_status = rb.get("status")
-                output += f" → resolved: {subject}/{predicate} = {resolved_val!r} (verdict={verdict})"
-                if rb.get("source") == "adjudication_outcome":
-                    output += " [from adjudication outcome — temporal window ambiguous]"
-                else:
-                    output += f" status={resolved_status}"
-            except Exception:
-                pass
+        # ── Build output_text and decide whether to clear pending_contested ──
+        if verdict in ("Affirm", "Deny"):
+            # Genuine resolution: format the resolved-belief summary.
+            output = f"HITL resolved {subject}/{predicate}:"
+            if resolved_belief_json:
+                try:
+                    rb = json.loads(resolved_belief_json)
+                    resolved_val = rb.get("value")
+                    resolved_status = rb.get("status")
+                    winning_label = (
+                        "challenger" if verdict == "Affirm" else "incumbent"
+                    )
+                    output += (
+                        f" {resolved_val!r} ({winning_label} wins, verdict={verdict})"
+                    )
+                    if rb.get("source") == "adjudication_outcome":
+                        output += " [from adjudication outcome — temporal window ambiguous]"
+                    else:
+                        output += f" status={resolved_status}"
+                except Exception:
+                    output += f" verdict={verdict}"
+            else:
+                output += f" verdict={verdict}"
+            return {
+                "hitl_verdict": verdict,
+                "hitl_resolved_belief": resolved_belief_json,
+                "pending_contested": None,  # cleared — genuinely resolved
+                "output_text": output,
+            }
 
-        return {
-            "hitl_verdict": verdict,
-            "hitl_resolved_belief": resolved_belief_json,
-            "pending_contested": None,
-            "output_text": output,
-        }
+        elif verdict == "Abstain":
+            output = (
+                f"HITL deferred {subject}/{predicate} — still Contested (Abstain). "
+                "Reply 'Affirm' (challenger wins), 'Deny' (incumbent wins), or 'Abstain' to defer."
+            )
+            return {
+                "hitl_verdict": verdict,
+                "hitl_resolved_belief": None,
+                "pending_contested": contested,  # keep — not resolved
+                "output_text": output,
+            }
+
+        else:  # verdict == "_invalid_"
+            output = (
+                f"Invalid verdict {raw_verdict!r}. "
+                "Reply 'Affirm' (challenger wins), 'Deny' (incumbent wins), or 'Abstain'."
+            )
+            return {
+                "hitl_verdict": raw_verdict,  # preserve raw for transparency
+                "hitl_resolved_belief": None,
+                "pending_contested": contested,  # keep — not resolved
+                "output_text": output,
+            }
 
     hitl_node.__name__ = "hitl_node"
     return hitl_node
+
+
+def _normalize_verdict(
+    raw: str,
+    *,
+    challenger_value: str | None,
+    incumbent_value: str | None,
+) -> str:
+    """Map a raw human resume string to a canonical verdict.
+
+    Mapping priority (first match wins):
+      1. Exact keyword (case-insensitive, stripped): affirm / deny / abstain.
+      2. Synonym: yes/accept/challenger → Affirm; no/reject/incumbent → Deny;
+         defer/skip → Abstain.
+      3. Pasted candidate value (case/space-insensitive):
+           challenger_value → Affirm; incumbent_value → Deny.
+      4. Unrecognized → returns sentinel "_invalid_".
+
+    Args:
+        raw: The raw string the human typed / pasted.
+        challenger_value: The challenger claim value from the interrupt payload.
+        incumbent_value: The incumbent claim value from the interrupt payload.
+
+    Returns:
+        "Affirm" | "Deny" | "Abstain" | "_invalid_"
+    """
+    normed = raw.strip().lower()
+    # Remove surrounding quotes that Studio may inject
+    normed = normed.strip("\"'")
+
+    # 1. Exact keyword match
+    if normed == "affirm":
+        return "Affirm"
+    if normed == "deny":
+        return "Deny"
+    if normed == "abstain":
+        return "Abstain"
+
+    # 2. Synonyms
+    _affirm_synonyms = {"yes", "accept", "challenger", "approve", "confirm", "correct"}
+    _deny_synonyms = {"no", "reject", "incumbent", "decline", "wrong", "incorrect"}
+    _abstain_synonyms = {"defer", "skip", "later", "unsure", "unknown", "pass"}
+
+    if normed in _affirm_synonyms:
+        return "Affirm"
+    if normed in _deny_synonyms:
+        return "Deny"
+    if normed in _abstain_synonyms:
+        return "Abstain"
+
+    # 3. Pasted candidate value — compare after collapsing whitespace
+    def _canon(s: str | None) -> str:
+        if s is None:
+            return ""
+        return " ".join(s.lower().split())
+
+    normed_collapsed = " ".join(normed.split())
+    if challenger_value and normed_collapsed == _canon(challenger_value):
+        return "Affirm"
+    if incumbent_value and normed_collapsed == _canon(incumbent_value):
+        return "Deny"
+
+    # 4. Unrecognized
+    return "_invalid_"
 
 
 def _resolve_via_oracle_or_reconcile(

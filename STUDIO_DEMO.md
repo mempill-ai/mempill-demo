@@ -190,16 +190,23 @@ Which is correct? Reply: 'Affirm' (challenger wins), 'Deny' (incumbent wins), or
 **How to resume in Studio:**
 In the **Interrupts** panel that appears when the graph pauses, enter the verdict in the resume field:
 
-**Resume payload:**
+**Resume payload (any of these work):**
 ```
 Affirm
 ```
+or paste the challenger value directly:
+```
+Acme Corp / CTO
+```
+(Verdict normalization accepts: exact keywords `Affirm`/`Deny`/`Abstain`, synonyms
+`yes`/`accept`/`no`/`reject`/`defer`/`skip`, or the pasted candidate value verbatim.
+Pasting `Acme Corp / CTO` → maps to `Affirm`; pasting `Acme Corp / VP Engineering` → maps to `Deny`.)
 
 **What lights up:** `hitl_node` resumes → END
 
 **Expected output:**
 ```
-HITL resolved alice-chen/employer: verdict=Affirm
+HITL resolved alice-chen/employer: 'Acme Corp / CTO' (challenger wins, verdict=Affirm) [from adjudication outcome — temporal window ambiguous]
 ```
 > **Verified:** `hitl_node` calls `adapter.list_pending_adjudications()` → finds the queued handle
 > → calls `adapter.submit_adjudication(handle_id, "Affirm")` → oracle engine resolves the conflict.
@@ -209,6 +216,13 @@ HITL resolved alice-chen/employer: verdict=Affirm
 > Note: if `valid_from` was not provided in Turn 7, mempill may report `TimingUncertain`
 > (the oracle accepted the Affirm but the temporal window is ambiguous). This is expected
 > behavior — the fact was resolved, time anchor is unknown.
+>
+> **Invalid verdicts are safe:** if you type something unrecognized (e.g. `xyz`), `hitl_node`
+> returns `"Invalid verdict 'xyz'. Reply 'Affirm'...'` and keeps the claim Contested — it
+> never falsely reports "resolved".
+>
+> **Abstain:** reply `Abstain` (or `defer`/`skip`) to leave the claim Contested without
+> resolving it. `hitl_resolved_belief` stays null; `pending_contested` is preserved.
 
 ---
 
@@ -350,12 +364,19 @@ Which is correct? Reply: 'Affirm' (challenger wins), 'Deny' (incumbent wins), or
 ### Step (e) — Resolve via HITL (Affirm — CTO wins)
 
 **How to resume in Studio:**
-In the **Interrupts** panel, enter the verdict in the resume field:
+In the **Interrupts** panel, enter the verdict in the resume field.
 
-**Resume payload:**
+**Resume payload** (any of these are accepted):
 ```
 Affirm
 ```
+or paste the candidate value directly (maps to Affirm because it matches the challenger):
+```
+Acme Corp / CTO
+```
+Accepted verdicts: `Affirm`/`Deny`/`Abstain` (case-insensitive), synonyms
+(`yes`→Affirm, `no`→Deny, `defer`→Abstain), or the pasted candidate value verbatim.
+Garbage strings (e.g. `xyz`) return an error message and keep the claim Contested.
 
 **Expected node path:** hitl_node resumes → END
 
