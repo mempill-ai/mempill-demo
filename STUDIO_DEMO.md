@@ -255,6 +255,195 @@ crew_c [compliance_audit]: 12-14 audit entries retrieved for agent_id=jordan-par
 
 ---
 
+## Full End-to-End Scenario (Verified 2026-06-30)
+
+This is the canonical user scenario covering all six steps with exact User Input strings,
+expected node path, and expected result per step (including the now non-null resolved belief).
+
+Verified with real LLM (`claude-haiku-4-5`). Studio behavior is identical — use the same
+User Input strings in the Studio **Input** panel in order.
+
+### Step (a) — Check Day-0 Seeds
+
+**How:** Direct recall (not a graph turn). Confirms seed data is present.
+
+| Subject | Predicate | Expected Value | Status |
+|---|---|---|---|
+| alice-chen | city | Austin TX | Resolved |
+| alice-chen | employer | Acme Corp / VP Engineering | Resolved |
+| alice-chen | dietary_restriction | vegetarian | Resolved |
+| acme-corp | ceo | Diane Foster | Resolved |
+| jordan-park | preferred_hotel | Marriott Bonvoy Gold | Resolved |
+
+---
+
+### Step (b) — New NON-contested Claim (CommittedCheap, no HITL)
+
+**User Input:**
+```
+Alice Chen prefers business class travel as of 2025
+```
+
+**Expected node path:** supervisor → crew_a → END
+
+**Expected output:**
+```
+crew_a [llm]: wrote alice-chen/travel_preference='business class' (disposition=CommittedCheap valid_from=2025)
+```
+
+Key assertions:
+- `intent=UPDATE_CONTACT`
+- `pending_contested=None` — NOT contested (no prior `travel_preference` claim)
+- `CommittedCheap` in output_text — clean write, no HITL
+- No `__interrupt__` in state
+
+> The predicate `travel_preference` has no incumbent claim in the seeded data,
+> so this write commits immediately as CommittedCheap. The LLMExtractor maps
+> "business class travel" to the `travel_preference` predicate.
+
+---
+
+### Step (c) — Recall the New Fact
+
+**User Input:**
+```
+What is Alice's travel preference?
+```
+
+**Expected node path:** supervisor → crew_c → END
+
+**Expected output:**
+```
+crew_c [recall_history]: alice-chen/travel_preference='business class' status=Resolved
+```
+
+---
+
+### Step (d) — Contested Claim → HITL Interrupt
+
+**User Input:**
+```
+Alice is now the CTO of Acme Corp
+```
+
+**Expected node path:** supervisor → crew_a → hitl_node ← **PAUSED**
+
+**Expected state:**
+- `intent=UPDATE_CONTACT`
+- `__interrupt__` in state (graph paused)
+- `pending_contested=None` is NOT set yet (set inside hitl_node interrupt payload)
+
+**Interrupt payload shown in Studio (Interrupts panel):**
+```
+Conflict on alice-chen/employer:
+  Incumbent:  'Acme Corp / VP Engineering' (valid from 2023-06-01, source: UserAsserted)
+  Challenger: 'Acme Corp / CTO' (valid from None, source: ExternalFirstHand)
+Which is correct? Reply: 'Affirm' (challenger wins), 'Deny' (incumbent wins), or 'Abstain' (defer).
+```
+
+> `route=hitl CONFIRMED`. The claim is undated ("Alice is now...") → no valid_from →
+> temporal overlap with the incumbent VP Engineering claim → QueuedForAdjudication →
+> graph routes to hitl_node → interrupt fires.
+
+---
+
+### Step (e) — Resolve via HITL (Affirm — CTO wins)
+
+**How to resume in Studio:**
+In the **Interrupts** panel, enter the verdict in the resume field:
+
+**Resume payload:**
+```
+Affirm
+```
+
+**Expected node path:** hitl_node resumes → END
+
+**Expected output:**
+```
+HITL resolved alice-chen/employer: verdict=Affirm → resolved: alice-chen/employer = 'Acme Corp / CTO' (verdict=Affirm) [from adjudication outcome — temporal window ambiguous]
+```
+
+**Expected state (non-null resolved belief):**
+```json
+{
+  "hitl_verdict": "Affirm",
+  "hitl_resolved_belief": {
+    "subject": "alice-chen",
+    "predicate": "employer",
+    "value": "Acme Corp / CTO",
+    "status": "Resolved",
+    "disposition": "CommittedCheap",
+    "source": "adjudication_outcome",
+    "note": "Post-resolution recall returned TimingUncertain (undated conflict). Winner determined from adjudication: verdict=Affirm."
+  },
+  "pending_contested": null
+}
+```
+
+> **`hitl_resolved_belief` is non-null** — the conflict resolved to `"Acme Corp / CTO"`.
+>
+> The post-resolution recall returns `TimingUncertain` (because the undated claim
+> has no temporal anchor, so the engine cannot determine which window is current).
+> The FIX ensures `hitl_resolved_belief` falls back to the adjudication outcome
+> (`challenger_value` for Affirm, `incumbent_value` for Deny) which is always available.
+>
+> The user can now clearly see: **the conflict resolved to CTO**.
+
+---
+
+### Step (e-Deny) — Deny Path (separate fresh thread)
+
+To demonstrate the Deny path, start a **new thread** in Studio (click "New Thread").
+
+**User Input:**
+```
+Alice is now the CTO of Acme Corp
+```
+
+→ Graph pauses at `hitl_node` (same Contested scenario).
+
+**Resume payload:**
+```
+Deny
+```
+
+**Expected output:**
+```
+HITL resolved alice-chen/employer: verdict=Deny → resolved: alice-chen/employer = 'Acme Corp / VP Engineering' (verdict=Deny) status=Resolved
+```
+
+> `hitl_resolved_belief.value = 'Acme Corp / VP Engineering'` — incumbent wins.
+> Deny path: post-resolution recall returns `Resolved` with VP Engineering (the
+> incumbent keeps its temporal anchor, so the engine knows the current value).
+
+---
+
+### Step (f) — Final Recall After Resolution
+
+**User Input:**
+```
+What is Alice's current employer?
+```
+
+**Expected node path:** supervisor → crew_c → END
+
+**Expected output (after Affirm):**
+```
+crew_c [recall_history]: alice-chen/employer=None status=TimingUncertain
+```
+
+> **Why TimingUncertain?** The undated challenger (CTO) was accepted by the oracle (Affirm),
+> but without a temporal anchor the engine cannot determine which valid-time window is current.
+> The HITL turn output (step e) already surfaced the winner = CTO from the adjudication outcome.
+>
+> **If you want a clean Resolved recall:** demonstrate step (d) with a dated claim:
+> `"Alice has been CTO of Acme since January 2025"` — this gives the CTO claim a valid_from
+> of 2025-01, which clearly supersedes VP Engineering (2023-06). The post-resolution recall
+> then returns `Resolved` with value `"Acme Corp / CTO"`.
+
+---
+
 ## Reset Note
 
 To run the demo again from scratch:
