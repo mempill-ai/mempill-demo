@@ -330,6 +330,122 @@ class LLMExtractor:
             return {"entity": None, "predicate": None, "value": None, "valid_from": None}
 
 
+# ── LLM researcher (W10 — crew_b reliable distillation, single call) ──────────
+
+_RESEARCHER_SYSTEM = """You are a research distillation engine for a bi-temporal executive assistant memory system.
+
+You have access to a curated knowledge base about these entities and their relationships:
+
+ENTITIES (use these exact canonical keys):
+  alice-chen   → Alice Chen, VP Engineering at Acme Corp (based in Austin TX)
+  bob-liu      → Bob Liu, Partner at Meridian Ventures
+  acme-corp    → Acme Corp, a mid-market technology company. CEO: Diane Foster.
+                 Acme Corp produces enterprise software. Founded in 2015.
+                 Recent strategic focus: AI-driven product roadmap, Series C funding.
+  jordan-park  → Jordan Park, executive assistant (the system operator)
+
+KNOWN PREDICATES:
+  city                 → person's city/location
+  employer             → person's EMPLOYMENT (company + title), format: "Company / Job Title"
+  dietary_restriction  → dietary restriction
+  travel_preference    → travel/flight preference
+  preferred_hotel      → preferred hotel
+  ceo                  → CEO OF a company (entity is the COMPANY)
+  cto                  → CTO OF a company (entity is the COMPANY)
+
+Your task:
+1. Write a factual 2-4 sentence research summary about the requested subject.
+   Use the knowledge base above. Be specific and relevant.
+2. Distil UP TO 3 atomic claims about entities you can confirm from your knowledge base.
+   Each claim MUST use a known canonical entity key AND a known canonical predicate key.
+   Only include claims you are confident about.
+   valid_from: YYYY if known, null otherwise.
+   confidence: 0.80-0.90 for knowledge-base derived facts.
+
+Return ONLY a JSON object:
+{
+  "summary": "<factual 2-4 sentence paragraph>",
+  "claims": [
+    {
+      "entity": "<canonical entity key>",
+      "predicate": "<canonical predicate key>",
+      "value": "<claim value string>",
+      "valid_from": "<YYYY or null>",
+      "confidence": 0.85
+    }
+  ]
+}"""
+
+
+class LLMResearcher:
+    """Single structured Anthropic call to synthesise research + distil claims (crew_b).
+
+    Makes ONE bounded API call that returns:
+      - summary: factual paragraph about the research subject (→ RAG)
+      - claims: ≤3 atomic distilled facts about known entities (→ mempill)
+
+    This replaces the unreliable CrewAI kickoff path in crew_b.  CrewAI agents
+    were found to hallucinate "Final Answer" JSON without calling tools.  This
+    approach uses a single structured call and writes to mempill via the Python
+    remember_tool (reliable, no tool-loop).
+
+    Falls back to returning an empty claims list on any API or parse error so
+    the shell path (RAG-only) still runs gracefully.
+    """
+
+    def __init__(self, model_name: Optional[str] = None) -> None:
+        if model_name:
+            self._model = model_name
+        else:
+            try:
+                from mempill_showcase.config.settings import get_settings
+                self._model = get_settings().anthropic_model
+            except Exception:
+                import os
+                self._model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
+        log.info("LLMResearcher: initialised with model=%s", self._model)
+
+    def research(self, user_request: str) -> dict:
+        """Synthesise a research summary + distilled claims from *user_request*.
+
+        Returns a dict with keys:
+          summary: str — factual paragraph for the RAG store
+          claims: list[dict] — each with entity, predicate, value, valid_from, confidence
+        Falls back to {"summary": user_request, "claims": []} on any error.
+        """
+        import json as _json
+        try:
+            from langchain_anthropic import ChatAnthropic
+            from langchain_core.messages import HumanMessage, SystemMessage
+            llm = ChatAnthropic(model=self._model, temperature=0.0)
+            messages = [
+                SystemMessage(content=_RESEARCHER_SYSTEM),
+                HumanMessage(content=f"Research request: {user_request}"),
+            ]
+            response = llm.invoke(messages)
+            raw = response.content.strip()
+            # Strip markdown code fences
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+            parsed = _json.loads(raw)
+            log.debug(
+                "LLMResearcher: %r → summary=%d chars, %d claims",
+                user_request[:60],
+                len(parsed.get("summary", "")),
+                len(parsed.get("claims", [])),
+            )
+            return {
+                "summary": parsed.get("summary", user_request),
+                "claims": parsed.get("claims", []),
+            }
+        except Exception as exc:
+            log.warning("LLMResearcher: research call failed (%s) — returning empty claims", exc)
+            return {"summary": user_request, "claims": []}
+
+
 # ── Crew A node factory ───────────────────────────────────────────────────────
 
 def make_crew_a_node(
@@ -563,25 +679,134 @@ def make_crew_b_node(
     rag_write_tool: "RAGWriteTool",
     adapter,
     crew=None,
+    researcher: Optional["LLMResearcher"] = None,
 ):
     """Factory: returns the crew_b_node function bound to its tools.
 
-    If `crew` is a CrewAI Crew object, the node invokes crew.kickoff(inputs=...)
-    instead of the shell heuristics.  Shell path is the no-API-key fallback.
+    Priority order:
+      1. LLM research path (researcher is not None, W10):
+         A single structured Anthropic call produces a factual summary (→ RAG)
+         and ≤3 atomic distilled claims (→ mempill via remember_tool).
+         This is the preferred path when ANTHROPIC_API_KEY is present.
+         Replaces the unreliable CrewAI kickoff which hallucinated Final Answer
+         JSON without calling tools.
+      2. CrewAI live path (crew is not None, legacy):
+         Delegates to crew.kickoff(); falls back to shell on error.
+      3. Shell path (crew=None, researcher=None):
+         Deterministic keyword heuristics — CI-safe (W3).
     """
 
     def crew_b_node(state: ExecAssistantState) -> dict:
-        """Crew B node — research: RAG write bulk + distilled claim → detect Contested.
+        """Crew B node — research: RAG write bulk + distilled claims → detect Contested.
 
-        Live path  (crew is not None): delegates to CrewAI crew.kickoff().
-        Shell path (crew is None):     deterministic heuristic extraction (W3).
+        LLM research path (researcher set): single structured LLM call (W10).
+        CrewAI live path  (crew set):       delegates to CrewAI kickoff (legacy).
+        Shell path        (both None):      deterministic heuristic extraction (W3).
         """
         user_input = state.get("user_input", "")
         agent_id = state.get("agent_id", AGENT_ID_DEFAULT)
 
-        log.info("crew_b_node: processing research input=%r (crew=%s)", user_input[:80], type(crew).__name__ if crew else "shell")
+        log.info(
+            "crew_b_node: processing research input=%r (researcher=%s crew=%s)",
+            user_input[:80],
+            type(researcher).__name__ if researcher else "none",
+            type(crew).__name__ if crew else "shell",
+        )
 
-        # ── CrewAI live path ──────────────────────────────────────────────────
+        # ── W10 LLM research path (single structured call — preferred) ────────
+        if researcher is not None:
+            research_result = researcher.research(user_input)
+            summary = research_result.get("summary", user_input)
+            claims = research_result.get("claims", [])
+
+            # 1. Write the summary to RAG (bulk context)
+            rag_write_tool.invoke({
+                "text": summary,
+                "namespace": "research",
+            })
+            log.info("crew_b_node [llm-research]: wrote %d chars to RAG", len(summary))
+
+            # 2. Distil each extracted claim to mempill
+            last_write_json: dict = {}
+            last_subject: str = ""
+            last_predicate: str = ""
+            contested_pending: Optional[dict] = None
+
+            for claim in claims:
+                llm_entity = claim.get("entity")
+                llm_predicate = claim.get("predicate")
+                llm_value = claim.get("value")
+                llm_valid_from = claim.get("valid_from")
+                llm_confidence = claim.get("confidence", 0.85)
+
+                if not llm_entity or not llm_predicate or not llm_value:
+                    log.debug("crew_b_node [llm-research]: skipping claim with null fields: %s", claim)
+                    continue
+
+                log.info(
+                    "crew_b_node [llm-research]: distilling %s/%s=%r valid_from=%s confidence=%.2f",
+                    llm_entity, llm_predicate, llm_value, llm_valid_from, llm_confidence,
+                )
+                try:
+                    raw = remember_tool.invoke({
+                        "agent_id": agent_id,
+                        "subject": llm_entity,
+                        "predicate": llm_predicate,
+                        "value": llm_value,
+                        "valid_from": llm_valid_from,
+                        "confidence": llm_confidence,
+                        "provenance_channel": "ExternalFirstHand",
+                    })
+                    write_json = json.loads(raw)
+                    last_write_json = write_json
+                    last_subject = llm_entity
+                    last_predicate = llm_predicate
+
+                    if write_json.get("is_contested", False):
+                        contested_pending = _build_pending_contested(
+                            llm_entity, llm_predicate, write_json, adapter, agent_id
+                        )
+                        log.info(
+                            "crew_b_node [llm-research]: Contested on %s/%s — escalating to HITL",
+                            llm_entity, llm_predicate,
+                        )
+                        break  # Stop distilling on first conflict
+                    else:
+                        log.info(
+                            "crew_b_node [llm-research]: distilled %s/%s=%r disposition=%s",
+                            llm_entity, llm_predicate, llm_value, write_json.get("disposition"),
+                        )
+                except Exception as exc:
+                    log.warning(
+                        "crew_b_node [llm-research]: remember_tool failed for %s/%s: %s — skipping claim",
+                        llm_entity, llm_predicate, exc,
+                    )
+
+            if contested_pending:
+                raw_last = json.dumps(last_write_json)
+                return {
+                    "write_result": raw_last,
+                    "pending_contested": contested_pending,
+                    "route": "hitl",
+                    "output_text": (
+                        f"crew_b [llm]: Contested distilled claim for "
+                        f"{last_subject}/{last_predicate} — escalating to HITL"
+                    ),
+                }
+
+            written_count = len([c for c in claims if c.get("entity") and c.get("predicate") and c.get("value")])
+            return {
+                "write_result": json.dumps(last_write_json) if last_write_json else None,
+                "pending_contested": None,
+                "route": "end",
+                "output_text": (
+                    f"crew_b [llm]: research complete — wrote {len(summary)} chars to RAG, "
+                    f"distilled {written_count} claim(s) to mempill. "
+                    f"Summary: {summary[:120]}..."
+                ),
+            }
+
+        # ── CrewAI live path (legacy, kept for compatibility) ─────────────────
         if crew is not None:
             try:
                 result = crew.kickoff(inputs={
