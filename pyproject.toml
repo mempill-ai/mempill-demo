@@ -50,6 +50,10 @@ showcase = [
     "langsmith>=0.1,<1",
     "crewai>=1.0,<2",
 ]
+# studio: LangGraph Studio support — `pip install "langgraph-cli[inmem]"` then `langgraph dev`
+studio = [
+    "langgraph-cli[inmem]>=0.4,<1",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mempill_demo", "src/mempill_showcase"]

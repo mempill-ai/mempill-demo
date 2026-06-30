@@ -427,3 +427,43 @@ class TestComplianceRecall:
                     )
             except (json.JSONDecodeError, TypeError):
                 pass  # crew_c shape may vary; direct adapter query above is the primary assertion
+
+
+# ── Studio graph guard ────────────────────────────────────────────────────────
+
+class TestStudioGraph:
+    """Guard tests: studio_graph module exposes a compiled graph without MemorySaver."""
+
+    def test_studio_graph_imports(self) -> None:
+        """studio_graph.py is importable and exposes a module-level `graph`."""
+        from mempill_showcase.frameworks.langgraph.studio_graph import graph
+        assert graph is not None, "studio_graph.graph must be non-None"
+
+    def test_studio_graph_is_compiled_state_graph(self) -> None:
+        """studio_graph.graph is a CompiledStateGraph (not a plain StateGraph)."""
+        from langgraph.graph.state import CompiledStateGraph
+        from mempill_showcase.frameworks.langgraph.studio_graph import graph
+        assert isinstance(graph, CompiledStateGraph), (
+            f"studio_graph.graph must be a CompiledStateGraph, got {type(graph).__name__}"
+        )
+
+    def test_studio_graph_has_expected_nodes(self) -> None:
+        """studio_graph.graph has all 5 required nodes."""
+        from mempill_showcase.frameworks.langgraph.studio_graph import graph
+        node_names = set(graph.nodes.keys())
+        expected = {"supervisor", "crew_a", "crew_b", "crew_c", "hitl_node"}
+        missing = expected - node_names
+        assert not missing, (
+            f"studio_graph missing nodes: {missing}. Found: {node_names}"
+        )
+
+    def test_studio_graph_has_no_memory_saver(self) -> None:
+        """studio_graph.graph has no MemorySaver (Studio injects its own checkpointer)."""
+        from langgraph.checkpoint.memory import MemorySaver
+        from mempill_showcase.frameworks.langgraph.studio_graph import graph
+        checkpointer = getattr(graph, "checkpointer", None)
+        assert not isinstance(checkpointer, MemorySaver), (
+            "studio_graph.graph must NOT have a MemorySaver checkpointer — "
+            "LangGraph Studio rejects graphs with custom checkpointers. "
+            f"Got checkpointer={type(checkpointer).__name__!r}"
+        )

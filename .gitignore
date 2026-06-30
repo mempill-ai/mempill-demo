@@ -17,3 +17,5 @@ __pycache__/
 .claude/
 .mempill/
 tasks/
+# LangGraph Studio runtime cache (created by `langgraph dev`)
+.langgraph_api/

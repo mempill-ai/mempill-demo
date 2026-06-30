@@ -204,12 +204,20 @@ def _write_controlled(
 def run_scenario(
     adapter: "MempillAdapter",
     rag_store: Optional[InMemoryRAGStore] = None,
+    tx_separation_delay: float = 0.0,
 ) -> ScenarioTrace:
     """Execute all 8 beats deterministically and return a ScenarioTrace.
 
     Args:
-        adapter:   A freshly created MempillAdapter (caller must not pre-seed it).
-        rag_store: Optional shared InMemoryRAGStore. Created internally if None.
+        adapter:              A freshly created MempillAdapter (caller must not pre-seed it).
+        rag_store:            Optional shared InMemoryRAGStore. Created internally if None.
+        tx_separation_delay:  Seconds to sleep between the Austin seed capture and the NYC
+                              write to guarantee tx_before_nyc < tx_after_nyc.  Default 0.0
+                              (no sleep) for the CLI / demo path.  Tests that verify AC-4
+                              ordering should pass a small value (e.g. 0.005) when the
+                              engine's sub-millisecond clock precision is not sufficient
+                              on the host.  Most modern systems produce distinct timestamps
+                              even at 0.0 because the seed writes themselves take > 0 ms.
 
     Returns:
         ScenarioTrace with per-beat BeatResult entries and captured tx timestamps.
@@ -260,7 +268,6 @@ def run_scenario(
     #     so ALL seed claims are visible at that point).
     #
     # AC-4 CONTRACT: real engine-stamped tx times, NOT injected past dates.
-    import time
     austin_belief = adapter.recall(AGENT_ID, "alice-chen", "city")
     austin_claim_ref = austin_belief.claim_ref
     # Search the full audit (limit=20 covers all seed claims) for the Austin city entry
@@ -272,9 +279,12 @@ def run_scenario(
     if not trace.tx_before_nyc_write:
         trace.tx_before_nyc_write = _capture_latest_tx_time(adapter)
 
-    # Sleep to ensure the NYC write gets a strictly later tx timestamp.
-    # The engine uses sub-millisecond timestamps; 100ms is comfortably more than enough.
-    time.sleep(0.1)
+    # If the caller requested a tx-separation delay (e.g. tests that verify AC-4 ordering
+    # on very fast hosts), sleep here so the NYC write gets a strictly later tx timestamp.
+    # The CLI/demo path passes tx_separation_delay=0.0 (the default) — no sleep.
+    if tx_separation_delay > 0.0:
+        import time as _time
+        _time.sleep(tx_separation_delay)
 
     # ── T-01: Recall alice-chen/city (should be Austin TX) ───────────────────
     cfg_t01 = {"configurable": {"thread_id": "t01"}}

@@ -93,25 +93,38 @@ def _crew_b_router(state: ExecAssistantState) -> str:
 
 # ── Graph builder ─────────────────────────────────────────────────────────────
 
+_SENTINEL = object()
+
+
 def build_graph(
     adapter: "MempillAdapter",
     tools: ShowcaseTools,
     classifier: Optional[SupervisorClassifier] = None,
     crews: Optional[Any] = None,
+    checkpointer: Any = _SENTINEL,
 ) -> "CompiledGraph":  # type: ignore[type-arg]
     """Build and compile the ExecAssistant StateGraph.
 
-    Returns a compiled LangGraph app with MemorySaver checkpointer.
-    The app supports interrupt() / Command(resume=...) for HITL flows.
+    Returns a compiled LangGraph app.  By default a MemorySaver checkpointer is
+    attached so interrupt() / Command(resume=...) state persists across invocations
+    on the same thread_id (used by tests and the CLI scenario runner).
+
+    LangGraph Studio / ``langgraph dev`` injects its own persistence layer and
+    rejects graphs that carry a custom MemorySaver.  Pass ``checkpointer=None`` to
+    compile without any checkpointer (Studio path).  The platform then handles
+    persistence transparently.
 
     Args:
-        adapter:    MempillAdapter — the single mempill boundary.
-        tools:      ShowcaseTools NamedTuple with all W2 tool instances.
-        classifier: SupervisorClassifier impl. Defaults to MockSupervisor()
-                    (deterministic, no API key). Swap for LLMSupervisor in W6.
-        crews:      Optional ShowcaseCrews NamedTuple (crew_a, crew_b, crew_c).
-                    When provided, each crew node invokes crew.kickoff() instead of
-                    the W3 shell heuristics.  When None, shell path runs (CI-safe).
+        adapter:      MempillAdapter — the single mempill boundary.
+        tools:        ShowcaseTools NamedTuple with all W2 tool instances.
+        classifier:   SupervisorClassifier impl. Defaults to MockSupervisor()
+                      (deterministic, no API key). Swap for LLMSupervisor in W6.
+        crews:        Optional ShowcaseCrews NamedTuple (crew_a, crew_b, crew_c).
+                      When provided, each crew node invokes crew.kickoff() instead of
+                      the W3 shell heuristics.  When None, shell path runs (CI-safe).
+        checkpointer: Checkpointer instance to attach, or None (no checkpointer —
+                      use for LangGraph Studio).  Sentinel default attaches a fresh
+                      MemorySaver (backward-compatible behaviour for tests/CLI).
     """
     if classifier is None:
         classifier = MockSupervisor()
@@ -195,8 +208,12 @@ def build_graph(
     # HITL → end (after resolution)
     g.add_edge("hitl_node", END)
 
-    # ── Compile with MemorySaver checkpointer ─────────────────────────────────
-    checkpointer = MemorySaver()
+    # ── Compile with checkpointer ─────────────────────────────────────────────
+    # Default (sentinel): attach a fresh MemorySaver so interrupt()/Command(resume=...)
+    # work in the test / CLI scenario runner path.
+    # checkpointer=None: no checkpointer — used by LangGraph Studio which injects its own.
+    if checkpointer is _SENTINEL:
+        checkpointer = MemorySaver()
     app = g.compile(checkpointer=checkpointer)
 
     log.info("build_graph: ExecAssistant StateGraph compiled (classifier=%s)", type(classifier).__name__)

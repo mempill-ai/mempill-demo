@@ -93,13 +93,52 @@ without faking past dates.
 
 ---
 
+### View the graph in LangGraph Studio
+
+LangGraph Studio lets you visualize and interactively run the supervisor→crews→hitl
+graph with a UI. No API key is required — MockSupervisor runs deterministically.
+
+**One-time setup (langgraph-cli is already in the venv):**
+
+```bash
+# Skip if already installed:
+.venv/bin/python -m uv pip install "langgraph-cli[inmem]"
+```
+
+**Start Studio:**
+
+```bash
+.venv/bin/langgraph dev
+```
+
+Studio opens the local API server at `http://127.0.0.1:2024` and prints a link
+to the Studio UI at `https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024`.
+
+- Select the **exec_assistant** graph in the Studio sidebar.
+- The graph shows: `supervisor` → `crew_a` / `crew_b` / `crew_c` → `hitl_node`.
+- Send an input such as:
+  ```json
+  {"user_input": "prepare briefing for Alice Chen dinner", "agent_id": "demo-agent"}
+  ```
+- **MockSupervisor is the default** — no API key needed.
+- Set `ANTHROPIC_API_KEY` in `.env` to switch to the live LLM supervisor.
+
+The `langgraph.json` manifest at the repo root points Studio to:
+```
+src/mempill_showcase/frameworks/langgraph/studio_graph.py:graph
+```
+
+Stop Studio with `Ctrl-C`.
+
+---
+
 ### Run the deterministic test suite
 
 ```bash
 .venv/bin/python -m pytest src/mempill_showcase/tests/ -v -m "not live"
 ```
 
-Runs all non-live tests (no API key required). Expected result: **246 passed**.
+Runs all non-live tests (no API key required). Expected result: **250 passed**.
 
 Tests are located in `src/mempill_showcase/tests/`. The `-m "not live"` flag
 excludes tests that require `ANTHROPIC_API_KEY`.
