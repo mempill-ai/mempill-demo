@@ -116,52 +116,208 @@ def make_hitl_node(adapter: "MempillAdapter", recall_tool: "MempillRecallTool"):
         log.info("hitl_node: interrupting for %s/%s — awaiting human verdict", subject, predicate)
 
         # --- GRAPH PAUSES HERE ---
-        verdict: str = interrupt(interrupt_payload)
+        raw_verdict: str = interrupt(interrupt_payload)
         # --- GRAPH RESUMES HERE with verdict from Command(resume=...) ---
 
-        log.info("hitl_node: resumed with verdict=%r for %s/%s", verdict, subject, predicate)
+        log.info("hitl_node: resumed with raw verdict=%r for %s/%s", raw_verdict, subject, predicate)
+
+        # ── Normalize / map the resume value to a canonical verdict ─────────
+        # Accepts: exact keywords (Affirm/Deny/Abstain), synonyms, and pasted
+        # candidate values (challenger_value → Affirm, incumbent_value → Deny).
+        verdict = _normalize_verdict(
+            raw_verdict,
+            challenger_value=challenger.get("value"),
+            incumbent_value=incumbent.get("value"),
+        )
+        log.info(
+            "hitl_node: normalized verdict=%r (raw=%r) for %s/%s",
+            verdict, raw_verdict, subject, predicate,
+        )
 
         resolved_belief_json: str | None = None
 
         if verdict in ("Affirm", "Deny"):
-            _resolve_via_oracle_or_reconcile(
+            # _resolve_via_oracle returns (winning_value, disposition) from the
+            # adjudication outcome — reliable even when recall returns TimingUncertain.
+            adjudication_winning_value, adjudication_disposition = _resolve_via_oracle_or_reconcile(
                 adapter, agent_id, subject, predicate, verdict, claim_refs
             )
 
-            # Recall the resolved belief to confirm
+            # Recall the resolved belief to confirm — preferred source when non-null.
+            post_recall_value: str | None = None
+            post_recall_status: str | None = None
             try:
-                resolved_belief_json = recall_tool.invoke({
+                raw_recall = recall_tool.invoke({
                     "agent_id": agent_id,
                     "subject": subject,
                     "predicate": predicate,
                 })
+                rb = json.loads(raw_recall)
+                post_recall_value = rb.get("value")
+                post_recall_status = rb.get("status")
+                # Use the recall result as the primary source ONLY when it has a real value
+                if post_recall_value:
+                    resolved_belief_json = raw_recall
+                    log.info(
+                        "hitl_node: post-resolution recall → value=%r status=%s",
+                        post_recall_value, post_recall_status,
+                    )
             except Exception as exc:
                 log.warning("hitl_node: post-resolution recall failed: %s", exc)
+
+            # Fallback: if recall returned null/TimingUncertain, build resolved belief
+            # from the adjudication outcome (the winning value is always known here).
+            if not post_recall_value and adjudication_winning_value:
+                fallback_belief = {
+                    "subject": subject,
+                    "predicate": predicate,
+                    "value": adjudication_winning_value,
+                    "status": "Resolved" if adjudication_disposition == "CommittedCheap" else "Adjudicated",
+                    "disposition": adjudication_disposition,
+                    "source": "adjudication_outcome",
+                    "note": (
+                        "Post-resolution recall returned TimingUncertain (undated conflict). "
+                        f"Winner determined from adjudication: verdict={verdict}."
+                    ),
+                }
+                resolved_belief_json = json.dumps(fallback_belief)
+                log.info(
+                    "hitl_node: recall TimingUncertain — using adjudication outcome: "
+                    "value=%r disposition=%s verdict=%s",
+                    adjudication_winning_value, adjudication_disposition, verdict,
+                )
 
         elif verdict == "Abstain":
             log.info(
                 "hitl_node: human abstained — leaving %s/%s as Contested", subject, predicate
             )
-        else:
-            log.warning("hitl_node: unrecognised verdict %r — treating as Abstain", verdict)
+        elif verdict == "_invalid_":
+            log.warning(
+                "hitl_node: unrecognised verdict raw=%r for %s/%s — not resolving",
+                raw_verdict, subject, predicate,
+            )
+        # (no else — all canonical verdicts handled above)
 
-        output = f"HITL resolved {subject}/{predicate}: verdict={verdict}"
-        if resolved_belief_json:
-            try:
-                rb = json.loads(resolved_belief_json)
-                output += f" → belief={rb.get('value')!r} status={rb.get('status')}"
-            except Exception:
-                pass
+        # ── Build output_text and decide whether to clear pending_contested ──
+        if verdict in ("Affirm", "Deny"):
+            # Genuine resolution: format the resolved-belief summary.
+            output = f"HITL resolved {subject}/{predicate}:"
+            if resolved_belief_json:
+                try:
+                    rb = json.loads(resolved_belief_json)
+                    resolved_val = rb.get("value")
+                    resolved_status = rb.get("status")
+                    winning_label = (
+                        "challenger" if verdict == "Affirm" else "incumbent"
+                    )
+                    output += (
+                        f" {resolved_val!r} ({winning_label} wins, verdict={verdict})"
+                    )
+                    if rb.get("source") == "adjudication_outcome":
+                        output += " [from adjudication outcome — temporal window ambiguous]"
+                    else:
+                        output += f" status={resolved_status}"
+                except Exception:
+                    output += f" verdict={verdict}"
+            else:
+                output += f" verdict={verdict}"
+            return {
+                "hitl_verdict": verdict,
+                "hitl_resolved_belief": resolved_belief_json,
+                "pending_contested": None,  # cleared — genuinely resolved
+                "output_text": output,
+            }
 
-        return {
-            "hitl_verdict": verdict,
-            "hitl_resolved_belief": resolved_belief_json,
-            "pending_contested": None,
-            "output_text": output,
-        }
+        elif verdict == "Abstain":
+            output = (
+                f"HITL deferred {subject}/{predicate} — still Contested (Abstain). "
+                "Reply 'Affirm' (challenger wins), 'Deny' (incumbent wins), or 'Abstain' to defer."
+            )
+            return {
+                "hitl_verdict": verdict,
+                "hitl_resolved_belief": None,
+                "pending_contested": contested,  # keep — not resolved
+                "output_text": output,
+            }
+
+        else:  # verdict == "_invalid_"
+            output = (
+                f"Invalid verdict {raw_verdict!r}. "
+                "Reply 'Affirm' (challenger wins), 'Deny' (incumbent wins), or 'Abstain'."
+            )
+            return {
+                "hitl_verdict": raw_verdict,  # preserve raw for transparency
+                "hitl_resolved_belief": None,
+                "pending_contested": contested,  # keep — not resolved
+                "output_text": output,
+            }
 
     hitl_node.__name__ = "hitl_node"
     return hitl_node
+
+
+def _normalize_verdict(
+    raw: str,
+    *,
+    challenger_value: str | None,
+    incumbent_value: str | None,
+) -> str:
+    """Map a raw human resume string to a canonical verdict.
+
+    Mapping priority (first match wins):
+      1. Exact keyword (case-insensitive, stripped): affirm / deny / abstain.
+      2. Synonym: yes/accept/challenger → Affirm; no/reject/incumbent → Deny;
+         defer/skip → Abstain.
+      3. Pasted candidate value (case/space-insensitive):
+           challenger_value → Affirm; incumbent_value → Deny.
+      4. Unrecognized → returns sentinel "_invalid_".
+
+    Args:
+        raw: The raw string the human typed / pasted.
+        challenger_value: The challenger claim value from the interrupt payload.
+        incumbent_value: The incumbent claim value from the interrupt payload.
+
+    Returns:
+        "Affirm" | "Deny" | "Abstain" | "_invalid_"
+    """
+    normed = raw.strip().lower()
+    # Remove surrounding quotes that Studio may inject
+    normed = normed.strip("\"'")
+
+    # 1. Exact keyword match
+    if normed == "affirm":
+        return "Affirm"
+    if normed == "deny":
+        return "Deny"
+    if normed == "abstain":
+        return "Abstain"
+
+    # 2. Synonyms
+    _affirm_synonyms = {"yes", "accept", "challenger", "approve", "confirm", "correct"}
+    _deny_synonyms = {"no", "reject", "incumbent", "decline", "wrong", "incorrect"}
+    _abstain_synonyms = {"defer", "skip", "later", "unsure", "unknown", "pass"}
+
+    if normed in _affirm_synonyms:
+        return "Affirm"
+    if normed in _deny_synonyms:
+        return "Deny"
+    if normed in _abstain_synonyms:
+        return "Abstain"
+
+    # 3. Pasted candidate value — compare after collapsing whitespace
+    def _canon(s: str | None) -> str:
+        if s is None:
+            return ""
+        return " ".join(s.lower().split())
+
+    normed_collapsed = " ".join(normed.split())
+    if challenger_value and normed_collapsed == _canon(challenger_value):
+        return "Affirm"
+    if incumbent_value and normed_collapsed == _canon(incumbent_value):
+        return "Deny"
+
+    # 4. Unrecognized
+    return "_invalid_"
 
 
 def _resolve_via_oracle_or_reconcile(
@@ -171,16 +327,27 @@ def _resolve_via_oracle_or_reconcile(
     predicate: str,
     verdict: str,
     claim_refs: list,
-) -> None:
+) -> tuple[str | None, str | None]:
     """Resolve a contested claim using the oracle queue or fall back to reconcile.
+
+    Returns:
+        (winning_value, disposition) where winning_value is the value of the winning
+        claim (challenger for Affirm, incumbent for Deny) and disposition is the
+        engine disposition string (e.g. "CommittedCheap").  Both may be None if the
+        oracle path was not taken or the entry was not found.
 
     Oracle path (preferred — open_oracle_in_memory engines):
       1. adapter.list_pending_adjudications(agent_id) → list of pending entries.
       2. Find the entry whose subject/predicate matches.
-      3. adapter.submit_adjudication(agent_id, handle_id, verdict).
+         From the entry: capture incumbent_value and challenger_value.
+      3. adapter.submit_adjudication(agent_id, handle_id, verdict) → disposition.
+      4. Derive winning_value from verdict:
+           Affirm → challenger wins → winning_value = challenger_value
+           Deny   → incumbent wins → winning_value = incumbent_value
 
     Fallback (non-oracle engines):
       adapter.reconcile(agent_id, [[subject, predicate]]).
+      winning_value is not recoverable in this path → returns (None, None).
 
     Both paths are idempotent if the conflict has already been resolved.
     """
@@ -191,27 +358,39 @@ def _resolve_via_oracle_or_reconcile(
             pending = adapter.list_pending_adjudications(agent_id)
             # Collect ALL handles for this subject/predicate (multiple writes can queue
             # multiple entries when a conflict is written more than once before resolution)
-            matching_handles: list[str] = []
+            matching_entries: list[dict] = []
             for entry in pending:
                 if entry.get("subject") == subject and entry.get("predicate") == predicate:
                     h = entry.get("handle_id")
                     if h:
-                        matching_handles.append(h)
+                        matching_entries.append(entry)
 
-            if matching_handles:
-                for handle_id in matching_handles:
+            if matching_entries:
+                # Use the FIRST matching entry to determine the winning value.
+                # challenger_value/incumbent_value are direct fields in the pending entry.
+                first_entry = matching_entries[0]
+                incumbent_value: str | None = first_entry.get("incumbent_value")
+                challenger_value: str | None = first_entry.get("challenger_value")
+                winning_value: str | None = challenger_value if verdict == "Affirm" else incumbent_value
+
+                last_disposition: str | None = None
+                for entry in matching_entries:
+                    handle_id = entry["handle_id"]
                     try:
                         result = adapter.submit_adjudication(agent_id, handle_id, verdict)
+                        last_disposition = result.get("disposition")
                         log.info(
-                            "hitl_node: oracle submit handle=%s verdict=%s → disposition=%s",
-                            handle_id[:8], verdict, result.get("disposition"),
+                            "hitl_node: oracle submit handle=%s verdict=%s → disposition=%s "
+                            "incumbent=%r challenger=%r winning=%r",
+                            handle_id[:8], verdict, last_disposition,
+                            incumbent_value, challenger_value, winning_value,
                         )
                     except Exception as sub_exc:
                         log.warning(
                             "hitl_node: oracle submit handle=%s failed: %s",
                             handle_id[:8], sub_exc,
                         )
-                return  # Oracle path complete — done
+                return winning_value, last_disposition  # Oracle path complete
             else:
                 log.info(
                     "hitl_node: oracle queue has no pending entry for %s/%s "
@@ -224,7 +403,8 @@ def _resolve_via_oracle_or_reconcile(
                 subject, predicate, exc,
             )
 
-    # Fallback: reconcile for non-oracle engines or when oracle entry not found
+    # Fallback: reconcile for non-oracle engines or when oracle entry not found.
+    # winning_value is not recoverable in this path.
     try:
         for _ in range(3):
             resp = adapter.reconcile(agent_id, [[subject, predicate]])
@@ -233,3 +413,5 @@ def _resolve_via_oracle_or_reconcile(
         log.info("hitl_node: reconcile fallback complete for %s/%s", subject, predicate)
     except Exception as exc:
         log.warning("hitl_node: reconcile fallback failed for %s/%s: %s", subject, predicate, exc)
+
+    return None, None

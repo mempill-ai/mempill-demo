@@ -233,9 +233,11 @@ def _build_pending_contested(
 
 # ── LLM extractor (W10 — single structured call, ANTHROPIC_API_KEY required) ──
 
-_EXTRACTOR_SYSTEM = """You are a claim extraction engine for a bi-temporal memory system.
+_EXTRACTOR_SYSTEM_TEMPLATE = """You are a claim extraction engine for a bi-temporal memory system.
 
 Given a natural-language sentence, extract ONE atomic fact and return it as a JSON object.
+
+Today's date (UTC): {today}
 
 Known canonical entity keys:
   alice-chen   → Alice Chen, alice
@@ -264,16 +266,27 @@ DISAMBIGUATION RULE — person's title vs company's officer:
 Rules:
 - Return ONLY a JSON object — no prose, no markdown, no extra text.
 - If you cannot confidently extract the entity or predicate, set them to null.
-- valid_from: ISO date in YYYY, YYYY-MM, or YYYY-MM-DD format. "now" or no explicit date → null.
+- valid_from: ISO date in YYYY, YYYY-MM, or YYYY-MM-DD format.
+  Temporal keywords that mean TODAY → use today's date ({today}) as valid_from:
+    "now", "is now", "currently", "today", "at the moment", "as of now", "as of today"
+  Example: "Alice is now the CTO" → valid_from = "{today}" (today's date).
+  Only use null if there is genuinely no temporal anchor at all (no mention of time).
 - value: a short descriptive string.
 
 JSON schema:
-{
+{{
   "entity":     "<canonical entity key or null>",
   "predicate":  "<canonical predicate key or null>",
   "value":      "<claim value string>",
   "valid_from": "<YYYY[-MM[-DD]] or null>"
-}"""
+}}"""
+
+
+def _extractor_system_prompt() -> str:
+    """Build the LLMExtractor system prompt with today's date injected."""
+    from datetime import date
+    today = date.today().isoformat()
+    return _EXTRACTOR_SYSTEM_TEMPLATE.format(today=today)
 
 
 class LLMExtractor:
@@ -310,8 +323,9 @@ class LLMExtractor:
             from langchain_anthropic import ChatAnthropic
             from langchain_core.messages import HumanMessage, SystemMessage
             llm = ChatAnthropic(model=self._model, temperature=0.0)
+            # Build prompt with today's date so "is now" maps to a real valid_from
             messages = [
-                SystemMessage(content=_EXTRACTOR_SYSTEM),
+                SystemMessage(content=_extractor_system_prompt()),
                 HumanMessage(content=f"Sentence: {sentence}"),
             ]
             response = llm.invoke(messages)
@@ -694,6 +708,13 @@ def make_crew_b_node(
          Delegates to crew.kickoff(); falls back to shell on error.
       3. Shell path (crew=None, researcher=None):
          Deterministic keyword heuristics — CI-safe (W3).
+
+    Idempotency (all paths): before writing a distilled claim, the node recalls
+    the existing belief for (subject, predicate). If a belief already exists
+    (status != NoBelief), the write is SKIPPED — research must never re-assert
+    existing facts and must never manufacture cosmetic-variant conflicts (e.g.
+    "Austin, TX" vs "Austin TX"). Only genuinely new (subject, predicate) pairs
+    are written to mempill.
     """
 
     def crew_b_node(state: ExecAssistantState) -> dict:
@@ -743,8 +764,33 @@ def make_crew_b_node(
                     log.debug("crew_b_node [llm-research]: skipping claim with null fields: %s", claim)
                     continue
 
+                # ── Idempotency check: skip if belief already exists ──────────
+                # Research must NEVER re-assert existing facts and must NEVER
+                # manufacture cosmetic-variant conflicts (e.g. "Austin, TX" vs
+                # "Austin TX"). Only write genuinely new (subject, predicate) pairs.
+                try:
+                    existing_belief = adapter.recall(agent_id, llm_entity, llm_predicate)
+                    if existing_belief.status not in ("NoBelief", None):
+                        log.info(
+                            "crew_b_node [llm-research]: %s/%s already exists (status=%s value=%r)"
+                            " — skipping to avoid conflict",
+                            llm_entity, llm_predicate,
+                            existing_belief.status, existing_belief.value,
+                        )
+                        continue
+                except Exception as _exc:
+                    # If recall check fails, proceed cautiously (write may still contest)
+                    log.debug(
+                        "crew_b_node [llm-research]: pre-flight recall check failed for %s/%s: %s",
+                        llm_entity, llm_predicate, _exc,
+                    )
+
+                # Normalise valid_from to string (LLM may return an int e.g. 2015)
+                if llm_valid_from is not None and not isinstance(llm_valid_from, str):
+                    llm_valid_from = str(llm_valid_from)
+
                 log.info(
-                    "crew_b_node [llm-research]: distilling %s/%s=%r valid_from=%s confidence=%.2f",
+                    "crew_b_node [llm-research]: distilling NEW claim %s/%s=%r valid_from=%s confidence=%.2f",
                     llm_entity, llm_predicate, llm_value, llm_valid_from, llm_confidence,
                 )
                 try:
@@ -866,6 +912,30 @@ def make_crew_b_node(
         m = re.search(r"\b(20\d{2}(?:-\d{2})?)\b", user_input)
         if m:
             valid_from = m.group(1)
+
+        # 2b. Idempotency check: skip if belief already exists
+        try:
+            existing_belief = adapter.recall(agent_id, subject, predicate)
+            if existing_belief.status not in ("NoBelief", None):
+                log.info(
+                    "crew_b_node [shell]: %s/%s already exists (status=%s value=%r)"
+                    " — skipping to avoid conflict",
+                    subject, predicate, existing_belief.status, existing_belief.value,
+                )
+                return {
+                    "write_result": None,
+                    "pending_contested": None,
+                    "route": "end",
+                    "output_text": (
+                        f"crew_b: {subject}/{predicate} already known "
+                        f"(status={existing_belief.status} value={existing_belief.value!r}) — skipped"
+                    ),
+                }
+        except Exception as _exc:
+            log.debug(
+                "crew_b_node [shell]: pre-flight recall check failed for %s/%s: %s",
+                subject, predicate, _exc,
+            )
 
         # 3. Distil to mempill with ExternalFirstHand provenance
         try:

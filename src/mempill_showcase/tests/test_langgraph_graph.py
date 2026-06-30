@@ -308,6 +308,22 @@ class TestHITLFlow:
         # Graph produced output
         assert result2.get("output_text"), "output_text must be set after HITL resolution"
 
+        # (d) hitl_resolved_belief must be non-null and contain the winning value (CTO)
+        hrb = result2.get("hitl_resolved_belief")
+        assert hrb is not None, (
+            "hitl_resolved_belief must be non-null after Affirm — "
+            "the user must be able to see what the conflict resolved to"
+        )
+        import json as _json
+        rb = _json.loads(hrb)
+        resolved_value = rb.get("value")
+        assert resolved_value is not None, (
+            f"hitl_resolved_belief must have a non-null 'value' field, got: {rb}"
+        )
+        assert "CTO" in resolved_value, (
+            f"After Affirm, resolved value should be the challenger (CTO), got {resolved_value!r}"
+        )
+
     def test_no_action_before_hitl_resolution(self, adapter, tools):
         """AC-2(b): briefing_text is NOT set before HITL resolution.
 

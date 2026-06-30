@@ -224,3 +224,208 @@ def test_mempill_adapter_is_bitemporal(mempill_adapter: MempillAdapter) -> None:
     assert hasattr(mempill_adapter, "query_at"), (
         "MempillAdapter must have query_at — it IS a BiTemporalMemoryStore"
     )
+
+
+# ── BUG 2 FIX: role/title/position/job → employer predicate mapping ───────────
+
+class TestRoleTitlePredicateMapping:
+    """Bug 2 regression: role, title, position, job must all map to 'employer'.
+
+    Seed stores alice-chen/employer = 'Acme Corp / VP Engineering'.
+    Querying via 'role', 'title', 'position', or 'job' must return the same belief
+    as querying via 'employer' — because all person-job/title data lives under that
+    single canonical predicate.
+    """
+
+    def test_role_resolves_to_employer(self) -> None:
+        """resolve_predicate('role') == 'employer'."""
+        assert resolve_predicate("role") == "employer", (
+            "Bug 2 fix: 'role' must resolve to 'employer' (not 'title'). "
+            "Person-job data is stored under the 'employer' predicate."
+        )
+
+    def test_title_resolves_to_employer(self) -> None:
+        """resolve_predicate('title') == 'employer'."""
+        assert resolve_predicate("title") == "employer", (
+            "Bug 2 fix: 'title' must resolve to 'employer' (not 'title'). "
+            "Person-job data is stored under the 'employer' predicate."
+        )
+
+    def test_position_resolves_to_employer(self) -> None:
+        """resolve_predicate('position') == 'employer'."""
+        assert resolve_predicate("position") == "employer", (
+            "Bug 2 fix: 'position' must resolve to 'employer'."
+        )
+
+    def test_job_resolves_to_employer(self) -> None:
+        """resolve_predicate('job') == 'employer'."""
+        assert resolve_predicate("job") == "employer", (
+            "Bug 2 fix: 'job' must resolve to 'employer'."
+        )
+
+    def test_job_title_resolves_to_employer(self) -> None:
+        """resolve_predicate('job title') == 'employer'."""
+        assert resolve_predicate("job title") == "employer", (
+            "Bug 2 fix: 'job title' must resolve to 'employer'."
+        )
+
+    def test_recall_via_role_returns_employer_belief(self, seeded_adapter: MempillAdapter) -> None:
+        """Recalling alice-chen/role returns same belief as alice-chen/employer.
+
+        After seed: alice-chen/employer = 'Acme Corp / VP Engineering' (Resolved).
+        resolve_predicate('role') → 'employer' → recall returns that same belief.
+        """
+        employer_belief = seeded_adapter.recall(AGENT_ID, "alice-chen", "employer")
+        role_belief = seeded_adapter.recall(AGENT_ID, "alice-chen", resolve_predicate("role"))
+
+        assert role_belief.value == employer_belief.value, (
+            f"Bug 2 fix: recall via 'role' must return same value as 'employer'. "
+            f"role={role_belief.value!r} employer={employer_belief.value!r}"
+        )
+        assert role_belief.status == employer_belief.status, (
+            f"Bug 2 fix: recall via 'role' must return same status as 'employer'. "
+            f"role_status={role_belief.status!r} employer_status={employer_belief.status!r}"
+        )
+
+    def test_recall_via_title_returns_employer_belief(self, seeded_adapter: MempillAdapter) -> None:
+        """Recalling alice-chen/title returns same belief as alice-chen/employer."""
+        employer_belief = seeded_adapter.recall(AGENT_ID, "alice-chen", "employer")
+        title_pred = resolve_predicate("title")
+        title_belief = seeded_adapter.recall(AGENT_ID, "alice-chen", title_pred)
+
+        assert title_belief.value == employer_belief.value, (
+            f"Bug 2 fix: recall via 'title' (→ '{title_pred}') must return employer value. "
+            f"title={title_belief.value!r} employer={employer_belief.value!r}"
+        )
+
+
+# ── BUG 1 FIX: resolved conflict is answerable on recall ─────────────────────
+
+class TestResolvedConflictRecall:
+    """Bug 1 regression: after HITL Affirm on a same-period conflict, current
+    recall must return the winner (challenger) with a clean status, NOT
+    TimingUncertain or NoBelief.
+
+    Root cause (diagnosed): an undated challenger (valid_from=None) is
+    accepted by the oracle (Affirm → CommittedCheap) but the engine cannot
+    determine it is 'current' (no temporal anchor) → returns TimingUncertain.
+
+    Fix: use a dated challenger (same valid_from=2023-06 as the incumbent).
+    Same-period contradiction → Contested → oracle Affirm → challenger committed
+    with a temporal anchor → current recall returns Resolved (winner=CTO).
+    """
+
+    def test_same_period_conflict_recall_after_affirm_returns_winner(self) -> None:
+        """After Affirm on a same-period conflict, recall returns the challenger (CTO).
+
+        Steps:
+          1. Seed VP Engineering (valid_from=2023-06-01).
+          2. Write CTO with same valid_from=2023-06 → QueuedForAdjudication (Contested).
+          3. Submit Affirm via oracle.
+          4. recall(employer) → Resolved, value='Acme Corp / CTO'.
+        """
+        adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
+
+        # Step 1: seed VP Engineering
+        vp_claim = ClaimInput(
+            subject="alice-chen",
+            predicate="employer",
+            value="Acme Corp / VP Engineering",
+            valid_from="2023-06-01",
+            confidence=1.0,
+            provenance=ProvenanceLabel.external_user_asserted(),
+            cardinality="Functional",
+            criticality="Medium",
+        )
+        r1 = adapter.write_claim(AGENT_ID, vp_claim)
+        assert r1.disposition == "CommittedCheap", f"Seed VP must be CommittedCheap, got {r1.disposition!r}"
+
+        # Step 2: write CTO with same valid_from (same-period contradiction)
+        cto_claim = ClaimInput(
+            subject="alice-chen",
+            predicate="employer",
+            value="Acme Corp / CTO",
+            valid_from="2023-06",  # same period as VP → genuine conflict
+            confidence=1.0,
+            provenance=ProvenanceLabel.external_user_asserted(),
+            cardinality="Functional",
+            criticality="Medium",
+        )
+        r2 = adapter.write_claim(AGENT_ID, cto_claim)
+        assert r2.disposition == "QueuedForAdjudication", (
+            f"Same-period CTO write must be QueuedForAdjudication (Contested), got {r2.disposition!r}"
+        )
+
+        # Verify Contested before adjudication
+        b_contested = adapter.recall(AGENT_ID, "alice-chen", "employer")
+        assert b_contested.status == "Contested", (
+            f"Before Affirm, belief must be Contested, got {b_contested.status!r}"
+        )
+
+        # Step 3: submit Affirm via oracle
+        pending = adapter.list_pending_adjudications(AGENT_ID)
+        assert pending, "Oracle queue must have the pending conflict before Affirm"
+        aff = adapter.submit_adjudication(AGENT_ID, pending[0]["handle_id"], "Affirm")
+        assert aff.get("disposition") == "CommittedCheap", (
+            f"Affirm must commit the challenger (CommittedCheap), got {aff.get('disposition')!r}"
+        )
+
+        # Step 4: recall — must return the winner (CTO) with Resolved status
+        b_after = adapter.recall(AGENT_ID, "alice-chen", "employer")
+        assert b_after.status == "Resolved", (
+            f"Bug 1 fix: after Affirm on a same-period conflict, recall must return "
+            f"Resolved, got {b_after.status!r}. "
+            f"Root cause: an undated challenger (valid_from=None) returns TimingUncertain "
+            f"after Affirm (no temporal anchor). The fix uses same-period valid_from so "
+            f"the engine can determine the winner is current."
+        )
+        assert b_after.value == "Acme Corp / CTO", (
+            f"Bug 1 fix: after Affirm, recall must return the challenger value 'Acme Corp / CTO', "
+            f"got {b_after.value!r}"
+        )
+
+    def test_deny_on_same_period_conflict_keeps_incumbent(self) -> None:
+        """After Deny on a same-period conflict, recall returns the incumbent (VP Engineering)."""
+        adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
+
+        vp_claim = ClaimInput(
+            subject="alice-chen",
+            predicate="employer",
+            value="Acme Corp / VP Engineering",
+            valid_from="2023-06-01",
+            confidence=1.0,
+            provenance=ProvenanceLabel.external_user_asserted(),
+            cardinality="Functional",
+            criticality="Medium",
+        )
+        adapter.write_claim(AGENT_ID, vp_claim)
+
+        cto_claim = ClaimInput(
+            subject="alice-chen",
+            predicate="employer",
+            value="Acme Corp / CTO",
+            valid_from="2023-06",
+            confidence=1.0,
+            provenance=ProvenanceLabel.external_user_asserted(),
+            cardinality="Functional",
+            criticality="Medium",
+        )
+        adapter.write_claim(AGENT_ID, cto_claim)
+
+        pending = adapter.list_pending_adjudications(AGENT_ID)
+        assert pending, "Oracle queue must have the pending conflict before Deny"
+        deny_result = adapter.submit_adjudication(AGENT_ID, pending[0]["handle_id"], "Deny")
+        # Deny: the challenger claim (CTO) is Superseded; the incumbent (VP) stays CommittedCheap.
+        # The engine returns the disposition of the claim that was acted upon (the challenger).
+        assert deny_result.get("disposition") in ("Superseded", "CommittedCheap"), (
+            f"Deny must resolve the conflict (Superseded challenger or CommittedCheap incumbent), "
+            f"got {deny_result.get('disposition')!r}"
+        )
+
+        b_after = adapter.recall(AGENT_ID, "alice-chen", "employer")
+        assert b_after.status == "Resolved", (
+            f"After Deny, recall must return Resolved, got {b_after.status!r}"
+        )
+        assert "vp" in (b_after.value or "").lower() or "engineering" in (b_after.value or "").lower(), (
+            f"After Deny, incumbent VP Engineering must win, got {b_after.value!r}"
+        )
