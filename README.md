@@ -41,10 +41,25 @@ The sibling repo is only needed for the MCP demo. The console + LangGraph demos 
 
 ## Prerequisites
 
-- **Python 3.11+**
+- **Python 3.12** (required — CrewAI/ChromaDB install cleanly on 3.12; 3.13+ is unsupported)
 - **uv** (Python package manager): https://docs.astral.sh/uv/
+- **Sibling repo `../mempill/`** checked out at `main` (provides the prerelease wheel)
 
-No Rust toolchain required. `mempill` ships as a prebuilt wheel on PyPI. The optional MCP demo additionally needs the sibling `../mempill/mempill-mcp/` repo, but `mempill-mcp` is pure Python — still no Rust.
+No Rust toolchain required for normal use. The mempill abi3 wheel is prebuilt. If the wheel is missing you can rebuild it: `cd ../mempill/mempill-python && ./.venv/bin/maturin build --release`.
+
+---
+
+## Showcase (W4 multi-agent demo)
+
+The `src/mempill_showcase/` package contains a multi-agent CrewAI + LangGraph showcase. To run the showcase test suite (no API key required):
+
+```bash
+.venv/bin/python -m pytest src/mempill_showcase/tests/ -v -m 'not live'
+```
+
+Expected: **95 passed** (W1–W4 tests), Python 3.12, zero vendored-dep patches.
+
+Runtime note: mempill is installed from the **local source-built wheel** (prerelease, has `valid_at` + granularity), not PyPI. This is required until mempill 0.3.0 is published. The `scripts/setup.sh` handles this automatically.
 
 ---
 
@@ -56,24 +71,21 @@ bash scripts/setup.sh
 ```
 
 The setup script:
-1. Creates a `.venv` (if absent)
-2. Installs `mempill-demo` (editable) — `mempill` is pulled from PyPI automatically
-3. Installs LangGraph conversational-agent dependencies by DEFAULT
-4. Installs `mempill-mcp` (editable) from `../mempill/mempill-mcp/` **if the sibling repo is present** — otherwise prints a notice and continues successfully
+1. Installs Python 3.12 via uv (if not present)
+2. Creates a Python 3.12 `.venv` (replacing any older venv)
+3. Installs base runtime deps (anthropic, mcp, python-dotenv, rich)
+4. Installs showcase extras (LangGraph, CrewAI, pytest)
+5. Installs the demo package editable (`--no-deps`)
+6. Installs the LOCAL source-built mempill abi3 wheel (NOT PyPI) — ensures prerelease features
 
-For a lean install without LangGraph:
+Verify after setup:
 ```bash
-SKIP_LANGGRAPH=true bash scripts/setup.sh
-```
-
-Verify the core install:
-```bash
-uv run python -c "import mempill, mcp; print('imports OK')"
+.venv/bin/python -c "import mempill, crewai, langgraph, langchain_core; print('imports OK')"
 ```
 
 Verify with MCP (only if sibling repo was present during setup):
 ```bash
-uv run python -c "import mempill, mempill_mcp, mcp; print('imports OK')"
+.venv/bin/python -c "import mempill, mempill_mcp, mcp; print('imports OK')"
 ```
 
 ---

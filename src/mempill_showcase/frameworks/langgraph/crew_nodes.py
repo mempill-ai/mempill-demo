@@ -217,15 +217,59 @@ def make_crew_a_node(
     remember_tool: "MempillRememberTool",
     date_parser: "DateParserTool",
     adapter,
+    crew=None,
 ):
-    """Factory: returns the crew_a_node function bound to its tools."""
+    """Factory: returns the crew_a_node function bound to its tools.
+
+    If `crew` is a CrewAI Crew object, the node invokes crew.kickoff(inputs=...)
+    instead of the shell heuristics.  The deterministic shell path runs when
+    crew=None (no API key / CI mode).
+
+    The state contract and routing logic (pending_contested → hitl) are identical
+    in both paths — only the extraction/write mechanism differs.
+    """
 
     def crew_a_node(state: ExecAssistantState) -> dict:
-        """Crew A shell — intake: parse date → remember → detect Contested."""
+        """Crew A node — intake: parse date → remember → detect Contested.
+
+        Live path  (crew is not None): delegates to CrewAI crew.kickoff().
+        Shell path (crew is None):     deterministic heuristic extraction (W3).
+        """
         user_input = state.get("user_input", "")
         agent_id = state.get("agent_id", AGENT_ID_DEFAULT)
 
-        log.info("crew_a_node: processing input=%r", user_input[:80])
+        log.info("crew_a_node: processing input=%r (crew=%s)", user_input[:80], type(crew).__name__ if crew else "shell")
+
+        # ── CrewAI live path ──────────────────────────────────────────────────
+        if crew is not None:
+            try:
+                result = crew.kickoff(inputs={
+                    "user_request": user_input,
+                    "agent_id": agent_id,
+                })
+                raw_output = str(result)
+                # Parse disposition from crew output (may be JSON or text)
+                import re as _re2
+                is_contested = bool(_re2.search(r'"is_contested"\s*:\s*true', raw_output, _re2.IGNORECASE))
+                subject, predicate, value = _extract_entity_predicate_value(user_input)
+                if is_contested and subject and predicate:
+                    # Build pending_contested from the adapter so routing still works
+                    pending = _build_pending_contested(subject, predicate, {}, adapter, agent_id)
+                    return {
+                        "write_result": raw_output,
+                        "pending_contested": pending,
+                        "route": "hitl",
+                        "output_text": f"crew_a [crewai]: Contested write for {subject}/{predicate} — escalating to HITL",
+                    }
+                return {
+                    "write_result": raw_output,
+                    "pending_contested": None,
+                    "route": "end",
+                    "output_text": f"crew_a [crewai]: {raw_output[:200]}",
+                }
+            except Exception as exc:
+                log.error("crew_a_node: CrewAI kickoff failed: %s — falling back to shell", exc)
+                # Fall through to shell path on error
 
         # 1. Parse valid_from via DateParserTool.
         # Extract date hint first (DateParserTool expects a date string, not a sentence).
@@ -317,16 +361,55 @@ def make_crew_b_node(
     remember_tool: "MempillRememberTool",
     rag_write_tool: "RAGWriteTool",
     adapter,
+    crew=None,
 ):
-    """Factory: returns the crew_b_node function bound to its tools."""
+    """Factory: returns the crew_b_node function bound to its tools.
+
+    If `crew` is a CrewAI Crew object, the node invokes crew.kickoff(inputs=...)
+    instead of the shell heuristics.  Shell path is the no-API-key fallback.
+    """
 
     def crew_b_node(state: ExecAssistantState) -> dict:
-        """Crew B shell — research: RAG write bulk + distilled claim → detect Contested."""
+        """Crew B node — research: RAG write bulk + distilled claim → detect Contested.
+
+        Live path  (crew is not None): delegates to CrewAI crew.kickoff().
+        Shell path (crew is None):     deterministic heuristic extraction (W3).
+        """
         user_input = state.get("user_input", "")
         agent_id = state.get("agent_id", AGENT_ID_DEFAULT)
 
-        log.info("crew_b_node: processing research input=%r", user_input[:80])
+        log.info("crew_b_node: processing research input=%r (crew=%s)", user_input[:80], type(crew).__name__ if crew else "shell")
 
+        # ── CrewAI live path ──────────────────────────────────────────────────
+        if crew is not None:
+            try:
+                result = crew.kickoff(inputs={
+                    "user_request": user_input,
+                    "agent_id": agent_id,
+                })
+                raw_output = str(result)
+                import re as _re3
+                is_contested = bool(_re3.search(r'"is_contested"\s*:\s*true', raw_output, _re3.IGNORECASE))
+                subject, predicate, value = _extract_entity_predicate_value(user_input)
+                if is_contested and subject and predicate:
+                    pending = _build_pending_contested(subject, predicate, {}, adapter, agent_id)
+                    return {
+                        "write_result": raw_output,
+                        "pending_contested": pending,
+                        "route": "hitl",
+                        "output_text": f"crew_b [crewai]: Contested distilled claim for {subject}/{predicate} — escalating to HITL",
+                    }
+                return {
+                    "write_result": raw_output,
+                    "pending_contested": None,
+                    "route": "end",
+                    "output_text": f"crew_b [crewai]: {raw_output[:200]}",
+                }
+            except Exception as exc:
+                log.error("crew_b_node: CrewAI kickoff failed: %s — falling back to shell", exc)
+                # Fall through to shell path on error
+
+        # ── Shell path (W3 deterministic heuristics) ──────────────────────────
         # 1. Write raw research to RAG (bulk context — stays in RAG, not mempill)
         rag_write_tool.invoke({
             "text": user_input,
@@ -412,20 +495,49 @@ def make_crew_b_node(
 def make_crew_c_node(
     recall_tool: "MempillRecallTool",
     audit_tool: "MempillAuditTool",
+    crew=None,
 ):
     """Factory: returns the crew_c_node function bound to its tools.
 
     Crew C is READ-ONLY — it NEVER writes to mempill.
+
+    If `crew` is a CrewAI Crew object, the node invokes crew.kickoff(inputs=...)
+    instead of the shell heuristics.  Shell path is the no-API-key fallback.
     """
 
     def crew_c_node(state: ExecAssistantState) -> dict:
-        """Crew C shell — scheduling/briefing/recall/audit: read-only mempill access."""
+        """Crew C node — scheduling/briefing/recall/audit: read-only mempill access.
+
+        Live path  (crew is not None): delegates to CrewAI crew.kickoff().
+        Shell path (crew is None):     deterministic heuristic reads (W3).
+
+        Crew C is strictly READ-ONLY — the live path passes no write-capable tools
+        to the crew (enforced at crew construction in build_crew_c_agents).
+        """
         user_input = state.get("user_input", "")
         agent_id = state.get("agent_id", AGENT_ID_DEFAULT)
         intent = state.get("intent", IntentLabel.RECALL_HISTORY)
 
-        log.info("crew_c_node: intent=%s input=%r", intent, user_input[:80])
+        log.info("crew_c_node: intent=%s input=%r (crew=%s)", intent, user_input[:80], type(crew).__name__ if crew else "shell")
 
+        # ── CrewAI live path ──────────────────────────────────────────────────
+        if crew is not None:
+            try:
+                result = crew.kickoff(inputs={
+                    "user_request": user_input,
+                    "agent_id": agent_id,
+                    "intent": str(intent),
+                })
+                raw_output = str(result)
+                return {
+                    "recall_result": raw_output,
+                    "output_text": f"crew_c [crewai]: {raw_output[:300]}",
+                }
+            except Exception as exc:
+                log.error("crew_c_node: CrewAI kickoff failed: %s — falling back to shell", exc)
+                # Fall through to shell path on error
+
+        # ── Shell path (W3 deterministic reads) ───────────────────────────────
         # ── COMPLIANCE_AUDIT path ─────────────────────────────────────────────
         if intent == IntentLabel.COMPLIANCE_AUDIT:
             raw = audit_tool.invoke({"agent_id": agent_id, "limit": 100})

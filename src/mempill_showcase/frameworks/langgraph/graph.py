@@ -24,7 +24,7 @@ DI integration:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
@@ -97,6 +97,7 @@ def build_graph(
     adapter: "MempillAdapter",
     tools: ShowcaseTools,
     classifier: Optional[SupervisorClassifier] = None,
+    crews: Optional[Any] = None,
 ) -> "CompiledGraph":  # type: ignore[type-arg]
     """Build and compile the ExecAssistant StateGraph.
 
@@ -108,9 +109,17 @@ def build_graph(
         tools:      ShowcaseTools NamedTuple with all W2 tool instances.
         classifier: SupervisorClassifier impl. Defaults to MockSupervisor()
                     (deterministic, no API key). Swap for LLMSupervisor in W6.
+        crews:      Optional ShowcaseCrews NamedTuple (crew_a, crew_b, crew_c).
+                    When provided, each crew node invokes crew.kickoff() instead of
+                    the W3 shell heuristics.  When None, shell path runs (CI-safe).
     """
     if classifier is None:
         classifier = MockSupervisor()
+
+    # Unpack optional CrewAI crews (None → shell path for each node)
+    crew_a = getattr(crews, "crew_a", None) if crews is not None else None
+    crew_b = getattr(crews, "crew_b", None) if crews is not None else None
+    crew_c = getattr(crews, "crew_c", None) if crews is not None else None
 
     # ── Build node functions ──────────────────────────────────────────────────
     supervisor_fn = make_supervisor_node(classifier)
@@ -119,15 +128,18 @@ def build_graph(
         remember_tool=tools.remember_tool,
         date_parser=tools.date_parser,
         adapter=adapter,
+        crew=crew_a,
     )
     crew_b_fn = make_crew_b_node(
         remember_tool=tools.remember_tool,
         rag_write_tool=tools.rag_write_tool,
         adapter=adapter,
+        crew=crew_b,
     )
     crew_c_fn = make_crew_c_node(
         recall_tool=tools.recall_tool,
         audit_tool=tools.audit_tool,
+        crew=crew_c,
     )
     hitl_fn = make_hitl_node(
         adapter=adapter,

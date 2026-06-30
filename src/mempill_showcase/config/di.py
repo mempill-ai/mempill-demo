@@ -7,6 +7,13 @@ All mempill imports are deferred to this module and the mempill_adapter.
 W3 additions:
   build_tools(adapter)  — constructs ShowcaseTools (all W2 tool instances)
   build_langgraph(...)  — constructs the full ExecAssistant StateGraph
+
+W4 additions:
+  build_langgraph(..., use_crewai=False, llm=None)
+    use_crewai=False (default): deterministic shell path (no API key, CI-safe)
+    use_crewai=True:            CrewAI crews injected into the graph nodes
+    llm:                        LiteLLM model string or crewai.LLM instance;
+                                forwarded to build_crews() when use_crewai=True
 """
 from __future__ import annotations
 
@@ -87,15 +94,32 @@ def build_tools(adapter):
 def build_langgraph(
     in_memory: bool = True,
     classifier=None,
+    use_crewai: bool = False,
+    llm=None,
 ):
     """Build the full ExecAssistant LangGraph app.
 
     Returns (app, adapter) so callers can seed data or inspect state after the graph.
-    classifier: SupervisorClassifier implementation; defaults to MockSupervisor.
+
+    Args:
+        in_memory:   Use in-memory mempill engine (True for tests/demos).
+        classifier:  SupervisorClassifier implementation; defaults to MockSupervisor.
+        use_crewai:  False (default) → deterministic shell path (no API key, CI-safe).
+                     True → CrewAI crews are injected into crew_a/b/c nodes.
+                     The shell heuristics remain as a fallback if kickoff() fails.
+        llm:         LiteLLM model string (e.g. "anthropic/claude-3-5-sonnet-20241022")
+                     or a crewai.LLM instance.  Forwarded to build_crews().
+                     Ignored when use_crewai=False.
     """
     from mempill_showcase.frameworks.langgraph.graph import build_graph
 
     adapter = build_mempill_adapter(in_memory=in_memory)
     tools = build_tools(adapter)
-    app = build_graph(adapter=adapter, tools=tools, classifier=classifier)
+
+    crews = None
+    if use_crewai:
+        from mempill_showcase.frameworks.crewai.crews import build_crews
+        crews = build_crews(adapter=adapter, tools=tools, llm=llm)
+
+    app = build_graph(adapter=adapter, tools=tools, classifier=classifier, crews=crews)
     return app, adapter
