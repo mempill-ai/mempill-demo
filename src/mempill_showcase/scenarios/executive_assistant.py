@@ -727,3 +727,7 @@ def _find_value_at(entries: list[dict], valid_at_iso: str) -> Optional[str]:
         if vf <= ts and (vu is None or vu > ts):
             return ent.get("value")
     return None
+
+
+if __name__ == "__main__":
+    main()
