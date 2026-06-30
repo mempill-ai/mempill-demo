@@ -55,7 +55,7 @@ from mempill_showcase.frameworks.langgraph.graph import (
 )
 from mempill_showcase.frameworks.langgraph.hitl_node import make_hitl_node
 from mempill_showcase.frameworks.langgraph.state import ExecAssistantState
-from mempill_showcase.frameworks.langgraph.crew_nodes import LLMExtractor
+from mempill_showcase.frameworks.langgraph.crew_nodes import LLMExtractor, LLMResearcher
 from mempill_showcase.frameworks.langgraph.supervisor_node import (
     MockSupervisor,
     make_supervisor_node,
@@ -145,17 +145,18 @@ def _build_studio_graph():
     # Step 5: build nodes
     tools = build_tools(adapter)
 
-    # When API key is available, build a focused LLMExtractor for crew_a.
-    # The LLMExtractor makes ONE structured Anthropic call to extract
-    # {entity, predicate, value, valid_from} from free-form text, then the
-    # Python remember_tool writes to mempill (reliable — no tool-loop, no
-    # hallucinated JSON).  CrewAI crew kickoff was evaluated and found
-    # unreliable: agents fabricate "Final Answer" JSON without calling tools.
-    # Without an API key, extractor=None → deterministic shell heuristics.
+    # When API key is available, build focused LLM components for extraction/research.
+    # LLMExtractor (crew_a): single structured Anthropic call → {entity, predicate,
+    #   value, valid_from}; Python remember_tool writes to mempill (reliable).
+    # LLMResearcher (crew_b): single structured Anthropic call → factual summary
+    #   (→ RAG) + ≤3 distilled claims (→ mempill via remember_tool).
+    # Both replace the unreliable CrewAI kickoff path.
+    # Without an API key: extractor=None, researcher=None → shell heuristics.
     extractor = None
+    researcher = None
     if api_key:
+        llm_model = _settings.anthropic_model
         try:
-            llm_model = _settings.anthropic_model
             extractor = LLMExtractor(model_name=llm_model)
             log.info(
                 "studio_graph: LLMExtractor built with model=%r (LLM extraction path active for crew_a)",
@@ -167,6 +168,18 @@ def _build_studio_graph():
                 exc,
             )
             extractor = None
+        try:
+            researcher = LLMResearcher(model_name=llm_model)
+            log.info(
+                "studio_graph: LLMResearcher built with model=%r (LLM research path active for crew_b)",
+                llm_model,
+            )
+        except Exception as exc:
+            log.warning(
+                "studio_graph: LLMResearcher init failed (%s) — falling back to shell research",
+                exc,
+            )
+            researcher = None
 
     inner_supervisor_fn = make_supervisor_node(classifier)
 
@@ -196,6 +209,7 @@ def _build_studio_graph():
         rag_write_tool=tools.rag_write_tool,
         adapter=adapter,
         crew=None,
+        researcher=researcher,
     )
     crew_c_fn = make_crew_c_node(
         recall_tool=tools.recall_tool,
@@ -237,9 +251,10 @@ def _build_studio_graph():
     compiled = g.compile(checkpointer=None)
     log.info(
         "studio_graph: compiled ExecAssistant StateGraph "
-        "(classifier=%s, extraction=%s, seeded=%d claims, default_agent_id=%r, no MemorySaver)",
+        "(classifier=%s, extraction=%s, research=%s, seeded=%d claims, default_agent_id=%r, no MemorySaver)",
         type(classifier).__name__,
         f"LLMExtractor({_settings.anthropic_model})" if extractor else "shell-heuristics",
+        f"LLMResearcher({_settings.anthropic_model})" if researcher else "shell-heuristics",
         _seed_count,
         _DEFAULT_AGENT_ID,
     )
