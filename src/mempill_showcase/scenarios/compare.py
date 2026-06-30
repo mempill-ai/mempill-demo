@@ -68,8 +68,16 @@ def run_comparison() -> ComparisonResult:
     from mempill_showcase.core.domain.models import ClaimInput
     from mempill_showcase.scenarios.naive_baseline import run_naive_baseline
     from mempill_showcase.scenarios.seed_data import AGENT_ID, load_seed_claims
+    from mempill_showcase.config.di import _adapter_from_settings
 
     result = ComparisonResult()
+
+    # Resolve agent_id from Settings (env: MEMPILL_AGENT_ID)
+    try:
+        from mempill_showcase.config.settings import get_settings
+        agent_id = get_settings().mempill_agent_id
+    except Exception:
+        agent_id = AGENT_ID
 
     # ── Run naive baseline ────────────────────────────────────────────────────
     naive_adapter = NaiveAdapter()
@@ -78,8 +86,8 @@ def run_comparison() -> ComparisonResult:
     # ── Run mempill scenario (slim version — just the 4 contrast beats) ───────
     # We do NOT run the full 8-beat scenario (that requires LangGraph + graph build).
     # Instead we re-run the contrast-relevant adapter operations directly.
+    # For compare, always use in-memory so the comparison starts fresh each run.
     mempill_adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
-    agent_id = AGENT_ID
 
     # Seed Day-0 data into mempill
     load_seed_claims(mempill_adapter, agent_id)

@@ -42,7 +42,7 @@ import os
 from langgraph.graph import END, StateGraph
 
 from mempill_showcase.config.bootstrap import bootstrap
-from mempill_showcase.config.di import build_mempill_adapter, build_tools
+from mempill_showcase.config.di import build_mempill_adapter, build_tools, _adapter_from_settings
 from mempill_showcase.frameworks.langgraph.crew_nodes import (
     make_crew_a_node,
     make_crew_b_node,
@@ -65,9 +65,17 @@ from mempill_showcase.scenarios.seed_data import AGENT_ID, load_seed_claims
 log = logging.getLogger(__name__)
 
 # ── Default agent_id ──────────────────────────────────────────────────────────
-# Matches the agent_id used by load_seed_claims() so seed data is queryable
-# without the user having to fill in the agent_id field in Studio.
-_DEFAULT_AGENT_ID = AGENT_ID  # "jordan-park-001"
+# Loaded from Settings (MEMPILL_AGENT_ID env var) so it is fully configurable.
+# Falls back to the seed_data module constant if Settings cannot be loaded.
+def _load_default_agent_id() -> str:
+    try:
+        from mempill_showcase.config.settings import get_settings
+        return get_settings().mempill_agent_id
+    except Exception:
+        return AGENT_ID
+
+
+_DEFAULT_AGENT_ID = _load_default_agent_id()
 
 
 def _build_studio_graph():
@@ -91,21 +99,31 @@ def _build_studio_graph():
     # studio_graph is only imported by `langgraph dev`, not by the test suite.
     bootstrap()
 
-    # Step 2: build the adapter
-    adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
+    # Load settings after bootstrap so .env values are present.
+    from mempill_showcase.config.settings import get_settings
+    _settings = get_settings()
 
-    # Step 3: seed Day-0 facts immediately
+    # Step 2: build the adapter — file-backed if MEMPILL_DB_PATH is set, else in-memory.
+    adapter = _adapter_from_settings(_settings)
+
+    # Step 3: seed Day-0 facts (idempotent — skips if data already present for file-backed engines)
     _seed_count = 0
     try:
         refs = load_seed_claims(adapter, agent_id=_DEFAULT_AGENT_ID)
         _seed_count = len(refs)
-        log.info(
-            "studio_graph: seeded %d Day-0 claims for agent_id=%r",
-            _seed_count,
-            _DEFAULT_AGENT_ID,
-        )
+        if _seed_count:
+            log.info(
+                "studio_graph: seeded %d Day-0 claims for agent_id=%r",
+                _seed_count,
+                _DEFAULT_AGENT_ID,
+            )
+        else:
+            log.info(
+                "studio_graph: store already seeded for agent_id=%r — seed skipped",
+                _DEFAULT_AGENT_ID,
+            )
     except Exception as exc:
-        log.warning("studio_graph: seed failed (%s) — graph will start with empty store", exc)
+        log.warning("studio_graph: seed failed (%s) — graph will start with existing store state", exc)
 
     # Step 4: supervisor selection
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -137,7 +155,7 @@ def _build_studio_graph():
     extractor = None
     if api_key:
         try:
-            llm_model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
+            llm_model = _settings.anthropic_model
             extractor = LLMExtractor(model_name=llm_model)
             log.info(
                 "studio_graph: LLMExtractor built with model=%r (LLM extraction path active for crew_a)",
@@ -221,7 +239,7 @@ def _build_studio_graph():
         "studio_graph: compiled ExecAssistant StateGraph "
         "(classifier=%s, extraction=%s, seeded=%d claims, default_agent_id=%r, no MemorySaver)",
         type(classifier).__name__,
-        f"LLMExtractor({os.environ.get('ANTHROPIC_MODEL', 'claude-haiku-4-5')})" if extractor else "shell-heuristics",
+        f"LLMExtractor({_settings.anthropic_model})" if extractor else "shell-heuristics",
         _seed_count,
         _DEFAULT_AGENT_ID,
     )

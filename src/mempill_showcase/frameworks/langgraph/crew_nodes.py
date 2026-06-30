@@ -67,7 +67,19 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-AGENT_ID_DEFAULT = "jordan-park-001"
+
+def _get_agent_id_default() -> str:
+    """Return the configured default agent_id from Settings (env: MEMPILL_AGENT_ID)."""
+    try:
+        from mempill_showcase.config.settings import get_settings
+        return get_settings().mempill_agent_id
+    except Exception:
+        return "jordan-park-001"
+
+
+# Module-level constant read once at import time; callers that need the live
+# value per-invocation should call _get_agent_id_default() directly.
+AGENT_ID_DEFAULT = _get_agent_id_default()
 
 import re as _re
 
@@ -276,8 +288,15 @@ class LLMExtractor:
     """
 
     def __init__(self, model_name: Optional[str] = None) -> None:
-        import os
-        self._model = model_name or os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
+        if model_name:
+            self._model = model_name
+        else:
+            try:
+                from mempill_showcase.config.settings import get_settings
+                self._model = get_settings().anthropic_model
+            except Exception:
+                import os
+                self._model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
         log.info("LLMExtractor: initialised with model=%s", self._model)
 
     def extract(self, sentence: str) -> dict:

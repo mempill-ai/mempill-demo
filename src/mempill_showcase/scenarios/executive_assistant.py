@@ -91,17 +91,17 @@ class ScenarioTrace:
 
 # ── Controlled input injectors (bypass heuristic extraction) ─────────────────
 
-def _controlled_recall_state(subject: str, predicate: str) -> dict:
+def _controlled_recall_state(subject: str, predicate: str, agent_id: str = AGENT_ID) -> dict:
     """Build ExecAssistantState for a recall beat (crew_c PREPARE_BRIEFING path)."""
     return {
         "user_input": f"recall {subject}/{predicate}",
-        "agent_id": AGENT_ID,
+        "agent_id": agent_id,
         "intent": "PREPARE_BRIEFING",
         "route": "crew_c",
     }
 
 
-def _controlled_write_state(subject: str, predicate: str, value: str, valid_from: str) -> dict:
+def _controlled_write_state(subject: str, predicate: str, value: str, valid_from: str, agent_id: str = AGENT_ID) -> dict:
     """Build ExecAssistantState for a write beat (crew_a UPDATE_CONTACT path).
 
     The heuristic extraction in crew_a_node recognises known aliases and values.
@@ -110,37 +110,37 @@ def _controlled_write_state(subject: str, predicate: str, value: str, valid_from
     """
     return {
         "user_input": f"{subject} {predicate} {value} since {valid_from}",
-        "agent_id": AGENT_ID,
+        "agent_id": agent_id,
         "intent": "UPDATE_CONTACT",
         "route": "crew_a",
     }
 
 
-def _controlled_research_state(topic: str) -> dict:
+def _controlled_research_state(topic: str, agent_id: str = AGENT_ID) -> dict:
     """Build ExecAssistantState for a research beat (crew_b RESEARCH path)."""
     return {
         "user_input": topic,
-        "agent_id": AGENT_ID,
+        "agent_id": agent_id,
         "intent": "RESEARCH",
         "route": "crew_b",
     }
 
 
-def _controlled_recall_history_state(subject: str, predicate: str, hint: str) -> dict:
+def _controlled_recall_history_state(subject: str, predicate: str, hint: str, agent_id: str = AGENT_ID) -> dict:
     """Build ExecAssistantState for a bi-temporal recall (crew_c RECALL_HISTORY path)."""
     return {
         "user_input": f"{hint} {subject} {predicate}",
-        "agent_id": AGENT_ID,
+        "agent_id": agent_id,
         "intent": "RECALL_HISTORY",
         "route": "crew_c",
     }
 
 
-def _controlled_audit_state() -> dict:
+def _controlled_audit_state(agent_id: str = AGENT_ID) -> dict:
     """Build ExecAssistantState for a compliance audit (crew_c COMPLIANCE_AUDIT path)."""
     return {
         "user_input": "compliance audit",
-        "agent_id": AGENT_ID,
+        "agent_id": agent_id,
         "intent": "COMPLIANCE_AUDIT",
         "route": "crew_c",
     }
@@ -148,14 +148,14 @@ def _controlled_audit_state() -> dict:
 
 # ── Tx-time capture helper ────────────────────────────────────────────────────
 
-def _capture_latest_tx_time(adapter: "MempillAdapter") -> Optional[str]:
+def _capture_latest_tx_time(adapter: "MempillAdapter", agent_id: str) -> Optional[str]:
     """Capture the real recorded_at of the most recent audit entry.
 
     Called immediately after a write beat to snapshot the engine's tx clock.
     Used for AC-4 as_of_tx_time assertions.
     """
     try:
-        entries = adapter.audit(AGENT_ID, limit=1)
+        entries = adapter.audit(agent_id, limit=1)
         if entries:
             return entries[0].recorded_at
     except Exception as exc:
@@ -174,6 +174,7 @@ def _write_controlled(
     valid_until: Optional[str],
     confidence: float,
     provenance_channel: str,
+    agent_id: str = AGENT_ID,
 ) -> BeatResult:
     """Write a claim directly via the adapter (controlled, not via graph heuristics)."""
     from mempill import ProvenanceLabel
@@ -195,7 +196,7 @@ def _write_controlled(
         cardinality="Functional",
         criticality="Medium",
     )
-    receipt = adapter.write_claim(AGENT_ID, claim)
+    receipt = adapter.write_claim(agent_id, claim)
     return receipt
 
 
@@ -205,6 +206,7 @@ def run_scenario(
     adapter: "MempillAdapter",
     rag_store: Optional[InMemoryRAGStore] = None,
     tx_separation_delay: float = 0.0,
+    agent_id: Optional[str] = None,
 ) -> ScenarioTrace:
     """Execute all 8 beats deterministically and return a ScenarioTrace.
 
@@ -227,6 +229,14 @@ def run_scenario(
       - Tx timestamps are captured from engine audit output (real clock).
       - The LLM / supervisor routing is mocked (MockSupervisor, no API key).
     """
+    # Resolve agent_id: explicit arg > Settings > module-level default
+    if agent_id is None:
+        try:
+            from mempill_showcase.config.settings import get_settings
+            agent_id = get_settings().mempill_agent_id
+        except Exception:
+            agent_id = AGENT_ID
+
     trace = ScenarioTrace()
 
     if rag_store is None:
@@ -255,8 +265,9 @@ def run_scenario(
     # ── SEED Day-0 data ───────────────────────────────────────────────────────
     # Seed loads 7 claims including alice-chen/city=Austin TX with valid_until=2025-02
     # (pre-bounded so T-02 NYC write is a clean CommittedCheap succession).
-    seed_refs = load_seed_claims(adapter, AGENT_ID)
-    log.info("Seeded %d Day-0 claims", len(seed_refs))
+    # load_seed_claims is idempotent — skips if data already present (file-backed engines).
+    seed_refs = load_seed_claims(adapter, agent_id)
+    log.info("Seeded %d Day-0 claims (0 = already present)", len(seed_refs))
     trace.subjects_written.update(["alice-chen", "bob-liu", "acme-corp", "jordan-park"])
 
     # Capture tx timestamps for AC-4 proof:
@@ -268,16 +279,16 @@ def run_scenario(
     #     so ALL seed claims are visible at that point).
     #
     # AC-4 CONTRACT: real engine-stamped tx times, NOT injected past dates.
-    austin_belief = adapter.recall(AGENT_ID, "alice-chen", "city")
+    austin_belief = adapter.recall(agent_id, "alice-chen", "city")
     austin_claim_ref = austin_belief.claim_ref
     # Search the full audit (limit=20 covers all seed claims) for the Austin city entry
-    all_seed_audit = adapter.audit(AGENT_ID, limit=20)
+    all_seed_audit = adapter.audit(agent_id, limit=20)
     for aud_entry in all_seed_audit:
         if aud_entry.claim_ref == austin_claim_ref:
             trace.tx_before_nyc_write = aud_entry.recorded_at
             break
     if not trace.tx_before_nyc_write:
-        trace.tx_before_nyc_write = _capture_latest_tx_time(adapter)
+        trace.tx_before_nyc_write = _capture_latest_tx_time(adapter, agent_id)
 
     # If the caller requested a tx-separation delay (e.g. tests that verify AC-4 ordering
     # on very fast hosts), sleep here so the NYC write gets a strictly later tx timestamp.
@@ -288,10 +299,10 @@ def run_scenario(
 
     # ── T-01: Recall alice-chen/city (should be Austin TX) ───────────────────
     cfg_t01 = {"configurable": {"thread_id": "t01"}}
-    state_t01 = _controlled_recall_state("alice-chen", "city")
+    state_t01 = _controlled_recall_state("alice-chen", "city", agent_id=agent_id)
     result_t01 = app.invoke(state_t01, cfg_t01)
 
-    belief_t01 = adapter.recall(AGENT_ID, "alice-chen", "city")
+    belief_t01 = adapter.recall(agent_id, "alice-chen", "city")
     trace.beats.append(BeatResult(
         beat_id="T-01",
         description="Book Austin lunch — recall alice-chen/city (should be Austin TX)",
@@ -312,6 +323,7 @@ def run_scenario(
         adapter, "alice-chen", "city", "New York NY",
         valid_from="2025-02", valid_until=None,
         confidence=1.0, provenance_channel="UserAsserted",
+        agent_id=agent_id,
     )
     trace.subjects_written.add("alice-chen")
 
@@ -319,15 +331,15 @@ def run_scenario(
     # The claim_ref filter in query_audit only works for claims committed via reconcile paths;
     # for direct ingest writes we search the full audit list instead.
     nyc_claim_ref = receipt_t02.claim_ref
-    all_post_t02_audit = adapter.audit(AGENT_ID, limit=20)
+    all_post_t02_audit = adapter.audit(agent_id, limit=20)
     for aud_entry in all_post_t02_audit:
         if aud_entry.claim_ref == nyc_claim_ref:
             trace.tx_after_nyc_write = aud_entry.recorded_at
             break
     if not trace.tx_after_nyc_write:
-        trace.tx_after_nyc_write = _capture_latest_tx_time(adapter)
+        trace.tx_after_nyc_write = _capture_latest_tx_time(adapter, agent_id)
 
-    belief_t02 = adapter.recall(AGENT_ID, "alice-chen", "city")
+    belief_t02 = adapter.recall(agent_id, "alice-chen", "city")
     trace.beats.append(BeatResult(
         beat_id="T-02",
         description="Alice relocated to NYC — write city=NYC valid_from=2025-02",
@@ -345,6 +357,7 @@ def run_scenario(
         adapter, "acme-corp", "cto", "Marcus Webb",
         valid_from="2025-01", valid_until=None,
         confidence=0.85, provenance_channel="ExternalFirstHand",
+        agent_id=agent_id,
     )
     trace.subjects_written.add("acme-corp")
     log.info("T-03: acme-corp/cto=%r disposition=%s", "Marcus Webb", receipt_t03_cto.disposition)
@@ -355,7 +368,7 @@ def run_scenario(
     cfg_t03_research = {"configurable": {"thread_id": "t03-research"}}
     state_t03_graph = {
         "user_input": "Marcus Webb is the new CTO at Acme Corp",
-        "agent_id": AGENT_ID,
+        "agent_id": agent_id,
         "intent": "RESEARCH",
         "route": "crew_b",
     }
@@ -371,7 +384,7 @@ def run_scenario(
     cfg_t03 = {"configurable": {"thread_id": "t03-hitl"}}
     state_t03_hitl = {
         "user_input": "Alice promoted to CTO since 2023-06 at Acme",
-        "agent_id": AGENT_ID,
+        "agent_id": agent_id,
         "intent": "UPDATE_CONTACT",
         "route": "crew_a",
     }
@@ -389,7 +402,7 @@ def run_scenario(
     is_contested_t03 = write_result_json.get("is_contested", True)
 
     # Recall the belief state (should be Contested / QueuedForAdjudication)
-    belief_t03 = adapter.recall(AGENT_ID, "alice-chen", "employer")
+    belief_t03 = adapter.recall(agent_id, "alice-chen", "employer")
     trace.subjects_written.add("alice-chen")
 
     # Check whether the graph paused at hitl_node
@@ -445,7 +458,7 @@ def run_scenario(
         hitl_resolved_belief_json = result_t04.get("hitl_resolved_belief")
 
     # After oracle Affirm, recall to confirm resolution.
-    belief_t04 = adapter.recall(AGENT_ID, "alice-chen", "employer")
+    belief_t04 = adapter.recall(agent_id, "alice-chen", "employer")
     trace.subjects_written.add("alice-chen")
 
     # Capture the oracle-resolved claim ref from the belief
@@ -476,12 +489,12 @@ def run_scenario(
 
     # ── T-05: Briefing for Alice dinner — recall all current facts ────────────
     cfg_t05 = {"configurable": {"thread_id": "t05"}}
-    state_t05 = _controlled_recall_state("alice-chen", "employer")
+    state_t05 = _controlled_recall_state("alice-chen", "employer", agent_id=agent_id)
     app.invoke(state_t05, cfg_t05)
 
-    employer_t05 = adapter.recall(AGENT_ID, "alice-chen", "employer")
-    city_t05 = adapter.recall(AGENT_ID, "alice-chen", "city")
-    diet_t05 = adapter.recall(AGENT_ID, "alice-chen", "dietary_restriction")
+    employer_t05 = adapter.recall(agent_id, "alice-chen", "employer")
+    city_t05 = adapter.recall(agent_id, "alice-chen", "city")
+    diet_t05 = adapter.recall(agent_id, "alice-chen", "dietary_restriction")
 
     # After T-04 real oracle Affirm, employer should be Resolved (challenger won).
     # Use the current belief value directly; fall back to query_history if still Contested.
@@ -492,7 +505,7 @@ def run_scenario(
         # Fallback: scan query_history for the most recent open-ended entry
         try:
             employer_history = adapter._engine.query_history({
-                "agent_id": AGENT_ID,
+                "agent_id": agent_id,
                 "subject": "alice-chen",
                 "predicate": "employer",
             })
@@ -529,7 +542,7 @@ def run_scenario(
     # Use alice-chen/city: Austin was valid 2023-06..2025-02; NYC from 2025-02.
     # valid_at=2025-01-01 is IN the Austin window → returns Austin TX.
     city_q1 = adapter.query_at(
-        AGENT_ID, "alice-chen", "city",
+        agent_id, "alice-chen", "city",
         valid_at="2025-01-01T00:00:00Z",
     )
 
@@ -539,7 +552,7 @@ def run_scenario(
     employer_history_q1: Optional[str] = None
     try:
         employer_history_raw = adapter._engine.query_history({
-            "agent_id": AGENT_ID,
+            "agent_id": agent_id,
             "subject": "alice-chen",
             "predicate": "employer",
         })
@@ -568,12 +581,12 @@ def run_scenario(
     # AC-4: query city as_of_tx_time=tx_before_nyc_write → Austin TX (NYC not yet known)
     # This is the HONEST implementation: real captured tx timestamps, not injected past dates.
     city_before_nyc = adapter.query_at(
-        AGENT_ID, "alice-chen", "city",
+        agent_id, "alice-chen", "city",
         as_of_tx_time=trace.tx_before_nyc_write,
     )
 
     # Also verify current belief is NYC (to contrast the axes)
-    city_now = adapter.recall(AGENT_ID, "alice-chen", "city")
+    city_now = adapter.recall(agent_id, "alice-chen", "city")
 
     trace.beats.append(BeatResult(
         beat_id="T-07",
@@ -600,7 +613,7 @@ def run_scenario(
     )
 
     # ── T-08: Full compliance audit ───────────────────────────────────────────
-    audit_entries_raw = adapter.audit(AGENT_ID, limit=100)
+    audit_entries_raw = adapter.audit(agent_id, limit=100)
     audit_dicts = [
         {
             "claim_ref": e.claim_ref,
@@ -619,7 +632,7 @@ def run_scenario(
     # Note: tx_before_nyc_write = Austin's specific tx time; dietary was ingested AFTER Austin
     # so using tx_before_nyc_write would return NoBelief for dietary. We use tx_after_nyc_write
     # instead which is after all seed claims were committed AND after the NYC write.
-    diet_compliance = adapter.recall(AGENT_ID, "alice-chen", "dietary_restriction")
+    diet_compliance = adapter.recall(agent_id, "alice-chen", "dietary_restriction")
 
     trace.beats.append(BeatResult(
         beat_id="T-08",
@@ -659,9 +672,11 @@ def main() -> None:
     from rich.table import Table
     from rich import box
 
-    from mempill_showcase.config.di import build_mempill_adapter
+    from mempill_showcase.config.di import _adapter_from_settings
+    from mempill_showcase.config.settings import get_settings
 
     console = Console()
+    _settings = get_settings()
     console.print()
     console.print(Panel(
         "[bold white]mempill Executive Assistant Scenario[/bold white]\n"
@@ -669,8 +684,9 @@ def main() -> None:
         border_style="blue",
     ))
 
-    adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
-    trace = run_scenario(adapter)
+    adapter = _adapter_from_settings(_settings)
+    agent_id = _settings.mempill_agent_id
+    trace = run_scenario(adapter, agent_id=agent_id)
 
     table = Table(
         title="[bold]Beat Results[/bold]",

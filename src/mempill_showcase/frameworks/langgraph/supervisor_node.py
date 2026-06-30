@@ -190,10 +190,14 @@ class LLMSupervisor:
     ) -> None:
         from langchain_anthropic import ChatAnthropic
 
-        resolved_model = (
-            model_name
-            or os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
-        )
+        if model_name:
+            resolved_model = model_name
+        else:
+            try:
+                from mempill_showcase.config.settings import get_settings
+                resolved_model = get_settings().anthropic_model
+            except Exception:
+                resolved_model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
         self._llm = ChatAnthropic(model=resolved_model, temperature=temperature)
         self._model_name = resolved_model
         log.info("LLMSupervisor: initialised with model=%s", resolved_model)

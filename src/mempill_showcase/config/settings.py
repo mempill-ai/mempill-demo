@@ -5,8 +5,9 @@ Fields are loaded from environment variables (case-insensitive) or .env files.
 All fields have safe defaults so the demo runs without any configuration.
 
 Key env vars:
+  MEMPILL_AGENT_ID         → agent/session owner ID (default: jordan-park-001)
   NAIVE_MODE=true          → use the NaiveAdapter instead of mempill (flip to watch it misbehave)
-  MEMPILL_DB_PATH          → optional path for a file-backed engine (not wired; reserved)
+  MEMPILL_DB_PATH          → optional path for a file-backed persistent engine
   ANTHROPIC_API_KEY        → required for LLMSupervisor; absent → MockSupervisor (CI-safe)
   ANTHROPIC_MODEL          → model string for LLMSupervisor (default: claude-haiku-4-5)
   LANGSMITH_API_KEY        → enables LangSmith tracing (optional; absent → no-op)
@@ -34,6 +35,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # ── Agent identity ────────────────────────────────────────────────────────
+    mempill_agent_id: str = "jordan-park-001"
+    """Agent/session owner ID used for all mempill operations.
+    Env: MEMPILL_AGENT_ID (default: jordan-park-001).
+    """
+
     # ── Adapter toggle ────────────────────────────────────────────────────────
     naive_mode: bool = False
     """When True, use NaiveAdapter (last-write-wins, no bi-temporal).
@@ -42,8 +49,10 @@ class Settings(BaseSettings):
     """
 
     mempill_db_path: Optional[str] = None
-    """Optional file path for a persistent mempill engine.
-    Reserved for future use; in-memory engine is used when None.
+    """Optional file path for a persistent file-backed mempill engine.
+    When set, the engine is opened via mempill.open_oracle(path, HumanOracle()).
+    When None (default), uses an ephemeral in-memory engine.
+    Env: MEMPILL_DB_PATH
     """
 
     # ── LLM / API keys ────────────────────────────────────────────────────────
@@ -51,7 +60,10 @@ class Settings(BaseSettings):
     """Anthropic API key. Required for LLMSupervisor. Absent → MockSupervisor."""
 
     anthropic_model: str = "claude-haiku-4-5"
-    """Anthropic model for LLMSupervisor."""
+    """Anthropic model for LLMSupervisor and LLMExtractor.
+    Canonical setting — used by ALL LLM components.
+    Env: ANTHROPIC_MODEL (default: claude-haiku-4-5).
+    """
 
     langsmith_api_key: Optional[str] = None
     """LangSmith API key. Optional; absent → tracing is a no-op."""
@@ -76,7 +88,7 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return a Settings instance populated from the environment.
 
-    Cached per-process (Settings is stateless once constructed). Safe to call
-    multiple times; pydantic-settings reads env vars once at construction time.
+    Safe to call multiple times; pydantic-settings reads env vars once at
+    construction time.
     """
     return Settings()
