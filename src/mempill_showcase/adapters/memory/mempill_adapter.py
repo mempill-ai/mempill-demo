@@ -18,6 +18,12 @@ Read path:
   - Both extract valid_from_display/valid_until_display from the raw response
     (pre-rendered by the engine at the recorded granularity precision).
 
+Oracle path (W7):
+  - list_pending_adjudications(): wraps engine.list_pending_adjudications(agent_id=...)
+  - submit_adjudication(): wraps engine.submit_adjudication({handle_id, verdict, evidence_provenance})
+  - Both only available when the adapter was built with an oracle-backed engine
+    (open_oracle_in_memory). Non-oracle engines raise AttributeError on these methods.
+
 Lifted from mempill_demo.adapters.memory_mempill, stripped of:
   - Console-specific logging (replaced with module logger at DEBUG only)
   - Session registry (not needed; claim_ref is returned in WriteReceipt)
@@ -301,6 +307,62 @@ class MempillAdapter:
             agent_id, subject_lines, _pass + 1, last_resp,
         )
         return last_resp
+
+    # ── Oracle / HITL methods (W7) ────────────────────────────────────────────
+
+    def list_pending_adjudications(self, agent_id: str) -> list[dict]:
+        """Return pending adjudication requests from the oracle-backed engine queue.
+
+        Each entry contains at minimum:
+          - handle_id  (str UUID)
+          - subject    (str)
+          - predicate  (str)
+          - incumbent_value  (str)
+          - challenger_value (str)
+
+        Raises AttributeError if the underlying engine is not oracle-backed
+        (i.e. was opened with open_in_memory rather than open_oracle_in_memory).
+        """
+        if not hasattr(self._engine, "list_pending_adjudications"):
+            raise AttributeError(
+                "Engine does not support list_pending_adjudications. "
+                "Build the adapter with oracle_backed=True (open_oracle_in_memory)."
+            )
+        result = self._engine.list_pending_adjudications(agent_id=agent_id)
+        log.debug(
+            "list_pending_adjudications agent=%s → %d pending", agent_id, len(result)
+        )
+        return result
+
+    def submit_adjudication(self, agent_id: str, handle_id: str, verdict: str) -> dict:
+        """Submit a human verdict for a pending adjudication.
+
+        Args:
+            agent_id:  Session agent ID (used only for logging; handle_id is the key).
+            handle_id: UUID handle from list_pending_adjudications.
+            verdict:   "Affirm" (challenger wins) | "Deny" (incumbent wins) | "Unknown".
+
+        Returns:
+            Raw engine response dict with "disposition" and "claim_ref".
+
+        Raises AttributeError if the underlying engine is not oracle-backed.
+        """
+        if not hasattr(self._engine, "submit_adjudication"):
+            raise AttributeError(
+                "Engine does not support submit_adjudication. "
+                "Build the adapter with oracle_backed=True (open_oracle_in_memory)."
+            )
+        response = {
+            "handle_id": handle_id,
+            "verdict": verdict,
+            "evidence_provenance": ProvenanceLabel.external_first_hand(),
+        }
+        result = self._engine.submit_adjudication(response)
+        log.debug(
+            "submit_adjudication agent=%s handle=%s verdict=%s → disposition=%s",
+            agent_id, handle_id[:8], verdict, result.get("disposition"),
+        )
+        return result
 
     # ── Audit ─────────────────────────────────────────────────────────────────
 

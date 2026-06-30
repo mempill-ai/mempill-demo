@@ -226,7 +226,9 @@ class TestTracingNoOp:
         result = json.loads(raw)
         assert "claim_ref" in result, "remember tool must return claim_ref"
         assert "disposition" in result, "remember tool must return disposition"
-        assert result.get("disposition") in ("CommittedCheap", "Contested", "Conflict"), (
+        assert result.get("disposition") in (
+            "CommittedCheap", "Contested", "Conflict", "QueuedForAdjudication"
+        ), (
             f"Unexpected disposition: {result.get('disposition')}"
         )
 
