@@ -42,7 +42,9 @@ def scenario_trace() -> ScenarioTrace:
     """
     adapter: MempillAdapter = build_mempill_adapter(in_memory=True)
     rag_store = InMemoryRAGStore()
-    trace = run_scenario(adapter=adapter, rag_store=rag_store)
+    # tx_separation_delay ensures tx_before_nyc < tx_after_nyc on fast hosts.
+    # The CLI/demo path uses the default 0.0 (no sleep) for honest latency.
+    trace = run_scenario(adapter=adapter, rag_store=rag_store, tx_separation_delay=0.005)
     return trace
 
 

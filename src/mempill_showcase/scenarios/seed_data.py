@@ -1,9 +1,10 @@
 """
-mempill_showcase.scenarios.seed_data — Day-0 seed claims for agent_id "jordan-park-001".
+mempill_showcase.scenarios.seed_data — Day-0 seed claims for the showcase agent.
 
 Loads the 7 initial facts from SCENARIO.md into a MemoryStore adapter via write_claim().
-Designed to be idempotent: calling twice produces the same final state
-(mempill engine handles duplicate detection via succession).
+Designed to be idempotent: load_seed_claims() checks whether the store already
+contains seed data for the given agent_id and skips if present — safe for both
+in-memory and file-backed (persistent) engines.
 
 Seed claims (from SCENARIO.md § System Starting State):
   alice-chen  / employer           = Acme Corp / VP Engineering  valid_from=2023-06-01  UserAsserted
@@ -16,6 +17,7 @@ Seed claims (from SCENARIO.md § System Starting State):
 """
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -23,7 +25,18 @@ if TYPE_CHECKING:
 
 from mempill_showcase.core.domain.models import ClaimInput
 
+log = logging.getLogger(__name__)
+
+# Default agent_id — used as the default parameter value and for the module-level
+# constant that legacy callers (tests, studio_graph) import.  In all live paths
+# the value comes from Settings.mempill_agent_id (env: MEMPILL_AGENT_ID).
 AGENT_ID = "jordan-park-001"
+
+# Canonical "known-seed" sentinel: if this belief already exists the DB has been
+# seeded for this agent_id and we must not re-ingest (prevents Contested dupes on
+# file-backed engines across restarts).
+_SEED_SENTINEL_SUBJECT = "alice-chen"
+_SEED_SENTINEL_PREDICATE = "employer"
 
 # ── Seed definitions ──────────────────────────────────────────────────────────
 # Each tuple: (subject, predicate, value, valid_from, provenance_type)
@@ -44,13 +57,40 @@ _SEED_CLAIMS = [
 ]
 
 
+def is_already_seeded(adapter: "MempillAdapter", agent_id: str) -> bool:
+    """Return True if the store already contains seed data for *agent_id*.
+
+    Uses the sentinel claim (alice-chen/employer) as a proxy for seed presence.
+    If it exists with a non-NoBelief status the store was previously seeded.
+    This check is critical for file-backed (persistent) engines where re-running
+    the showcase must not duplicate seed writes and produce Contested beliefs.
+    """
+    try:
+        belief = adapter.recall(agent_id, _SEED_SENTINEL_SUBJECT, _SEED_SENTINEL_PREDICATE)
+        return belief.status not in ("NoBelief", None)
+    except Exception as exc:
+        log.debug("is_already_seeded: recall check failed (%s) — assuming not seeded", exc)
+        return False
+
+
 def load_seed_claims(adapter: "MempillAdapter", agent_id: str = AGENT_ID) -> list[str]:
     """Write Day-0 seed claims into *adapter* for *agent_id*.
 
-    Returns a list of claim_ref UUIDs (one per ingested claim).
-    ProvenanceLabel factory is resolved here (inside adapters boundary is fine —
-    but to keep seed_data importable without mempill, we import lazily).
+    Idempotent: if the store already contains seed data for *agent_id*
+    (detected via is_already_seeded()), this function returns an empty list
+    without writing anything.  This prevents duplicate Contested beliefs on
+    file-backed engines across restarts.
+
+    Returns a list of claim_ref UUIDs (one per ingested claim), or an empty
+    list when the seed was skipped because data was already present.
     """
+    if is_already_seeded(adapter, agent_id):
+        log.info(
+            "load_seed_claims: store already seeded for agent_id=%r — skipping",
+            agent_id,
+        )
+        return []
+
     from mempill import ProvenanceLabel
 
     refs: list[str] = []
@@ -74,4 +114,5 @@ def load_seed_claims(adapter: "MempillAdapter", agent_id: str = AGENT_ID) -> lis
         receipt = adapter.write_claim(agent_id, claim)
         refs.append(receipt.claim_ref)
 
+    log.info("load_seed_claims: wrote %d seed claims for agent_id=%r", len(refs), agent_id)
     return refs

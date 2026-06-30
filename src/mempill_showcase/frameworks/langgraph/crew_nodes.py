@@ -1,8 +1,7 @@
 """
-mempill_showcase.frameworks.langgraph.crew_nodes — crew node shells (W3).
+mempill_showcase.frameworks.langgraph.crew_nodes — crew node shells (W3/W10).
 
 These are plain Python functions that call W2 tools directly.
-In W4, CrewAI crews will replace the shell internals; the node signatures stay.
 
 Crew A — crew_a_node (Intake & Memory):
   Intent: UPDATE_CONTACT
@@ -33,11 +32,20 @@ Crew C — crew_c_node (Scheduling & Briefing):
   Flow for COMPLIANCE_AUDIT:
     MempillAuditTool for the full ledger.
 
-Shell architecture (W3 limitation):
+LLM extraction (W10):
+  LLMExtractor — a single structured Anthropic API call that extracts
+  {entity, predicate, value, valid_from} from a free-form sentence.
+  It replaces the heuristic shell when ANTHROPIC_API_KEY is present.
+  Unlike CrewAI crew kickoff, it uses a single bounded call and returns
+  structured data; the Python shell writes to mempill (reliable, no tool-loop).
+
+  make_crew_a_node(..., extractor=LLMExtractor(...)) → LLM extraction path.
+  make_crew_a_node(..., extractor=None, crew=None) → deterministic shell.
+
+Shell architecture (W3):
   - No CrewAI agents; no LLM; no autonomous routing within a crew.
   - Entity/predicate are extracted from the state dict via simple keyword heuristics
-    or hardcoded fixtures for the scenario. W4 CrewAI replaces these heuristics with
-    real agents.
+    or hardcoded fixtures for the scenario.
   - canonical_keys.resolve_entity / resolve_predicate enforce AC-7.
 """
 from __future__ import annotations
@@ -59,7 +67,19 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-AGENT_ID_DEFAULT = "jordan-park-001"
+
+def _get_agent_id_default() -> str:
+    """Return the configured default agent_id from Settings (env: MEMPILL_AGENT_ID)."""
+    try:
+        from mempill_showcase.config.settings import get_settings
+        return get_settings().mempill_agent_id
+    except Exception:
+        return "jordan-park-001"
+
+
+# Module-level constant read once at import time; callers that need the live
+# value per-invocation should call _get_agent_id_default() directly.
+AGENT_ID_DEFAULT = _get_agent_id_default()
 
 import re as _re
 
@@ -211,6 +231,105 @@ def _build_pending_contested(
     }
 
 
+# ── LLM extractor (W10 — single structured call, ANTHROPIC_API_KEY required) ──
+
+_EXTRACTOR_SYSTEM = """You are a claim extraction engine for a bi-temporal memory system.
+
+Given a natural-language sentence, extract ONE atomic fact and return it as a JSON object.
+
+Known canonical entity keys:
+  alice-chen   → Alice Chen, alice
+  bob-liu      → Bob Liu, bob
+  acme-corp    → Acme Corp, Acme
+  jordan-park  → Jordan Park, jordan
+
+Known canonical predicate keys — choose the BEST match:
+  city                 → person's city/location (moved to, relocated, now lives in)
+  employer             → person's EMPLOYMENT: their employer company AND job title
+                         Use when the SUBJECT is a PERSON and the sentence describes
+                         that person's job, role, title, or place of work.
+                         (VP, CTO, CEO, Director, Partner, promoted to, now works at, hired as)
+                         value format: "Company / Job Title" e.g. "Acme Corp / CTO"
+  dietary_restriction  → dietary restriction (vegetarian, vegan, kosher, etc.)
+  travel_preference    → travel/flight preference (window seat, aisle, etc.)
+  preferred_hotel      → preferred hotel or hotel loyalty programme
+  ceo                  → ONLY when stating who is the CEO OF a company where the ENTITY is the company
+  cto                  → ONLY when stating who is the CTO OF a company where the ENTITY is the company
+
+DISAMBIGUATION RULE — person's title vs company's officer:
+  "Alice is now CTO of Acme"  → subject=ALICE, her JOB changed → entity=alice-chen, predicate=employer, value="Acme Corp / CTO"
+  "Acme's new CTO is Alice"   → subject=ACME, its officer changed → entity=acme-corp, predicate=cto, value="Alice Chen"
+  The key: if the sentence focuses on what the PERSON is doing, use alice-chen/employer.
+
+Rules:
+- Return ONLY a JSON object — no prose, no markdown, no extra text.
+- If you cannot confidently extract the entity or predicate, set them to null.
+- valid_from: ISO date in YYYY, YYYY-MM, or YYYY-MM-DD format. "now" or no explicit date → null.
+- value: a short descriptive string.
+
+JSON schema:
+{
+  "entity":     "<canonical entity key or null>",
+  "predicate":  "<canonical predicate key or null>",
+  "value":      "<claim value string>",
+  "valid_from": "<YYYY[-MM[-DD]] or null>"
+}"""
+
+
+class LLMExtractor:
+    """Single structured-output Anthropic call to extract claim fields from free text.
+
+    Extracts {entity, predicate, value, valid_from} from a natural-language sentence.
+    Uses ONE bounded API call with a structured JSON prompt — no tool-loop, no CrewAI.
+    The calling code (make_crew_a_node) writes to mempill via the Python remember_tool
+    using the extracted fields.
+
+    Falls back to returning all-None on any API or parse error.
+    """
+
+    def __init__(self, model_name: Optional[str] = None) -> None:
+        if model_name:
+            self._model = model_name
+        else:
+            try:
+                from mempill_showcase.config.settings import get_settings
+                self._model = get_settings().anthropic_model
+            except Exception:
+                import os
+                self._model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
+        log.info("LLMExtractor: initialised with model=%s", self._model)
+
+    def extract(self, sentence: str) -> dict:
+        """Extract claim fields from *sentence*.
+
+        Returns a dict with keys: entity, predicate, value, valid_from.
+        Any field may be None if the model cannot extract it with confidence.
+        """
+        import json as _json
+        try:
+            from langchain_anthropic import ChatAnthropic
+            from langchain_core.messages import HumanMessage, SystemMessage
+            llm = ChatAnthropic(model=self._model, temperature=0.0)
+            messages = [
+                SystemMessage(content=_EXTRACTOR_SYSTEM),
+                HumanMessage(content=f"Sentence: {sentence}"),
+            ]
+            response = llm.invoke(messages)
+            raw = response.content.strip()
+            # Strip markdown code fences if the model wraps in ```json ... ```
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+            parsed = _json.loads(raw)
+            log.debug("LLMExtractor: %r → %s", sentence[:80], parsed)
+            return parsed
+        except Exception as exc:
+            log.warning("LLMExtractor: extraction failed (%s) — returning null fields", exc)
+            return {"entity": None, "predicate": None, "value": None, "valid_from": None}
+
+
 # ── Crew A node factory ───────────────────────────────────────────────────────
 
 def make_crew_a_node(
@@ -218,30 +337,111 @@ def make_crew_a_node(
     date_parser: "DateParserTool",
     adapter,
     crew=None,
+    extractor: Optional["LLMExtractor"] = None,
 ):
     """Factory: returns the crew_a_node function bound to its tools.
 
-    If `crew` is a CrewAI Crew object, the node invokes crew.kickoff(inputs=...)
-    instead of the shell heuristics.  The deterministic shell path runs when
-    crew=None (no API key / CI mode).
+    Priority order:
+      1. LLM extraction path (extractor is not None, W10):
+         A single structured Anthropic call extracts {entity, predicate, value,
+         valid_from}; the Python remember_tool writes to mempill reliably.
+         This is the preferred free-form path when ANTHROPIC_API_KEY is present.
+      2. CrewAI live path (crew is not None, W4, kept for compatibility):
+         Delegates to crew.kickoff(); falls back to shell on error.
+      3. Shell path (crew=None, extractor=None):
+         Deterministic keyword heuristics — no API key, CI-safe (W3).
 
     The state contract and routing logic (pending_contested → hitl) are identical
-    in both paths — only the extraction/write mechanism differs.
+    in all paths — only the extraction mechanism differs.
     """
 
     def crew_a_node(state: ExecAssistantState) -> dict:
-        """Crew A node — intake: parse date → remember → detect Contested.
+        """Crew A node — intake: extract → remember → detect Contested.
 
-        Live path  (crew is not None): delegates to CrewAI crew.kickoff().
-        Shell path (crew is None):     deterministic heuristic extraction (W3).
+        LLM extraction path (extractor set): single structured LLM call (W10).
+        CrewAI live path    (crew set):      delegates to CrewAI kickoff (W4 legacy).
+        Shell path          (both None):     deterministic heuristic extraction (W3).
         """
         user_input = state.get("user_input", "")
         agent_id = state.get("agent_id", AGENT_ID_DEFAULT)
 
-        log.info("crew_a_node: processing input=%r (crew=%s)", user_input[:80], type(crew).__name__ if crew else "shell")
+        log.info(
+            "crew_a_node: input=%r (extractor=%s crew=%s)",
+            user_input[:80],
+            type(extractor).__name__ if extractor else "none",
+            type(crew).__name__ if crew else "none",
+        )
 
-        # ── CrewAI live path ──────────────────────────────────────────────────
-        if crew is not None:
+        # ── W10 LLM extraction path (single structured call — preferred) ─────
+        if extractor is not None:
+            extracted = extractor.extract(user_input)
+            llm_entity = extracted.get("entity")
+            llm_predicate = extracted.get("predicate")
+            llm_value = extracted.get("value")
+            llm_valid_from = extracted.get("valid_from")
+
+            if llm_entity and llm_predicate and llm_value:
+                # LLM extraction succeeded — write via remember_tool (reliable Python path)
+                log.info(
+                    "crew_a_node [llm-extract]: entity=%s predicate=%s value=%r valid_from=%s",
+                    llm_entity, llm_predicate, llm_value, llm_valid_from,
+                )
+                try:
+                    raw = remember_tool.invoke({
+                        "agent_id": agent_id,
+                        "subject": llm_entity,
+                        "predicate": llm_predicate,
+                        "value": llm_value,
+                        "valid_from": llm_valid_from,
+                        "confidence": 1.0,
+                        "provenance_channel": "UserAsserted",
+                    })
+                    write_json = json.loads(raw)
+                except Exception as exc:
+                    log.error("crew_a_node [llm-extract]: remember_tool failed: %s", exc)
+                    return {
+                        "error": str(exc),
+                        "route": "end",
+                        "output_text": f"crew_a [llm]: remember_tool error: {exc}",
+                    }
+                is_contested = write_json.get("is_contested", False)
+                log.info(
+                    "crew_a_node [llm-extract]: wrote %s/%s=%r disposition=%s is_contested=%s",
+                    llm_entity, llm_predicate, llm_value,
+                    write_json.get("disposition"), is_contested,
+                )
+                if is_contested:
+                    pending = _build_pending_contested(
+                        llm_entity, llm_predicate, write_json, adapter, agent_id
+                    )
+                    return {
+                        "write_result": raw,
+                        "pending_contested": pending,
+                        "route": "hitl",
+                        "output_text": (
+                            f"crew_a [llm]: Contested write for {llm_entity}/{llm_predicate}"
+                            " — escalating to HITL"
+                        ),
+                    }
+                return {
+                    "write_result": raw,
+                    "pending_contested": None,
+                    "route": "end",
+                    "output_text": (
+                        f"crew_a [llm]: wrote {llm_entity}/{llm_predicate}={llm_value!r} "
+                        f"(disposition={write_json.get('disposition')} valid_from={llm_valid_from})"
+                    ),
+                }
+            else:
+                # LLM could not extract — fall through to shell heuristics
+                log.warning(
+                    "crew_a_node: LLM extraction returned null fields (entity=%s predicate=%s value=%s)"
+                    " — falling back to shell",
+                    llm_entity, llm_predicate, llm_value,
+                )
+
+        # ── CrewAI live path (W4 — legacy, kept for compatibility) ────────────
+        elif crew is not None:
             try:
                 result = crew.kickoff(inputs={
                     "user_request": user_input,
@@ -271,6 +471,7 @@ def make_crew_a_node(
                 log.error("crew_a_node: CrewAI kickoff failed: %s — falling back to shell", exc)
                 # Fall through to shell path on error
 
+        # ── Shell path (W3 deterministic heuristics) ─────────────────────────
         # 1. Parse valid_from via DateParserTool.
         # Extract date hint first (DateParserTool expects a date string, not a sentence).
         valid_from: Optional[str] = None

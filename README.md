@@ -1,142 +1,117 @@
 # mempill-demo
 
-A runnable demonstration of mempill's temporal-validity memory engine and its MCP integration. Runs entirely offline — no LLM, no vector DB, no network. All intelligence is structural.
-
-**Honest status:** `mempill` is published on PyPI. The console + LangGraph demos run with just `pip install` — no Rust, no sibling repo required. The **MCP integration** additionally needs the sibling `../mempill/mempill-mcp/` (pure Python, not yet on PyPI), but that part is optional.
-
----
-
-## What it demonstrates
-
-**The temporal-validity problem:** AI agents read their own earlier outputs and re-ingest them as if they were fresh evidence. Without guardrails, agent memory becomes a self-reinforcing echo chamber where the agent's confidence in stale facts grows over time with no new information.
-
-**mempill's structural solution (3 acts):**
-
-1. **Temporal validity** — beliefs are bounded in time (`valid_time`). The engine tracks WHEN something was true, not just WHAT was true.
-2. **Contested conflict, not silent overwrite** — when two Functional claims overlap temporally (e.g., Alice then Bob as CEO), mempill flags them as Contested and requires explicit reconciliation. History is never silently overwritten.
-3. **Amplification firewall** — an agent can ingest the same recall-re-entry claim 808 times; the engine does not treat repetition as corroboration. The belief after 808 re-ingests is identical to after 1.
+A runnable demonstration of mempill's bi-temporal memory engine inside a multi-agent system.
+The primary deliverable is `mempill_showcase` — a production-style reference app showing
+LangGraph (CEO + HITL) → CrewAI crews → one shared mempill `MemoryPort`, with a naive
+last-write-wins adapter for contrast and a full compliance audit replay.
 
 ---
 
-## Repository layout
+## Quickstart — mempill_showcase
 
-```
-mempill-demo/             ← this repo
-  pyproject.toml
-  scripts/setup.sh
-  examples/temporal_validity.py   # 3-act demo
-  mcp/verify_stdio.py         # real MCP stdio client verification
-  mcp/claude_desktop_config.json.example
-  mcp/.mcp.json.example
-  README.md
-  .gitignore
-
-../mempill/               ← sibling repo (optional — only needed for the MCP demo)
-  mempill-mcp/            # FastMCP server (pure Python, not on PyPI)
-```
-
-The sibling repo is only needed for the MCP demo. The console + LangGraph demos run without it.
-
----
-
-## Prerequisites
-
-- **Python 3.12** (required — CrewAI/ChromaDB install cleanly on 3.12; 3.13+ is unsupported)
-- **uv** (Python package manager): https://docs.astral.sh/uv/
-- **Sibling repo `../mempill/`** checked out at `main` (provides the prerelease wheel)
-
-No Rust toolchain required for normal use. The mempill abi3 wheel is prebuilt. If the wheel is missing you can rebuild it: `cd ../mempill/mempill-python && ./.venv/bin/maturin build --release`.
-
----
-
-## Showcase (W4 multi-agent demo)
-
-The `src/mempill_showcase/` package contains a multi-agent CrewAI + LangGraph showcase. To run the showcase test suite (no API key required):
+**Python 3.12 required.** mempill is installed from a local prerelease wheel
+(not the PyPI version) until mempill 0.3.0 publishes. `scripts/setup.sh` handles this.
 
 ```bash
-.venv/bin/python -m pytest src/mempill_showcase/tests/ -v -m 'not live'
-```
-
-Expected: **95 passed** (W1–W4 tests), Python 3.12, zero vendored-dep patches.
-
-Runtime note: mempill is installed from the **local source-built wheel** (prerelease, has `valid_at` + granularity), not PyPI. This is required until mempill 0.3.0 is published. The `scripts/setup.sh` handles this automatically.
-
----
-
-## Setup
-
-```bash
+git clone <this-repo> mempill-demo
 cd mempill-demo
-bash scripts/setup.sh
+bash scripts/setup.sh        # creates .venv, installs prerelease mempill wheel + all extras
 ```
 
-The setup script:
-1. Installs Python 3.12 via uv (if not present)
-2. Creates a Python 3.12 `.venv` (replacing any older venv)
-3. Installs base runtime deps (anthropic, mcp, python-dotenv, rich)
-4. Installs showcase extras (LangGraph, CrewAI, pytest)
-5. Installs the demo package editable (`--no-deps`)
-6. Installs the LOCAL source-built mempill abi3 wheel (NOT PyPI) — ensures prerelease features
+Run the 8-beat executive-assistant scenario (no API key, deterministic):
 
-Verify after setup:
 ```bash
-.venv/bin/python -c "import mempill, crewai, langgraph, langchain_core; print('imports OK')"
+.venv/bin/mempill-showcase       # full scenario: ingestion, conflict, HITL, bi-temporal recall
+.venv/bin/mempill-showcase-compare  # mempill vs naive side-by-side (4 money-shot contrasts)
+.venv/bin/mempill-showcase-audit    # compliance audit: tx-time replay + full provenance ledger
 ```
 
-Verify with MCP (only if sibling repo was present during setup):
+Run the test suite (238 tests, no API key, no network):
+
 ```bash
-.venv/bin/python -c "import mempill, mempill_mcp, mcp; print('imports OK')"
+.venv/bin/python -m pytest src/mempill_showcase/tests/ -v -m "not live"
+# Expected: 238 passed
+```
+
+See [SHOWCASE.md](SHOWCASE.md) for the full architecture, 8-beat scenario walkthrough,
+design decisions, and bi-temporal query examples.
+
+---
+
+## Architecture (one line)
+
+LangGraph CEO supervisor + HITL interrupt → three CrewAI crews (Ingestion / Recall / Audit)
+→ one shared mempill `MemoryPort`; naive-vs-mempill adapter toggle via `NAIVE_MODE=true`.
+
+---
+
+## Console agent (mempill_demo)
+
+A simpler REPL demonstrating mempill's three core acts (temporal validity, contested conflict,
+amplification firewall) without LangGraph or CrewAI:
+
+```bash
+.venv/bin/python -m mempill_demo --scenario    # auto-play 3-act story then REPL
+.venv/bin/python -m mempill_demo --selftest    # deterministic assertion suite (13 checks)
+.venv/bin/mempill-console                      # interactive REPL
 ```
 
 ---
 
-## Run the demo
+## Environment variables
 
-```bash
-uv run python examples/temporal_validity.py
-```
+| Variable | Default | Effect |
+|---|---|---|
+| `NAIVE_MODE` | `false` | `true` → use NaiveAdapter (last-write-wins, no bi-temporal) |
+| `ANTHROPIC_API_KEY` | — | Required for live LLM supervisor; absent → MockSupervisor |
+| `ANTHROPIC_MODEL` | `claude-3-5-haiku-20241022` | Model for LLMSupervisor |
+| `LANGSMITH_API_KEY` | — | Enables LangSmith tracing; absent → no-op |
+| `LANGSMITH_TRACING` | — | `true` to force-enable tracing |
+| `LANGSMITH_PROJECT` | `mempill-showcase` | LangSmith project name |
 
-The demo runs all 3 acts and prints the actual engine output with inline narration explaining the temporal-validity behavior.
+Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY` for live runs.
+All settings are also exposed via `mempill_showcase.config.settings.Settings`
+(pydantic-settings, env-file aware) and wired into the observability layer.
 
 ---
 
-## MCP integration
+## Optional: MCP integration
 
-### Verify the MCP server (stdio client)
+The MCP demo requires the sibling repo `../mempill/mempill-mcp/` (pure Python, not on PyPI).
+`scripts/setup.sh` path-installs it when the sibling is present.
 
 ```bash
-uv run python mcp/verify_stdio.py
+.venv/bin/python mcp/verify_stdio.py   # MCP stdio client verification
 ```
 
-This launches `mempill-mcp` as a subprocess via stdio, performs the MCP handshake, lists all 4 tools, calls `ingest_claim` + `query_memory`, asserts the round-trip, and prints `[VERIFIED]`.
+See the MCP section in this file (below) for Claude Desktop / Claude Code setup.
 
-Exit code 0 = success. Use `--verify` flag for CI-friendly exit code mode.
+---
+
+## MCP integration (detail)
+
+### Verify the MCP server
+
+```bash
+.venv/bin/python mcp/verify_stdio.py
+```
+
+Launches `mempill-mcp` via stdio, handshakes, lists 4 tools, calls `ingest_claim` +
+`query_memory`, asserts the round-trip, prints `[VERIFIED]`. Exit code 0 = success.
 
 ### Connect to Claude Desktop
-
-The config uses the demo venv's Python directly (not `uv run`) because `mempill-mcp` is path-installed from the sibling repo and is not on PyPI.
 
 1. Copy `mcp/claude_desktop_config.json.example` to:
    - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
    - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 2. Replace `/ABSOLUTE/PATH/TO/mempill-demo` with the absolute path to this repo
-3. Fully quit and restart Claude Desktop (Cmd+Q on macOS, not just close window)
-4. Look for the mempill tools in the Claude Desktop tool picker
-
-Logs: `~/Library/Logs/Claude/mcp*.log` (macOS)
+3. Fully quit and restart Claude Desktop
 
 ### Connect to Claude Code
 
 1. Copy `mcp/.mcp.json.example` to `.mcp.json` at the repo root
-2. Replace `/ABSOLUTE/PATH/TO/mempill-demo` with the absolute path to this repo
-3. Set env vars in your shell:
-   ```bash
-   export MEMPILL_AGENT_ID="my-agent"
-   export MEMPILL_DB_PATH="/path/to/demo.db"  # optional; omit for in-memory
-   ```
-4. Launch Claude Code from this directory — it picks up `.mcp.json` automatically
-
-`.mcp.json` is in `.gitignore` (personal paths stay local). The `.example` file is tracked.
+2. Replace `/ABSOLUTE/PATH/TO/mempill-demo` with the absolute path
+3. Set env vars and launch Claude Code from this directory
 
 ### Available MCP tools
 
@@ -149,191 +124,30 @@ Logs: `~/Library/Logs/Claude/mcp*.log` (macOS)
 
 ---
 
-## Interactive Console Agent
-
-A mempill-aware REPL agent with a rich memory panel, persistent file-backed storage, and an optional LLM extraction layer.
-
-### Entry point
-
-```bash
-# 3-act auto-play scenario then REPL
-uv run python -m mempill_demo --scenario
-
-# Plain REPL (deterministic grammar)
-uv run python -m mempill_demo
-
-# Assertion suite for CI (no API key required)
-uv run python -m mempill_demo --selftest
-
-# LLM-backed natural language parsing (requires ANTHROPIC_API_KEY)
-# Copy .env.example to .env and set ANTHROPIC_API_KEY (or export it in your shell).
-# Optionally set MEMPILL_MODEL to override the default model.
-uv run python -m mempill_demo --llm
-
-# Delete the persistent DB and exit
-uv run python -m mempill_demo --reset
-```
-
-### Flags
-
-| Flag | Description |
-|------|-------------|
-| `--db PATH` | File-backed DB path (default: `.mempill/console.db`) |
-| `--agent AGENT_ID` | Agent ID string (default: `console-user`) |
-| `--llm` | Enable LLM extraction via Claude (requires `ANTHROPIC_API_KEY`) |
-| `--scenario` | Auto-play the 3-act story then hand off to REPL |
-| `--selftest` | Run deterministic assertion suite; exit 0 on pass |
-| `--reset` | Delete the DB file and exit |
-
-### Quickstart
+## Repository layout
 
 ```
-$ uv run python -m mempill_demo
-mempill Console Agent  [deterministic]
-Type /help for commands, /quit to exit.
-
-mempill> INGEST acme:ceo held_by "Alice" SINCE 2020-01-01
-Ingested: acme:ceo held_by = "Alice"
-  disposition: CommittedCheap
-  claim_ref:   c97b91b2...
-
-mempill> INGEST acme:ceo held_by "Bob" SINCE 2023-03-15
-Ingested: acme:ceo held_by = "Bob"
-  disposition: Contested
-  contested_with: ['c97b91b2...']
-  [!] Contested — use /reconcile to resolve.
-
-mempill> /reconcile acme:ceo held_by
-Reconcile acme:ceo held_by:
-  f27bbdbc...  → CommittedCheap
-
-mempill> RECALL acme:ceo held_by
-Memory: acme:ceo held_by = "Bob" (conf 0.90)
-  status: Resolved  ref: f27bbdbc...
+mempill-demo/
+  src/
+    mempill_showcase/    ← PRIMARY: multi-agent reference app (LangGraph + CrewAI + mempill)
+    mempill_demo/        ← simpler console REPL (3-act mempill demo)
+  tests/                 ← root-level tests for mempill_demo + edge cases
+  scripts/setup.sh       ← creates .venv, installs prerelease mempill wheel
+  examples/temporal_validity.py  ← standalone 3-act demo
+  mcp/                   ← MCP stdio client + config examples
+  SHOWCASE.md            ← full showcase architecture and walkthrough
+  pyproject.toml
 ```
-
-### --scenario output highlights
-
-The auto-play scenario demonstrates:
-- **CONTESTED** badge — two open-ended Functional claims overlap
-- **SUPERSEDED** in audit — Alice's claim bounded by reconcile
-- **FIREWALL HELD** — `RecallReEntry` × 5 does not alter the belief
-
-### --selftest CI usage
-
-```bash
-uv run python -m mempill_demo --selftest && echo "CI: selftest passed"
-```
-
-Exit 0 = all 13 assertions passed (T1–T7). No API key required.
-The selftest uses `open_in_memory()` — never touches the persistent DB.
-
-### Verbose logging
-
-Pass `--verbose` (or set `MEMPILL_VERBOSE=1`) to print engine call summaries to stderr. Pass `--verbose --verbose` (or `MEMPILL_VERBOSE=2`) to also print raw request/response payloads at DEBUG level. **Note:** verbose mode echoes stored claim content (truncated to 40 chars) to stderr — avoid using it in shared terminals where stored values may be sensitive.
-
-```bash
-# INFO — one line per engine call + result
-uv run python -m mempill_demo --verbose
-
-# DEBUG — full raw payloads
-MEMPILL_VERBOSE=2 uv run python -m mempill_demo
-```
-
-Sample INFO output (console agent, INGEST + RECALL):
-
-```
-INFO mempill.demo: → ingest_claim subject=acme:ceo predicate=held_by value='Alice' prov=ExternalUserAsserted
-INFO mempill.demo: ← disposition=CommittedCheap claim_ref=c97b91b2 contested_with=[]
-INFO mempill.demo: → query_memory subject=acme:ceo predicate=held_by
-INFO mempill.demo: ← status=Resolved primary='Alice' alternatives=[]
-```
-
-For the LangGraph agent, `--verbose` / `MEMPILL_VERBOSE=1` additionally enables LangChain call-level debug output (every LLM call with inputs and outputs) via `langchain.globals.set_debug(True)`. Default mode (no flag, no env var) is completely silent, preserving the existing behavior.
-
-### --llm setup
-
-Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY` (or export it in your shell). The app auto-loads `.env` on startup — no manual `source` needed. Deterministic mode (`--selftest`, plain REPL, `--scenario`) requires no key.
-
-Optionally set `MEMPILL_MODEL` to override the default model (e.g. `MEMPILL_MODEL=claude-haiku-4-5` for a cheaper run).
-
-### --llm no-key guard
-
-```bash
-# No key set and no .env:
-$ uv run python -m mempill_demo --llm
-ERROR: --llm requires ANTHROPIC_API_KEY to be set in the environment.
-# exits 1
-```
-
-### Grammar reference
-
-See `console/GRAMMAR.md` for the full command grammar with SDK mappings.
 
 ---
 
-## LangGraph conversational agent
+## Prerelease wheel note
 
-A natural-language CHAT agent that uses mempill as long-term memory. The LLM replies naturally each turn while reading and writing the mempill memory store — multi-turn history, contested-belief surfacing, structured-output extraction (no `json.loads`).
+mempill is installed from the **local source-built wheel** (prerelease, includes `valid_at` +
+granularity + oracle HITL features) — not the PyPI release. This is required until mempill
+0.3.0 is published. `scripts/setup.sh` installs it automatically from the sibling repo.
 
-### Setup (included by default)
-
-The LangGraph dependencies are installed by default during `bash scripts/setup.sh`. If you ran a lean setup with `SKIP_LANGGRAPH=true`, install them now:
-
+To rebuild the wheel manually:
 ```bash
-uv pip install -e ".[langgraph]"
+cd ../mempill/mempill-python && ./.venv/bin/maturin build --release
 ```
-
-Set your API key in `.env` or the environment (runtime-only; not needed during setup):
-
-```bash
-# .env
-ANTHROPIC_API_KEY=sk-ant-...
-# Optional — override the default model
-MEMPILL_MODEL=claude-sonnet-4-6
-```
-
-**Note:** `SKIP_LANGGRAPH` and `INSTALL_LANGGRAPH` are setup-time flags only — they do not belong in `.env` and have no effect at runtime. Only `ANTHROPIC_API_KEY` is needed at runtime.
-
-### Run the agent
-
-```bash
-uv run python -m mempill_langgraph
-```
-
-If `ANTHROPIC_API_KEY` is not set:
-
-```
-ERROR: ANTHROPIC_API_KEY not set. Add it to .env or export it.
-# exits 1
-```
-
-### What it demonstrates
-
-- **Read before speak** — `retrieve_memory` queries mempill before the LLM replies.
-- **Contested surfacing** — if the queried belief is Contested, both claims are formatted into the system prompt. The LLM is instructed never to pick one and to suggest `/reconcile`.
-- **Write after speak** — `write_memory` uses `llm.with_structured_output(ClaimExtractResult)` (Claude tool-use API) to extract factual claims from the AI reply and ingest them into mempill with `ModelDerived` provenance. Greetings and questions produce an empty claim list — never an error.
-- **Amplification firewall** — if the AI reply merely restates a value already in memory (recall re-entry), the node detects it and skips the ingest to prevent self-amplification.
-- **Multi-turn history** — LangGraph's `MemorySaver` checkpointer restores the full message history on every turn via `thread_id`.
-
-### Offline tests (no API key)
-
-```bash
-uv run pytest tests/test_langgraph_graph.py -q
-# 4 offline assertions + 1 skipped (live smoke)
-```
-
-The offline tests use `FakeMessagesListChatModel` and an injectable extractor callable to bypass tool-calling in the fake model.
-
-### Architecture
-
-Graph: `START → retrieve_memory → respond → write_memory → END` (unconditional edges). Nodes import the `MemoryStore` Protocol only — never `mempill` directly. Only `__main__.py` constructs `MempillMemoryStore` and imports `mempill`.
-
----
-
-## Architecture notes
-
-- The mempill engine is a structural, bi-temporal memory store — no LLM, no embeddings.
-- Temporal validity is enforced at the claim level via `valid_time` (valid-time dimension) and `as_of_tx_time` (transaction-time dimension).
-- `mempill-mcp` is a thin FastMCP wrapper — same engine, two interfaces (Python SDK and MCP).
-- The in-memory engine (no `MEMPILL_DB_PATH`) is ephemeral — all data is lost when the process exits.

@@ -66,7 +66,12 @@ def make_hitl_node(adapter: "MempillAdapter", recall_tool: "MempillRecallTool"):
     """
 
     def hitl_node(state: ExecAssistantState) -> dict:
-        agent_id = state.get("agent_id", "jordan-park-001")
+        try:
+            from mempill_showcase.config.settings import get_settings
+            _default_agent_id = get_settings().mempill_agent_id
+        except Exception:
+            _default_agent_id = "jordan-park-001"
+        agent_id = state.get("agent_id", _default_agent_id)
         contested = state.get("pending_contested") or {}
 
         subject    = contested.get("subject", "unknown")

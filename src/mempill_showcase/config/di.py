@@ -46,7 +46,7 @@ W9 additions:
 
 Environment variables (W6):
   ANTHROPIC_API_KEY  — required for LLMSupervisor; absent = MockSupervisor.
-  ANTHROPIC_MODEL    — Anthropic model for LLMSupervisor (default: claude-3-5-haiku-20241022).
+  ANTHROPIC_MODEL    — Anthropic model for LLMSupervisor (default: claude-haiku-4-5).
   LANGSMITH_API_KEY  — enables LangSmith tracing (optional; absent = no-op).
   LANGSMITH_TRACING  — set to "true" to force-enable tracing.
   LANGSMITH_PROJECT  — LangSmith project name (default: "mempill-showcase").
@@ -59,30 +59,58 @@ from typing import Optional, Union
 from mempill_showcase.adapters.memory.naive_adapter import NaiveAdapter
 
 
+def _adapter_from_settings(settings=None):
+    """Return a MempillAdapter configured from settings (db_path, oracle_backed).
+
+    Shared by build_app_from_settings and the CLI entry points.
+    """
+    if settings is None:
+        from mempill_showcase.config.settings import get_settings
+        settings = get_settings()
+    return build_mempill_adapter(
+        in_memory=True,
+        oracle_backed=True,
+        db_path=settings.mempill_db_path or None,
+    )
+
+
 class AdapterMode(str, Enum):
     MEMPILL = "mempill"
     NAIVE = "naive"
 
 
-def build_mempill_adapter(in_memory: bool = True, oracle_backed: bool = True):
+def build_mempill_adapter(
+    in_memory: bool = True,
+    oracle_backed: bool = True,
+    db_path: Optional[str] = None,
+):
     """Build a MempillAdapter wrapping a real mempill engine.
 
     Args:
-        in_memory:     True → ephemeral in-memory engine (for tests and demos).
-                       False → raises NotImplementedError (file-backed not wired).
+        in_memory:     True → ephemeral in-memory engine (tests and demos).
+                       Ignored when db_path is supplied.
         oracle_backed: True (default) → open_oracle_in_memory(HumanOracle()) so that
                        genuine conflicting Functional writes return QueuedForAdjudication
                        and queue for human adjudication via list_pending_adjudications /
                        submit_adjudication.
                        False → open_in_memory() (non-oracle, W1-W6 behaviour).
                        Genuine conflicts return Contested; oracle methods raise AttributeError.
+                       Always True when db_path is supplied (file-backed engines are oracle-backed).
+        db_path:       Optional filesystem path for a persistent SQLite-backed engine.
+                       When set, opens via mempill.open_oracle(path, HumanOracle()).
+                       Parent directories are created automatically.
+                       When None (default), honours the in_memory / oracle_backed flags.
     """
     import mempill
     from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
     from mempill_showcase.core.ports.oracle import HumanOracle
 
-    if not in_memory:
-        raise NotImplementedError("File-backed mempill engine not wired; use in_memory=True")
+    if db_path:
+        import pathlib
+        pathlib.Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        oracle = HumanOracle()
+        engine = mempill.open_oracle(str(db_path), oracle)
+        return MempillAdapter(engine)
 
     if oracle_backed:
         oracle = HumanOracle()
@@ -156,7 +184,7 @@ def build_langgraph(
         use_crewai:  False (default) → deterministic shell path (no API key, CI-safe).
                      True → CrewAI crews are injected into crew_a/b/c nodes.
                      The shell heuristics remain as a fallback if kickoff() fails.
-        llm:         LiteLLM model string (e.g. "anthropic/claude-3-5-sonnet-20241022")
+        llm:         LiteLLM model string (e.g. "anthropic/claude-haiku-4-5")
                      or a crewai.LLM instance.  Forwarded to build_crews().
                      Ignored when use_crewai=False.
     """
@@ -207,6 +235,10 @@ def build_app_from_settings(settings=None):
         from mempill_showcase.config.settings import get_settings
         settings = get_settings()
 
+    # Wire LangSmith tracing from settings (no-op without a key)
+    from mempill_showcase.observability import configure_tracing_from_settings
+    configure_tracing_from_settings(settings)
+
     if settings.naive_mode:
         # Naive mode: return the NaiveAdapter without a LangGraph app.
         # The NaiveAdapter is intentionally NOT a BiTemporalMemoryStore, so the
@@ -217,7 +249,7 @@ def build_app_from_settings(settings=None):
         adapter = build_naive_adapter()
         return None, adapter
     else:
-        adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
+        adapter = _adapter_from_settings(settings)
         return build_app(adapter=adapter)
 
 
@@ -243,8 +275,9 @@ def build_app(
         adapter:     Pre-built MempillAdapter to reuse (e.g. a pre-seeded adapter
                      from a test or CLI). When None, a fresh in-memory adapter
                      is created internally.
-        llm:         LiteLLM model string or crewai.LLM instance; forwarded to
-                     build_crews() when use_crewai=True. Ignored otherwise.
+        llm:         LiteLLM model string (e.g. "anthropic/claude-haiku-4-5") or
+                     crewai.LLM instance; forwarded to build_crews() when
+                     use_crewai=True. Ignored otherwise.
 
     Returns:
         (app, adapter) — compiled LangGraph app + the MempillAdapter instance.

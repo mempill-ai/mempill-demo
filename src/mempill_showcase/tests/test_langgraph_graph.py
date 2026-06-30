@@ -427,3 +427,111 @@ class TestComplianceRecall:
                     )
             except (json.JSONDecodeError, TypeError):
                 pass  # crew_c shape may vary; direct adapter query above is the primary assertion
+
+
+# ── Studio graph guard ────────────────────────────────────────────────────────
+
+class TestStudioGraph:
+    """Guard tests: studio_graph module exposes a compiled graph without MemorySaver."""
+
+    def test_studio_graph_imports(self) -> None:
+        """studio_graph.py is importable and exposes a module-level `graph`."""
+        from mempill_showcase.frameworks.langgraph.studio_graph import graph
+        assert graph is not None, "studio_graph.graph must be non-None"
+
+    def test_studio_graph_is_compiled_state_graph(self) -> None:
+        """studio_graph.graph is a CompiledStateGraph (not a plain StateGraph)."""
+        from langgraph.graph.state import CompiledStateGraph
+        from mempill_showcase.frameworks.langgraph.studio_graph import graph
+        assert isinstance(graph, CompiledStateGraph), (
+            f"studio_graph.graph must be a CompiledStateGraph, got {type(graph).__name__}"
+        )
+
+    def test_studio_graph_has_expected_nodes(self) -> None:
+        """studio_graph.graph has all 5 required nodes."""
+        from mempill_showcase.frameworks.langgraph.studio_graph import graph
+        node_names = set(graph.nodes.keys())
+        expected = {"supervisor", "crew_a", "crew_b", "crew_c", "hitl_node"}
+        missing = expected - node_names
+        assert not missing, (
+            f"studio_graph missing nodes: {missing}. Found: {node_names}"
+        )
+
+    def test_studio_graph_has_no_memory_saver(self) -> None:
+        """studio_graph.graph has no MemorySaver (Studio injects its own checkpointer)."""
+        from langgraph.checkpoint.memory import MemorySaver
+        from mempill_showcase.frameworks.langgraph.studio_graph import graph
+        checkpointer = getattr(graph, "checkpointer", None)
+        assert not isinstance(checkpointer, MemorySaver), (
+            "studio_graph.graph must NOT have a MemorySaver checkpointer — "
+            "LangGraph Studio rejects graphs with custom checkpointers. "
+            f"Got checkpointer={type(checkpointer).__name__!r}"
+        )
+
+    def test_studio_graph_adapter_seeded_with_day0_data(self) -> None:
+        """Importing studio_graph seeds the adapter: alice-chen/city belief exists.
+
+        The invariant is that the seed was loaded — city has a non-NoBelief status.
+        With a file-backed engine (MEMPILL_DB_PATH set), the city may be 'Austin TX'
+        (fresh store) or 'New York NY' (post-succession), and may be Contested if the
+        DB has accumulated duplicate writes from earlier pre-idempotency runs.
+        The key assertion: the belief is not NoBelief (seed data is present).
+        """
+        from mempill_showcase.frameworks.langgraph.studio_graph import studio_adapter
+        from mempill_showcase.scenarios.seed_data import AGENT_ID
+
+        belief = studio_adapter.recall(AGENT_ID, "alice-chen", "city")
+        assert belief is not None, "recall must return a belief (not None)"
+        assert belief.status != "NoBelief", (
+            f"Day-0 seed city should be present (not NoBelief), got status={belief.status!r}. "
+            f"Seed data was not loaded into the adapter."
+        )
+
+    def test_studio_graph_adapter_seeded_dietary(self) -> None:
+        """Seeded adapter also has alice-chen/dietary_restriction=vegetarian."""
+        from mempill_showcase.frameworks.langgraph.studio_graph import studio_adapter
+        from mempill_showcase.scenarios.seed_data import AGENT_ID
+
+        belief = studio_adapter.recall(AGENT_ID, "alice-chen", "dietary_restriction")
+        assert belief is not None
+        assert belief.value == "vegetarian", (
+            f"Expected 'vegetarian', got {belief.value!r}"
+        )
+
+    def test_studio_graph_agent_id_defaulting(self) -> None:
+        """supervisor_with_default injects agent_id='jordan-park-001' when state is empty."""
+        import uuid
+        from mempill_showcase.frameworks.langgraph.studio_graph import graph
+        from mempill_showcase.scenarios.seed_data import AGENT_ID
+
+        cfg = {"configurable": {"thread_id": str(uuid.uuid4())}}
+        # Invoke with user_input only — no agent_id — should not crash and should default
+        result = graph.invoke({"user_input": "intent:recall_history"}, cfg)
+        # agent_id should be set to default in the final state
+        assert result.get("agent_id") == AGENT_ID, (
+            f"agent_id should default to {AGENT_ID!r}, got {result.get('agent_id')!r}"
+        )
+
+    def test_studio_graph_classifier_selection_no_key(self, monkeypatch) -> None:
+        """With no ANTHROPIC_API_KEY in env, _build_studio_graph selects MockSupervisor."""
+        import os
+        from mempill_showcase.frameworks.langgraph.supervisor_node import MockSupervisor, LLMSupervisor
+        from mempill_showcase.frameworks.langgraph.studio_graph import _build_studio_graph
+
+        # Temporarily remove the key if present
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        _, _, classifier = _build_studio_graph()
+        assert isinstance(classifier, MockSupervisor), (
+            f"Without ANTHROPIC_API_KEY, classifier should be MockSupervisor, got {type(classifier).__name__}"
+        )
+
+    def test_studio_graph_classifier_selection_with_key(self, monkeypatch) -> None:
+        """With ANTHROPIC_API_KEY set (any non-empty value), _build_studio_graph selects LLMSupervisor."""
+        from mempill_showcase.frameworks.langgraph.supervisor_node import LLMSupervisor
+        from mempill_showcase.frameworks.langgraph.studio_graph import _build_studio_graph
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key-for-selection-test")
+        _, _, classifier = _build_studio_graph()
+        assert isinstance(classifier, LLMSupervisor), (
+            f"With ANTHROPIC_API_KEY set, classifier should be LLMSupervisor, got {type(classifier).__name__}"
+        )

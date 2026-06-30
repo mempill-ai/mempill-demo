@@ -135,18 +135,28 @@ def run_compliance_replay(adapter: Optional["MempillAdapter"] = None) -> Complia
         and the full audit ledger.
     """
     from mempill_showcase.scenarios.seed_data import AGENT_ID, load_seed_claims
-    from mempill_showcase.config.di import build_mempill_adapter
+    from mempill_showcase.config.di import build_mempill_adapter, _adapter_from_settings
     from mempill_showcase.core.domain.models import ClaimInput
+
+    # Resolve agent_id from Settings (env: MEMPILL_AGENT_ID)
+    try:
+        from mempill_showcase.config.settings import get_settings
+        _agent_id = get_settings().mempill_agent_id
+    except Exception:
+        _agent_id = AGENT_ID
 
     run_full_scenario = adapter is None
     compliance_tx_time: Optional[str] = None
 
     if run_full_scenario:
-        # Build a fresh oracle-backed adapter and run the scenario to build
-        # a realistic multi-beat belief state.
+        # Build a FRESH in-memory adapter for the compliance scenario.
+        # The file-backed engine (MEMPILL_DB_PATH) is intentionally NOT used here:
+        # the compliance scenario needs a clean slate to capture the tx-time axis
+        # (Austin→NYC succession) correctly. The file-backed engine is for the CLI
+        # and LangGraph Studio paths, not for in-process scenario testing.
         from mempill_showcase.scenarios.executive_assistant import run_scenario
         adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
-        trace = run_scenario(adapter)
+        trace = run_scenario(adapter, agent_id=_agent_id)
         # Use the scenario's captured pre-NYC tx timestamp as the compliance moment.
         compliance_tx_time = trace.tx_before_nyc_write
     else:
@@ -156,14 +166,14 @@ def run_compliance_replay(adapter: Optional["MempillAdapter"] = None) -> Complia
         # We look for the Austin city claim's tx time in the audit log.
         from mempill import ProvenanceLabel
 
-        # Seed data if not already present (idempotent — mempill handles duplicates)
-        austin_belief = adapter.recall(AGENT_ID, "alice-chen", "city")
+        # Seed data if not already present (idempotent — skips if already seeded)
+        austin_belief = adapter.recall(_agent_id, "alice-chen", "city")
         if austin_belief.status in ("NoBelief",):
-            load_seed_claims(adapter, AGENT_ID)
+            load_seed_claims(adapter, _agent_id)
 
         # Capture the Austin claim's tx time
-        all_audit = adapter.audit(AGENT_ID, limit=50)
-        austin_belief2 = adapter.recall(AGENT_ID, "alice-chen", "city")
+        all_audit = adapter.audit(_agent_id, limit=50)
+        austin_belief2 = adapter.recall(_agent_id, "alice-chen", "city")
         austin_ref = austin_belief2.claim_ref
 
         for e in all_audit:
@@ -184,12 +194,12 @@ def run_compliance_replay(adapter: Optional["MempillAdapter"] = None) -> Complia
         # AS OF the compliance moment (tx-time pinned)
         if compliance_tx_time:
             b_at = adapter.query_at(
-                AGENT_ID, "alice-chen", pred,
+                _agent_id, "alice-chen", pred,
                 as_of_tx_time=compliance_tx_time,
             )
         else:
             # Fallback if no tx time captured (should not happen in practice)
-            b_at = adapter.recall(AGENT_ID, "alice-chen", pred)
+            b_at = adapter.recall(_agent_id, "alice-chen", pred)
 
         beliefs_at_time.append(BeliefAtTime(
             predicate=pred,
@@ -203,7 +213,7 @@ def run_compliance_replay(adapter: Optional["MempillAdapter"] = None) -> Complia
         ))
 
         # CURRENT belief (for contrast)
-        b_now = adapter.recall(AGENT_ID, "alice-chen", pred)
+        b_now = adapter.recall(_agent_id, "alice-chen", pred)
         beliefs_now_list.append(BeliefAtTime(
             predicate=pred,
             value=b_now.value,
@@ -215,14 +225,14 @@ def run_compliance_replay(adapter: Optional["MempillAdapter"] = None) -> Complia
         ))
 
     # ── Audit ledger ──────────────────────────────────────────────────────────
-    raw_audit = adapter.audit(AGENT_ID, limit=100)
+    raw_audit = adapter.audit(_agent_id, limit=100)
     ledger = [
         AuditLedgerEntry(
             claim_ref=e.claim_ref,
             event_kind=e.event_kind,
             disposition=e.disposition,
             recorded_at=e.recorded_at,
-            rationale=_rationale_to_str(e.rationale),
+            rationale=e.rationale,  # already coerced to str by MempillAdapter.audit()
         )
         for e in raw_audit
     ]
@@ -400,22 +410,6 @@ def print_compliance_report(report: ComplianceReport) -> None:
     ))
 
 
-def _rationale_to_str(rationale) -> str:
-    """Normalise engine rationale to a plain string.
-
-    The mempill engine may return rationale as a dict (e.g. {'route': 'cheap_path'})
-    or as a plain string. This helper coerces both to str safely.
-    """
-    if rationale is None:
-        return ""
-    if isinstance(rationale, str):
-        return rationale
-    if isinstance(rationale, dict):
-        import json
-        return json.dumps(rationale)
-    return str(rationale)
-
-
 def _belief_note(predicate: str, status: str) -> str:
     """Generate a human-readable note for a belief's status in the compliance context."""
     if status == "NoBelief":
@@ -468,7 +462,15 @@ def _render_narrative(report: ComplianceReport) -> str:
 # ── CLI entry ─────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    """CLI entry point: python -m mempill_showcase.scenarios.compliance_replay"""
+    """CLI entry point: python -m mempill_showcase.scenarios.compliance_replay
+
+    On startup, loads ``.env`` from the working directory so that LANGSMITH_*
+    and ANTHROPIC_API_KEY values set there take effect (LangSmith tracing,
+    LLM supervisor selection). Safe no-op when ``.env`` is absent.
+    """
+    from mempill_showcase.config.bootstrap import bootstrap
+    bootstrap()
+
     report = run_compliance_replay()
     print_compliance_report(report)
 
