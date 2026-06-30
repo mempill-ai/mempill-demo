@@ -156,11 +156,22 @@ class MockSupervisor:
 
 _LLM_SYSTEM_PROMPT = """You are an intent classifier for an executive assistant system.
 Classify the user's message into exactly one of these intents:
-- UPDATE_CONTACT: user is reporting a new or updated fact about a contact (city, role, employer, etc.)
-- RESEARCH: user wants to look up or research external information
-- PREPARE_BRIEFING: user wants a briefing, summary, or draft for a meeting/email/event
-- RECALL_HISTORY: user is asking about a historical or past state ("what was X in Q1?", "as of January...")
-- COMPLIANCE_AUDIT: user wants an audit trail, compliance check, or belief-state history
+- UPDATE_CONTACT: user is reporting a NEW or UPDATED fact about a contact (city, role, employer, dietary restriction, travel preference, etc.). Key signal: the user is telling you something changed ("Alice moved to ...", "Bob is now ...", "Alice just told me she's ...").
+- RECALL_HISTORY: user is asking a QUESTION about a known attribute of a known contact — this is the DEFAULT for any attribute question. Use this for: "What is X's <attr>?", "Who is X's employer?", "Where does X live?", "What does X eat?", "What was X's <attr> in <year>?", "What was X doing in Q1?", point-in-time queries, or any question that can be answered from memory about a known entity. If the question is about an attribute of a known contact (Alice, Bob, Acme, Jordan), ALWAYS use RECALL_HISTORY — never RESEARCH.
+- RESEARCH: ONLY when the user explicitly asks to gather NEW EXTERNAL information about an entity — e.g. "Research <entity>", "Look up background on <entity>", "Find out about <company>", "What's in the news about <entity>", "I heard something about <entity> — can you look it up?". A plain attribute question ("What is Alice's dietary restriction?") is NEVER research — use RECALL_HISTORY instead.
+- PREPARE_BRIEFING: user wants a briefing, summary, or draft for a meeting/email/event (e.g. "Brief me on Alice", "Prepare a meeting summary", "Draft an email to Bob").
+- COMPLIANCE_AUDIT: user wants an audit trail, compliance check, or belief-state history (e.g. "Show me the audit ledger", "What did the system believe on date X?").
+
+CRITICAL DISAMBIGUATION — RECALL_HISTORY vs RESEARCH:
+  "What is Alice's dietary restriction?"  → RECALL_HISTORY  (attribute question about known contact)
+  "Who is Alice's employer?"              → RECALL_HISTORY  (attribute question about known contact)
+  "Where does Alice live?"                → RECALL_HISTORY  (attribute question about known contact)
+  "What was Alice's city in 2024?"        → RECALL_HISTORY  (historical attribute query)
+  "Research Acme Corp"                    → RESEARCH        (explicit external research request)
+  "Look up background on Bob"             → RESEARCH        (explicit external lookup request)
+  "Find out about Acme's new product"     → RESEARCH        (explicit find-out request)
+
+When in doubt between RECALL_HISTORY and RESEARCH, ALWAYS choose RECALL_HISTORY.
 
 Reply with ONLY the intent label (one of the five above), nothing else.
 """

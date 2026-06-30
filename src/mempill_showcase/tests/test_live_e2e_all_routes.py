@@ -326,15 +326,21 @@ class TestR6Research:
         log.info("R6 RAG result: %r", rag_result[:200] if isinstance(rag_result, str) else rag_result)
         assert rag_result, "R6: RAG must be populated after research"
 
-        # Check that at least one claim was written to mempill
+        # Check idempotency: crew_b must NOT produce a spurious HITL.
+        # With the seeded store, most derived claims already exist — 0 new claims is correct.
+        # What matters: no spurious interrupt AND RAG is populated.
+        assert "__interrupt__" not in result, (
+            "R6: crew_b research must NOT produce a spurious HITL. "
+            "The skip-if-exists guard must prevent re-asserting seeded facts."
+        )
         audit_after_raw = tools.audit_tool.invoke({"agent_id": "jordan-park-001", "limit": 200})
         audit_after = json.loads(audit_after_raw)
         count_after = audit_after.get("entry_count", 0)
-        log.info("R6 audit entries before=%d after=%d", count_before, count_after)
-        assert count_after > count_before, (
-            f"R6: crew_b must write ≥1 distilled claim to mempill "
-            f"(before={count_before}, after={count_after}). "
-            f"write_result={result.get('write_result')!r}"
+        log.info("R6 audit entries before=%d after=%d (0 new is OK when all facts already seeded)",
+                 count_before, count_after)
+        # count_after >= count_before: idempotency means no new writes if all derived facts exist
+        assert count_after >= count_before, (
+            f"R6: audit count must not decrease (before={count_before}, after={count_after})"
         )
 
 
@@ -657,8 +663,10 @@ class TestAllRoutesEndToEnd:
         assert results["R6"]["intent"] == "RESEARCH", \
             f"R6 FAIL: intent={results['R6']['intent']!r}"
         assert results["R6"]["rag_populated"], "R6 FAIL: RAG not populated"
-        assert results["R6"]["claim_written"], \
-            f"R6 FAIL: no distilled claim written to mempill " \
+        # With idempotency, 0 new claims is correct when all derived facts already exist.
+        # The key invariant: no spurious HITL and RAG was populated.
+        assert results["R6"]["audit_after"] >= results["R6"]["audit_before"], \
+            f"R6 FAIL: audit count must not decrease " \
             f"(before={results['R6']['audit_before']}, after={results['R6']['audit_after']})"
 
         # R7
@@ -702,3 +710,242 @@ class TestAllRoutesEndToEnd:
             f"R10 FAIL: intent={results['R10']['intent']!r}"
         assert results["R10"].get("entry_count", 0) > 0, \
             f"R10 FAIL: audit must have entries (got {results['R10'].get('entry_count', 0)})"
+
+
+# ── R11: Recall routing fix — attribute questions NEVER go to crew_b ──────────
+
+class TestR11RecallNotResearch:
+    """R11: LLMSupervisor routing fix — attribute questions must route to crew_c.
+
+    Verifies the fix for the observed Studio bug where 'What is Alice's dietary
+    restriction?' was misrouted to crew_b (RESEARCH) instead of crew_c
+    (RECALL_HISTORY), causing a spurious HITL from crew_b re-asserting
+    'Austin, TX' vs the seeded 'Austin TX'.
+
+    All attribute questions must route to RECALL_HISTORY (crew_c). Only explicit
+    external research requests must route to RESEARCH (crew_b).
+    """
+
+    def test_dietary_restriction_routes_recall_not_research(self):
+        """'What is Alice's dietary restriction?' → RECALL_HISTORY, returns vegetarian, NO interrupt."""
+        app, adapter, _ = _build_live_graph()
+        result, _ = _run(app, "What is Alice's dietary restriction?")
+
+        log.info(
+            "R11a result: intent=%s output_text=%r interrupted=%s",
+            result.get("intent"), result.get("output_text"), "__interrupt__" in result,
+        )
+
+        assert result.get("intent") in ("RECALL_HISTORY", "PREPARE_BRIEFING"), (
+            f"R11a FAIL: 'What is Alice's dietary restriction?' must route to RECALL_HISTORY "
+            f"(or PREPARE_BRIEFING), NOT RESEARCH. Got intent={result.get('intent')!r}. "
+            f"This is the exact failing case — LLMSupervisor still misroutes to crew_b."
+        )
+        assert "__interrupt__" not in result, (
+            "R11a FAIL: dietary restriction question must NOT produce a HITL interrupt. "
+            "If HITL fired, crew_b re-asserted an existing fact and created a spurious conflict."
+        )
+        # Verify the adapter holds the correct vegetarian belief
+        belief = adapter.recall("jordan-park-001", "alice-chen", "dietary_restriction")
+        assert belief.value == "vegetarian", (
+            f"R11a FAIL: dietary_restriction belief must be 'vegetarian', got {belief.value!r}"
+        )
+
+    def test_employer_question_routes_recall(self):
+        """'Who is Alice's employer?' → RECALL_HISTORY (not RESEARCH)."""
+        app, _, _ = _build_live_graph()
+        result, _ = _run(app, "Who is Alice's employer?")
+        log.info("R11b intent=%s output_text=%r", result.get("intent"), result.get("output_text"))
+        assert result.get("intent") in ("RECALL_HISTORY", "PREPARE_BRIEFING"), (
+            f"R11b FAIL: employer question must route to RECALL_HISTORY, got {result.get('intent')!r}"
+        )
+        assert "__interrupt__" not in result, "R11b FAIL: no spurious HITL expected"
+
+    def test_city_question_routes_recall(self):
+        """'Where does Alice live?' → RECALL_HISTORY (not RESEARCH)."""
+        app, _, _ = _build_live_graph()
+        result, _ = _run(app, "Where does Alice live?")
+        log.info("R11c intent=%s output_text=%r", result.get("intent"), result.get("output_text"))
+        assert result.get("intent") in ("RECALL_HISTORY", "PREPARE_BRIEFING"), (
+            f"R11c FAIL: city question must route to RECALL_HISTORY, got {result.get('intent')!r}"
+        )
+        assert "__interrupt__" not in result, "R11c FAIL: no spurious HITL expected"
+
+    def test_historical_city_question_routes_recall(self):
+        """'What was Alice's city in 2024?' → RECALL_HISTORY (not RESEARCH)."""
+        app, _, _ = _build_live_graph()
+        result, _ = _run(app, "What was Alice's city in 2024?")
+        log.info("R11d intent=%s output_text=%r", result.get("intent"), result.get("output_text"))
+        assert result.get("intent") in ("RECALL_HISTORY", "PREPARE_BRIEFING"), (
+            f"R11d FAIL: historical city question must route to RECALL_HISTORY, got {result.get('intent')!r}"
+        )
+
+    def test_research_acme_routes_research(self):
+        """'Research Acme Corp' → RESEARCH (crew_b) — must still work."""
+        app, _, tools = _build_live_graph()
+        result, _ = _run(app, "Research Acme Corp")
+        log.info("R11e intent=%s output_text=%r", result.get("intent"), result.get("output_text"))
+        assert result.get("intent") == "RESEARCH", (
+            f"R11e FAIL: 'Research Acme Corp' must still route to RESEARCH, got {result.get('intent')!r}"
+        )
+
+
+# ── R12: Research idempotency — crew_b must NOT re-assert seeded facts ────────
+
+class TestR12ResearchIdempotency:
+    """R12: crew_b research is idempotent — never re-asserts existing facts.
+
+    Verifies the fix for crew_b writing 'Austin, TX' (comma variant) when 'Austin TX'
+    was already seeded, creating a Contested belief and spurious HITL.
+
+    After the fix, crew_b's skip-if-exists logic must:
+      - NOT write any claim for (subject, predicate) pairs that already exist.
+      - NOT produce a HITL interrupt for re-derived existing facts.
+      - Only write genuinely new (subject, predicate) pairs.
+    """
+
+    def test_research_does_not_conflict_with_seeded_ceo(self):
+        """Research Acme Corp must NOT re-assert acme-corp/ceo=Diane Foster (already seeded).
+
+        Seeded: acme-corp/ceo=Diane Foster. crew_b's LLMResearcher will likely
+        derive the same claim. The skip-if-exists guard must prevent the re-write
+        and produce NO spurious Contested/HITL.
+        """
+        app, adapter, tools = _build_live_graph()
+
+        # Confirm seed: acme-corp/ceo is already present
+        ceo_before = adapter.recall("jordan-park-001", "acme-corp", "ceo")
+        log.info("R12a ceo_before: value=%r status=%r", ceo_before.value, ceo_before.status)
+        assert ceo_before.status not in ("NoBelief", None), (
+            "R12a setup: acme-corp/ceo must be seeded before research runs"
+        )
+
+        # Run research
+        result, _ = _run(app, "Research Acme Corp")
+        log.info("R12a result: intent=%s output_text=%r interrupted=%s",
+                 result.get("intent"), result.get("output_text"), "__interrupt__" in result)
+
+        assert result.get("intent") == "RESEARCH", (
+            f"R12a: must route to RESEARCH, got {result.get('intent')!r}"
+        )
+        assert "__interrupt__" not in result, (
+            "R12a FAIL: research must NOT produce a HITL interrupt for an existing seeded fact. "
+            "The skip-if-exists guard must have prevented re-asserting acme-corp/ceo."
+        )
+
+        # ceo belief must NOT have become Contested
+        ceo_after = adapter.recall("jordan-park-001", "acme-corp", "ceo")
+        log.info("R12a ceo_after: value=%r status=%r", ceo_after.value, ceo_after.status)
+        assert ceo_after.status != "Contested", (
+            f"R12a FAIL: acme-corp/ceo must NOT be Contested after research. "
+            f"crew_b re-asserted an existing fact. Got status={ceo_after.status!r} value={ceo_after.value!r}"
+        )
+        assert ceo_after.value == "Diane Foster", (
+            f"R12a FAIL: acme-corp/ceo value must still be 'Diane Foster', got {ceo_after.value!r}"
+        )
+
+    def test_research_writes_only_new_facts(self):
+        """crew_b may write NEW facts (no pre-existing belief) without HITL.
+
+        This test uses a fresh adapter with NO alice-chen/city seed to verify
+        that crew_b CAN still write genuinely new facts (the skip-if-exists
+        guard must not block new writes — only skip existing ones).
+        """
+        from mempill_showcase.config.settings import get_settings
+        from mempill_showcase.config.di import build_mempill_adapter, build_tools
+        from mempill_showcase.frameworks.langgraph.graph import build_graph
+        from mempill_showcase.frameworks.langgraph.supervisor_node import LLMSupervisor
+        from mempill_showcase.frameworks.langgraph.crew_nodes import LLMExtractor, LLMResearcher
+        from mempill_showcase.frameworks.langgraph.crew_nodes import (
+            make_crew_a_node, make_crew_b_node, make_crew_c_node,
+        )
+        from mempill_showcase.frameworks.langgraph.hitl_node import make_hitl_node
+        from mempill_showcase.frameworks.langgraph.state import ExecAssistantState
+        from mempill_showcase.frameworks.langgraph.graph import (
+            _supervisor_router, _crew_a_router, _crew_b_router,
+        )
+        from mempill_showcase.frameworks.langgraph.supervisor_node import make_supervisor_node
+        from mempill_showcase.scenarios.seed_data import AGENT_ID
+        from langgraph.graph import END, StateGraph
+        from langgraph.checkpoint.memory import MemorySaver
+        import uuid
+
+        settings = get_settings()
+        # Fresh adapter with NO seed data — all predicates are NoBelief
+        adapter_fresh = build_mempill_adapter(in_memory=True, oracle_backed=True)
+        tools_fresh = build_tools(adapter_fresh)
+
+        classifier = LLMSupervisor(model_name=settings.anthropic_model)
+        extractor = LLMExtractor(model_name=settings.anthropic_model)
+        researcher = LLMResearcher(model_name=settings.anthropic_model)
+
+        supervisor_fn = make_supervisor_node(classifier)
+
+        def supervisor_with_default(state: ExecAssistantState) -> dict:
+            if not state.get("agent_id"):
+                state = dict(state)
+                state["agent_id"] = AGENT_ID
+            updates = supervisor_fn(state)
+            if not updates.get("agent_id"):
+                updates = {**updates, "agent_id": state["agent_id"]}
+            return updates
+
+        crew_b_fn = make_crew_b_node(
+            remember_tool=tools_fresh.remember_tool,
+            rag_write_tool=tools_fresh.rag_write_tool,
+            adapter=adapter_fresh,
+            crew=None,
+            researcher=researcher,
+        )
+        crew_a_fn = make_crew_a_node(
+            remember_tool=tools_fresh.remember_tool,
+            date_parser=tools_fresh.date_parser,
+            adapter=adapter_fresh,
+            crew=None,
+            extractor=extractor,
+        )
+        crew_c_fn = make_crew_c_node(
+            recall_tool=tools_fresh.recall_tool,
+            audit_tool=tools_fresh.audit_tool,
+            crew=None,
+        )
+        hitl_fn = make_hitl_node(adapter=adapter_fresh, recall_tool=tools_fresh.recall_tool)
+
+        g = StateGraph(ExecAssistantState)
+        g.add_node("supervisor", supervisor_with_default)
+        g.add_node("crew_a", crew_a_fn)
+        g.add_node("crew_b", crew_b_fn)
+        g.add_node("crew_c", crew_c_fn)
+        g.add_node("hitl_node", hitl_fn)
+        g.set_entry_point("supervisor")
+        g.add_conditional_edges("supervisor", _supervisor_router,
+                                {"crew_a": "crew_a", "crew_b": "crew_b", "crew_c": "crew_c"})
+        g.add_conditional_edges("crew_a", _crew_a_router, {"hitl": "hitl_node", END: END})
+        g.add_conditional_edges("crew_b", _crew_b_router, {"hitl": "hitl_node", END: END})
+        g.add_edge("crew_c", END)
+        g.add_edge("hitl_node", END)
+        app_fresh = g.compile(checkpointer=MemorySaver())
+
+        audit_before = json.loads(tools_fresh.audit_tool.invoke({"agent_id": AGENT_ID, "limit": 200}))
+        count_before = audit_before.get("entry_count", 0)
+
+        cfg = {"configurable": {"thread_id": str(uuid.uuid4())}}
+        result = app_fresh.invoke({"user_input": "Research Acme Corp", "agent_id": AGENT_ID}, cfg)
+        log.info("R12b result: intent=%s output_text=%r interrupted=%s",
+                 result.get("intent"), result.get("output_text"), "__interrupt__" in result)
+
+        assert result.get("intent") == "RESEARCH", (
+            f"R12b: must route to RESEARCH, got {result.get('intent')!r}"
+        )
+        # With an empty store, crew_b is free to write new facts — no interrupt expected
+        assert "__interrupt__" not in result, (
+            "R12b FAIL: research on empty store must NOT produce HITL "
+            "(new facts should be written cleanly, not contested)."
+        )
+        audit_after = json.loads(tools_fresh.audit_tool.invoke({"agent_id": AGENT_ID, "limit": 200}))
+        count_after = audit_after.get("entry_count", 0)
+        log.info("R12b audit entries: before=%d after=%d", count_before, count_after)
+        assert count_after > count_before, (
+            f"R12b FAIL: crew_b must write at least 1 new claim to empty store "
+            f"(before={count_before}, after={count_after})"
+        )
