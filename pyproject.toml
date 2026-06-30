@@ -24,9 +24,19 @@ langgraph = [
     "langgraph-prebuilt>=1.1.0,<2",
     "langchain-core>=1.4.8,<2",
     "langchain-anthropic>=1.4.7,<2",
+    "langsmith>=0.1,<1",
 ]
 crewai = [
     "crewai>=1.0,<2",
+]
+# observability extra: LangSmith tracing (optional; tracing is no-op without LANGSMITH_API_KEY)
+observability = [
+    "langsmith>=0.1,<1",
+]
+# live extra: all dependencies for live LLM + LangSmith runs
+live = [
+    "langchain-anthropic>=1.4.7,<2",
+    "langsmith>=0.1,<1",
 ]
 
 [tool.hatch.build.targets.wheel]

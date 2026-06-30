@@ -27,6 +27,7 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
+from mempill_showcase.observability import emit_contested_span, traceable_mempill
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ class MempillRecallTool(BaseTool):
 
     adapter: MempillAdapter
 
+    @traceable_mempill(name="mempill.recall")
     def _run(
         self,
         agent_id: str,
@@ -126,6 +128,24 @@ class MempillRecallTool(BaseTool):
             "alternatives": alternatives,
         }
         log.debug("MempillRecallTool result: %s", result)
+
+        # ── LangSmith: emit dedicated mempill.contested span on contested recall ──
+        if belief.is_contested():
+            try:
+                alts = belief.alternatives or []
+                inc = alts[0].__dict__ if alts else {}
+                chal = alts[1].__dict__ if len(alts) > 1 else {}
+                emit_contested_span(
+                    subject=subject,
+                    predicate=predicate,
+                    incumbent={"value": inc.get("value"), "valid_from_display": inc.get("vt_start_display"), "claim_ref": inc.get("claim_ref")},
+                    challenger={"value": chal.get("value"), "valid_from_display": chal.get("vt_start_display"), "claim_ref": chal.get("claim_ref")},
+                    agent_id=agent_id,
+                    extra={"valid_at": valid_at, "as_of_tx_time": as_of_tx_time},
+                )
+            except Exception as _exc:
+                log.debug("MempillRecallTool: contested span error suppressed: %s", _exc)
+
         return json.dumps(result, default=str)
 
     async def _arun(self, *args: Any, **kwargs: Any) -> str:

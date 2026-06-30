@@ -46,6 +46,8 @@ from mempill_showcase.core.domain.canonical_keys import (
 )
 from mempill_showcase.core.domain.models import ClaimInput, WriteReceipt
 
+from mempill_showcase.observability import emit_contested_span, traceable_mempill
+
 log = logging.getLogger(__name__)
 
 
@@ -116,6 +118,7 @@ class MempillRememberTool(BaseTool):
 
     adapter: MempillAdapter
 
+    @traceable_mempill(name="mempill.remember")
     def _run(
         self,
         agent_id: str,
@@ -255,13 +258,33 @@ class MempillRememberTool(BaseTool):
         else:
             final_disposition = receipt.disposition
 
+        is_contested_final = final_disposition in ("Contested", "Conflict", "QueuedForAdjudication")
         result = {
             "claim_ref": receipt.claim_ref,
             "disposition": final_disposition,
             "contested_with": receipt.contested_with,
-            "is_contested": final_disposition in ("Contested", "Conflict", "QueuedForAdjudication"),
+            "is_contested": is_contested_final,
         }
         log.debug("MempillRememberTool result: %s", result)
+
+        # ── LangSmith: emit dedicated mempill.contested span ─────────────────
+        if is_contested_final:
+            try:
+                incumbent_belief = self.adapter.recall(agent_id, subject, predicate)
+                alts = incumbent_belief.alternatives or []
+                inc = alts[0].__dict__ if alts else {}
+                chal = alts[1].__dict__ if len(alts) > 1 else {}
+                emit_contested_span(
+                    subject=subject,
+                    predicate=predicate,
+                    incumbent={"value": inc.get("value"), "valid_from_display": inc.get("vt_start_display"), "claim_ref": inc.get("claim_ref")},
+                    challenger={"value": chal.get("value"), "valid_from_display": chal.get("vt_start_display"), "claim_ref": chal.get("claim_ref")},
+                    agent_id=agent_id,
+                    extra={"new_value": value, "contested_refs": receipt.contested_with},
+                )
+            except Exception as _exc:
+                log.debug("MempillRememberTool: contested span error suppressed: %s", _exc)
+
         return json.dumps(result)
 
     async def _arun(self, *args: Any, **kwargs: Any) -> str:
