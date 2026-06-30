@@ -20,6 +20,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.optional-dependencies]
+# langgraph: required by mempill_showcase (LangGraph CEO + HITL graph)
 langgraph = [
     "langgraph>=1.2.6,<2",
     "langgraph-prebuilt>=1.1.0,<2",
@@ -27,21 +28,31 @@ langgraph = [
     "langchain-anthropic>=1.4.7,<2",
     "langsmith>=0.1,<1",
 ]
+# crewai: required by mempill_showcase (CrewAI crews injected into graph nodes)
 crewai = [
     "crewai>=1.0,<2",
 ]
-# observability extra: LangSmith tracing (optional; tracing is no-op without LANGSMITH_API_KEY)
+# observability: LangSmith tracing (no-op without LANGSMITH_API_KEY; configured from Settings)
 observability = [
     "langsmith>=0.1,<1",
 ]
-# live extra: all dependencies for live LLM + LangSmith runs
+# live: all deps for live LLM + LangSmith runs (superset of observability)
 live = [
     "langchain-anthropic>=1.4.7,<2",
     "langsmith>=0.1,<1",
 ]
+# showcase: convenience bundle — installs everything needed for mempill_showcase
+showcase = [
+    "langgraph>=1.2.6,<2",
+    "langgraph-prebuilt>=1.1.0,<2",
+    "langchain-core>=1.4.8,<2",
+    "langchain-anthropic>=1.4.7,<2",
+    "langsmith>=0.1,<1",
+    "crewai>=1.0,<2",
+]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mempill_demo", "src/mempill_langgraph", "src/mempill_showcase"]
+packages = ["src/mempill_demo", "src/mempill_showcase"]
 
 [tool.hatch.build]
 sources = ["src"]

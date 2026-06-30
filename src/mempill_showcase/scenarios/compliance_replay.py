@@ -222,7 +222,7 @@ def run_compliance_replay(adapter: Optional["MempillAdapter"] = None) -> Complia
             event_kind=e.event_kind,
             disposition=e.disposition,
             recorded_at=e.recorded_at,
-            rationale=_rationale_to_str(e.rationale),
+            rationale=e.rationale,  # already coerced to str by MempillAdapter.audit()
         )
         for e in raw_audit
     ]
@@ -398,22 +398,6 @@ def print_compliance_report(report: ComplianceReport) -> None:
         border_style="green",
         title="[bold]Enterprise Hook: The Answer mempill Enables[/bold]",
     ))
-
-
-def _rationale_to_str(rationale) -> str:
-    """Normalise engine rationale to a plain string.
-
-    The mempill engine may return rationale as a dict (e.g. {'route': 'cheap_path'})
-    or as a plain string. This helper coerces both to str safely.
-    """
-    if rationale is None:
-        return ""
-    if isinstance(rationale, str):
-        return rationale
-    if isinstance(rationale, dict):
-        import json
-        return json.dumps(rationale)
-    return str(rationale)
 
 
 def _belief_note(predicate: str, status: str) -> str:

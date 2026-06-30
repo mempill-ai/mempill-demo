@@ -148,6 +148,25 @@ def _extract_belief_view(
     )
 
 
+# ── Rationale coercion ───────────────────────────────────────────────────────
+
+def _coerce_rationale(rationale) -> str:
+    """Normalise engine rationale to a plain string.
+
+    The mempill engine may return rationale as a dict (e.g. {'route': 'cheap_path'}),
+    a plain string, or None. This function coerces all forms to str consistently so
+    callers never need per-call fixups.
+    """
+    if rationale is None:
+        return ""
+    if isinstance(rationale, str):
+        return rationale
+    if isinstance(rationale, dict):
+        import json
+        return json.dumps(rationale)
+    return str(rationale)
+
+
 # ── Adapter ───────────────────────────────────────────────────────────────────
 
 class MempillAdapter:
@@ -380,7 +399,7 @@ class MempillAdapter:
                 event_kind=e.get("event_kind", "?"),
                 disposition=e.get("disposition", "?"),
                 recorded_at=str(e.get("recorded_at", "")),
-                rationale=e.get("rationale", ""),
+                rationale=_coerce_rationale(e.get("rationale")),
             )
             for e in resp.get("entries", [])
         ]

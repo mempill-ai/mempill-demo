@@ -207,6 +207,10 @@ def build_app_from_settings(settings=None):
         from mempill_showcase.config.settings import get_settings
         settings = get_settings()
 
+    # Wire LangSmith tracing from settings (no-op without a key)
+    from mempill_showcase.observability import configure_tracing_from_settings
+    configure_tracing_from_settings(settings)
+
     if settings.naive_mode:
         # Naive mode: return the NaiveAdapter without a LangGraph app.
         # The NaiveAdapter is intentionally NOT a BiTemporalMemoryStore, so the

@@ -43,6 +43,47 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 # ── LangSmith availability check ──────────────────────────────────────────────
 
+def configure_tracing_from_settings(settings=None) -> None:
+    """Configure LangSmith tracing from a Settings instance (or environment).
+
+    Call this once at app startup. When called, it syncs the relevant
+    LANGSMITH_* environment variables from Settings so that _langsmith_enabled()
+    and the langsmith library itself pick them up correctly.
+
+    This is a no-op when no API key is configured — tracing stays off.
+
+    Args:
+        settings: a Settings instance. When None, loads from environment via
+                  get_settings(). Safe to call multiple times (idempotent).
+    """
+    if settings is None:
+        try:
+            from mempill_showcase.config.settings import get_settings
+            settings = get_settings()
+        except Exception as exc:
+            log.debug("configure_tracing_from_settings: could not load settings (%s); skipping", exc)
+            return
+
+    if settings.langsmith_api_key:
+        os.environ.setdefault("LANGSMITH_API_KEY", settings.langsmith_api_key)
+
+    if settings.langsmith_tracing:
+        os.environ.setdefault("LANGSMITH_TRACING", settings.langsmith_tracing)
+
+    if settings.langsmith_project:
+        os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
+
+    if settings.langsmith_api_key or (settings.langsmith_tracing or "").lower() == "true":
+        log.debug(
+            "configure_tracing_from_settings: LangSmith configured "
+            "(project=%s, tracing=%s)",
+            settings.langsmith_project,
+            settings.langsmith_tracing,
+        )
+    else:
+        log.debug("configure_tracing_from_settings: no LangSmith key — tracing is a no-op")
+
+
 def _langsmith_enabled() -> bool:
     """Return True only when langsmith is installed AND tracing is configured.
 
