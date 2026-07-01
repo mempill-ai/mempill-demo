@@ -71,25 +71,36 @@ TOOL SELECTION GUIDE:
 3. For transaction-time queries ("what did the system know about Alice's employer last year?"):
    → call recall_as_of(agent_id, subject, predicate, as_of_tx_time="YYYY-MM-DDTHH:MM:SSZ")
 
-4. To record a new fact ("Alice is now CTO of Acme since June 2023"):
+4. To record a CORRECTION to an existing fact ("Alice is actually CTO, not VP Engineering, since the same date"):
    → FIRST call recall_subject to find the existing predicate for this type of fact.
    → Reuse the SAME predicate name and value FORMAT already stored. Do NOT split or rename.
-   → Example: if recall_subject shows predicate="employer", value="Acme Corp / VP Engineering"
-     and the user says "Alice is now CTO", write:
-       remember_fact(subject="alice-chen", predicate="employer", value="Acme Corp / CTO", ...)
-     NOT a new predicate "role" — keep it in the existing "employer" predicate, same format.
-   → if the result shows is_contested=true: call get_contested, then call request_adjudication
-   → NEVER use a contested fact without resolving it first
+   → For a correction (same start date, wrong value), ALWAYS set valid_from to EXACTLY the
+     incumbent's valid_from_display as shown in recall results.
+   → Example: recall shows predicate="employer", value="Acme Corp / VP Engineering",
+     valid_from_display="2023-06". User says "actually CTO since June 2023". Write:
+       remember_fact(subject="alice-chen", predicate="employer", value="Acme Corp / CTO",
+                     valid_from="2023-06")
+     NOT a different date — reuse "2023-06" exactly so the write overlaps and is Contested.
+   → This produces a same-period conflict which triggers is_contested=true.
 
-5. To inspect what values conflict for a contested fact:
+5. MANDATORY CONTESTED ESCALATION — NO EXCEPTIONS:
+   → When remember_fact returns is_contested=true, you MUST:
+     a. Call get_contested(agent_id, subject, predicate) to retrieve competing values.
+     b. Call request_adjudication(...) with the details from get_contested.
+     c. STOP — do NOT answer, do NOT resolve the conflict yourself, do NOT proceed until
+        the human verdict is returned via the graph resume.
+   → This is NOT optional. Any is_contested=true result MUST go through request_adjudication.
+   → Never report "already updated" or answer with the conflicted value before adjudication.
+
+6. To inspect what values conflict for a contested fact:
    → call get_contested(agent_id, subject, predicate)
 
-6. To request human adjudication of a contested write:
+7. To request human adjudication of a contested write:
    → call request_adjudication(agent_id, subject, predicate, reason,
        incumbent_value, challenger_value, claim_refs)
    → the graph will pause; wait for the human resume verdict; then report the winner
 
-7. For compliance/audit queries ("show me all write events"):
+8. For compliance/audit queries ("show me all write events"):
    → call audit_trail(agent_id, limit)
 
 RULES:
@@ -103,6 +114,8 @@ RULES:
 - Predicate names AND value formats are stored as you see them in recall results.
   ALWAYS reuse the same predicate and value format on writes — never split or rename.
   ("Alice is CTO of Acme" updates predicate="employer" with value="Acme Corp / CTO")
+- CRITICAL: if remember_fact returns is_contested=true, you MUST call request_adjudication.
+  Never skip this step. Never answer using an unresolved contested value.
 """
 
 # ── ShowcaseTools NamedTuple (kept for DI wiring compatibility) ───────────────

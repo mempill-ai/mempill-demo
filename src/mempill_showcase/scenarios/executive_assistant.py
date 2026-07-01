@@ -270,13 +270,26 @@ def run_scenario(
     ))
 
     # ── B-04: Contested update → HITL interrupt → Affirm ─────────────────────
-    # "since June 2023" → valid_from=2023-06, same as VP Engineering → Contested
-    cfg_b04 = {"configurable": {"thread_id": f"scenario-b04-{id(adapter)}"}}
-    result_b04 = app.invoke(
+    # B-04 always uses a FRESH in-memory oracle-backed adapter so there is always
+    # a clean VP Engineering incumbent regardless of what the persistent DB contains.
+    # This guarantees the same-period CTO write is always a genuine contest.
+    from mempill_showcase.config.di import build_mempill_adapter as _build_mempill_adapter
+    from mempill_showcase.scenarios.seed_data import load_seed_claims as _load_seed
+    hitl_adapter = _build_mempill_adapter(in_memory=True, oracle_backed=True)
+    _load_seed(hitl_adapter, agent_id)
+    hitl_checkpointer = MemorySaver()
+    hitl_app = build_graph_from_adapter(
+        hitl_adapter, checkpointer=hitl_checkpointer, model_name=model_name
+    )
+
+    cfg_b04 = {"configurable": {"thread_id": f"scenario-b04-{id(hitl_adapter)}"}}
+    result_b04 = hitl_app.invoke(
         {"messages": [HumanMessage(
             content=(
-                f"Alice has actually been CTO of Acme since June 2023, not VP Engineering. "
-                f"Please update her employer record. (agent_id: {agent_id})"
+                f"Alice has actually been CTO of Acme since June 2023, not VP Engineering — "
+                f"June 2023 is the same start date she had as VP Engineering, so this is a "
+                f"correction, not a new period. Please update her employer record. "
+                f"(agent_id: {agent_id})"
             )
         )]},
         config=cfg_b04,
@@ -285,48 +298,78 @@ def run_scenario(
     answer_b04_pre = _last_ai_text(result_b04)
     log.info("B-04 pre-HITL interrupted=%s answer=%r", interrupted, answer_b04_pre)
 
-    # Resume with Affirm verdict
-    hitl_verdict = "Affirm"
-    result_b04_resume = app.invoke(
-        Command(resume=hitl_verdict),
-        config=cfg_b04,
-    )
-    answer_b04_post = _last_ai_text(result_b04_resume)
-    log.info("B-04 post-HITL answer: %r", answer_b04_post)
+    if interrupted:
+        # HITL truly fired — resume with Affirm and report honest resolution
+        hitl_verdict = "Affirm"
+        result_b04_resume = hitl_app.invoke(
+            Command(resume=hitl_verdict),
+            config=cfg_b04,
+        )
+        answer_b04_post = _last_ai_text(result_b04_resume)
+        log.info("B-04 post-HITL answer: %r", answer_b04_post)
 
-    # Capture the resolved belief via direct adapter
-    employer_after_hitl = adapter.recall(agent_id, "alice-chen", "employer")
-    trace.subjects_written.add("alice-chen")
+        employer_after_hitl = hitl_adapter.recall(agent_id, "alice-chen", "employer")
+        trace.subjects_written.add("alice-chen")
 
-    trace.beats.append(BeatResult(
-        beat_id="B-04",
-        description="Contested: Alice CTO since June 2023 → HITL interrupt → Affirm → CTO wins",
-        mempill_op="contested+hitl",
-        value=employer_after_hitl.value or answer_b04_post,
-        status=employer_after_hitl.status,
-        disposition=None,
-        is_contested=True,
-        graph_state={
-            "interrupted": interrupted,
-            "hitl_verdict": hitl_verdict,
-            "agent_answer_post_hitl": answer_b04_post,
-        },
-        extra={
-            "interrupted_correctly": interrupted,
-            "post_hitl_answer": answer_b04_post,
-            "direct_recall_employer": employer_after_hitl.value,
-            "direct_recall_status": employer_after_hitl.status,
-        },
-    ))
-    log.info(
-        "B-04: employer=%r status=%s interrupted=%s",
-        employer_after_hitl.value, employer_after_hitl.status, interrupted,
-    )
+        trace.beats.append(BeatResult(
+            beat_id="B-04",
+            description="Contested: Alice CTO since June 2023 → HITL interrupt → Affirm → CTO wins",
+            mempill_op="contested+hitl",
+            value=employer_after_hitl.value or answer_b04_post,
+            status=employer_after_hitl.status,
+            disposition=None,
+            is_contested=True,
+            graph_state={
+                "interrupted": True,
+                "hitl_verdict": hitl_verdict,
+                "agent_answer_post_hitl": answer_b04_post,
+            },
+            extra={
+                "hitl_triggered": True,
+                "post_hitl_answer": answer_b04_post,
+                "direct_recall_employer": employer_after_hitl.value,
+                "direct_recall_status": employer_after_hitl.status,
+            },
+        ))
+        log.info(
+            "B-04: HITL triggered correctly. employer=%r status=%s",
+            employer_after_hitl.value, employer_after_hitl.status,
+        )
+    else:
+        # HITL did NOT fire — report this honestly; do not fake a verdict
+        log.warning("B-04: HITL did NOT trigger. Agent answered without interrupting.")
+        employer_current = hitl_adapter.recall(agent_id, "alice-chen", "employer")
+        trace.subjects_written.add("alice-chen")
+
+        trace.beats.append(BeatResult(
+            beat_id="B-04",
+            description="Contested: Alice CTO since June 2023 → HITL DID NOT TRIGGER (beat failed)",
+            mempill_op="contested+hitl",
+            value=employer_current.value or answer_b04_pre,
+            status="HITL_NOT_TRIGGERED",
+            disposition=None,
+            is_contested=False,
+            graph_state={
+                "interrupted": False,
+                "hitl_verdict": None,
+                "agent_answer_pre_hitl": answer_b04_pre,
+            },
+            extra={
+                "hitl_triggered": False,
+                "agent_answer": answer_b04_pre,
+                "direct_recall_employer": employer_current.value,
+                "direct_recall_status": employer_current.status,
+            },
+        ))
+        log.warning(
+            "B-04: NO HITL. employer=%r status=%s agent_answer=%r",
+            employer_current.value, employer_current.status, answer_b04_pre,
+        )
 
     # ── B-05: Confirm CTO resolution ─────────────────────────────────────────
-    # Follow-up recall: "what role does Alice hold?" → should mention CTO
-    cfg_b05 = {"configurable": {"thread_id": f"scenario-b05-{id(adapter)}"}}
-    result_b05 = app.invoke(
+    # Follow-up recall from the hitl_adapter so it reflects the adjudication result.
+    cfg_b05 = {"configurable": {"thread_id": f"scenario-b05-{id(hitl_adapter)}"}}
+    result_b05 = hitl_app.invoke(
         {"messages": [HumanMessage(
             content=f"What role does Alice Chen currently hold at Acme? (agent_id: {agent_id})"
         )]},
@@ -449,15 +492,23 @@ def main() -> None:
     console.print(f"\n[dim]tx_before_nyc_write: {trace.tx_before_nyc_write}[/dim]")
     console.print(f"[dim]audit_entries: {len(trace.audit_entries)}[/dim]")
 
-    # Key narrative output for verification
+    # Key narrative output for verification — only report HITL resolution if it truly happened
     b04 = trace.beat("B-04")
     if b04:
         console.print()
-        console.print("[bold cyan]HITL resolution:[/bold cyan]")
-        console.print(f"  interrupted_correctly: [bold]{b04.extra.get('interrupted_correctly')}[/bold]")
-        console.print(f"  hitl_verdict: [bold green]{b04.graph_state.get('hitl_verdict')}[/bold green]")
-        console.print(f"  employer after Affirm: [bold green]{b04.extra.get('direct_recall_employer')}[/bold green]")
-        console.print(f"  employer status: [bold]{b04.extra.get('direct_recall_status')}[/bold]")
+        hitl_triggered = b04.extra.get("hitl_triggered", False)
+        if hitl_triggered:
+            console.print("[bold cyan]HITL resolution (real interrupt occurred):[/bold cyan]")
+            console.print(f"  hitl_triggered: [bold green]True[/bold green]")
+            console.print(f"  hitl_verdict: [bold green]{b04.graph_state.get('hitl_verdict')}[/bold green]")
+            console.print(f"  employer after Affirm: [bold green]{b04.extra.get('direct_recall_employer')}[/bold green]")
+            console.print(f"  employer status: [bold green]{b04.extra.get('direct_recall_status')}[/bold green]")
+        else:
+            console.print("[bold red]HITL NOT TRIGGERED (B-04 beat failed):[/bold red]")
+            console.print("  [red]The agent did not call request_adjudication — no interrupt occurred.[/red]")
+            console.print(f"  hitl_triggered: [bold red]False[/bold red]")
+            console.print(f"  employer (unresolved): [yellow]{b04.extra.get('direct_recall_employer')}[/yellow]")
+            console.print(f"  employer status: [yellow]{b04.extra.get('direct_recall_status')}[/yellow]")
 
     b05 = trace.beat("B-05")
     if b05:
