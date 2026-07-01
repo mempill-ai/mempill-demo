@@ -421,24 +421,39 @@ class TestAuditTool:
 
 # ── T5: Soft normalisation (replaces canonical key enforcement) ───────────────
 
-class TestCanonicalKeyEnforcement:
+class TestRememberFactSoftNormalisation:
     """T5 — MempillRememberTool uses soft normalisation (Wave B: no closed vocabulary).
 
     The canonical_keys guard was removed in Wave B. The tool now accepts any
     subject/predicate and soft-normalises (lowercase + separator).
     """
 
-    def test_free_form_subject_normalised(self, remember_tool):
-        """Free-form subject 'Alice Chen' is normalised to 'alice-chen' and stored."""
+    def test_free_form_subject_normalised(self, remember_tool, adapter):
+        """Free-form subject 'Alice Chen' is normalised to 'alice-chen' and stored.
+
+        After the write, directly querying the adapter for the normalised key
+        'alice-chen' must return the stored value — proving the fact was written
+        under the soft-normalised key, not the original mixed-case input.
+        """
         raw = remember_tool.invoke({
             "agent_id": AGENT_ID,
-            "subject": "Alice Chen",  # free-form — no longer raises
+            "subject": "Alice Chen",  # free-form — soft-normalised to 'alice-chen'
             "predicate": "city",
             "value": "Austin TX",
+            "valid_from": "2024",  # supply valid_from so recall returns Resolved
         })
         result = json.loads(raw)
         assert result["disposition"] in ("CommittedCheap", "Contested", "QueuedForAdjudication"), (
             f"Free-form subject should write without error, got {result['disposition']!r}"
+        )
+
+        # Verify the value was stored under the normalised key 'alice-chen', not 'Alice Chen'
+        belief = adapter.recall(AGENT_ID, "alice-chen", "city")
+        assert belief.status in ("Resolved", "Contested"), (
+            f"Expected recall for normalised key 'alice-chen' to find a belief, got status={belief.status!r}"
+        )
+        assert belief.value == "Austin TX", (
+            f"Expected value 'Austin TX' stored under 'alice-chen', got {belief.value!r}"
         )
 
     def test_free_form_predicate_accepted(self, remember_tool):

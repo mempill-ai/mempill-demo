@@ -34,7 +34,6 @@ import os
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
 

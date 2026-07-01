@@ -5,18 +5,28 @@ mempill_showcase.tools — LangChain BaseTool wrappers over the W1 memory core.
   RecallSubjectTool         — return ALL stored facts for a subject (cornerstone tool)
   RecallAtTool              — point-in-time valid-time recall
   RecallAsOfTool            — transaction-time as-of recall
-  RememberFactTool          — write a free-form fact with succession encapsulation
+  RememberFactTool          — free-form write tool: the agent's primary write path;
+                              accepts any subject/predicate and uses succession
+                              encapsulation (recall-then-close pattern)
   GetContestedTool          — surface competing beliefs for a contested predicate
   RequestAdjudicationTool   — HITL: interrupt the graph, get human verdict, resolve
   AuditTrailTool            — chronological audit ledger
 
 Legacy tools (kept for existing tests and adapter layer — not in the agent's tool list):
-  MempillRememberTool — write with canonical-key guard (old graph path)
+  MempillRememberTool — write path with soft normalisation (lowercase + separator);
+                        the closed-vocabulary canonical-key guard was removed in Wave B;
+                        subject/predicate are now accepted open-world and normalised only
   MempillRecallTool   — current-belief recall + bi-temporal query_at
   MempillAuditTool    — audit ledger (old graph path)
   DateParserTool      — deterministic natural-date → ISO string (no LLM)
   RAGWriteTool        — write bulk research text to in-memory RAG store
   RAGReadTool         — read/search bulk research text from in-memory RAG store
+
+Picking the right write tool:
+  Use RememberFactTool (remember_fact) for the active ReAct agent — it handles
+  succession encapsulation and is registered in the agent's tool list.
+  MempillRememberTool is kept for legacy tests; it also soft-normalises but is
+  NOT wired into the live agent graph.
 """
 from mempill_showcase.tools.recall_subject_tool import RecallSubjectTool
 from mempill_showcase.tools.recall_at_tool import RecallAtTool

@@ -44,6 +44,11 @@ from typing import Optional, Union
 
 from mempill_showcase.adapters.memory.naive_adapter import NaiveAdapter
 
+# Sentinel used as the default for checkpointer parameters so that an explicit
+# None can be distinguished from "caller did not pass anything" (which should
+# default to MemorySaver).  Mirrors the same sentinel in frameworks/langgraph/graph.py.
+_SENTINEL = object()
+
 
 def _adapter_from_settings(settings=None):
     """Return a MempillAdapter configured from settings (db_path, oracle_backed)."""
@@ -160,15 +165,23 @@ def build_tools(adapter):
     return build_agent_tools(adapter)
 
 
-def build_graph_from_adapter(adapter, checkpointer=None, model_name=None):
+def build_graph_from_adapter(adapter, checkpointer=_SENTINEL, model_name=None):
     """Build + compile the ReAct ExecAssistant agent from an adapter.
 
     Returns the compiled app.
+
+    Checkpointer semantics (consistent with build_graph):
+      checkpointer omitted (default) → MemorySaver() is used automatically.
+      checkpointer=None              → compile without a checkpointer (Studio path).
+      checkpointer=<instance>        → use the supplied checkpointer as-is.
     """
-    from mempill_showcase.frameworks.langgraph.graph import build_graph, _SENTINEL
+    from mempill_showcase.frameworks.langgraph.graph import build_graph
+    from mempill_showcase.frameworks.langgraph.graph import _SENTINEL as _GRAPH_SENTINEL
 
     tools = build_agent_tools(adapter)
-    cp = checkpointer if checkpointer is not None else _SENTINEL
+    # Translate the local sentinel to graph.py's sentinel so build_graph's
+    # `if checkpointer is _SENTINEL` guard triggers correctly.
+    cp = _GRAPH_SENTINEL if checkpointer is _SENTINEL else checkpointer
     return build_graph(adapter=adapter, tools=tools, checkpointer=cp, model_name=model_name)
 
 
