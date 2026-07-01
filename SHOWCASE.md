@@ -4,7 +4,7 @@
 
 - **Python 3.12** (required — the prerelease mempill wheel is an abi3 build targeting 3.12+)
 - The `.venv` virtualenv at the repo root (set up by `uv` from `pyproject.toml`)
-- **No API key needed** for all scenario and test commands below
+- **ANTHROPIC_API_KEY** required for the ReAct agent (scenario + Studio) — place in `.env`
 
 ### Prerelease wheel note
 
@@ -15,6 +15,81 @@ which lacks `query_at` / `as_of_tx_time` / `valid_from_display` support.
 
 If you ever need to rebuild the venv from scratch, follow the project `README.md`
 setup instructions (which path-install the prerelease wheel first).
+
+---
+
+## Architecture Overview
+
+### Single free-form ReAct agent
+
+The showcase uses a single `create_react_agent` (LangGraph) with 7 memory tools
+and a mempill bi-temporal memory backend. There is no multi-agent topology —
+one ReAct agent handles all question types directly via tool selection.
+
+```
+User question (free-form natural language)
+       │
+       ▼
+ ┌─────────────────────────────────────────────────┐
+ │  ReAct Agent  (claude-haiku-4-5)                │
+ │                                                 │
+ │  Tools:                                         │
+ │    recall_subject   — ask about an entity       │
+ │    recall_at        — point-in-time query       │
+ │    recall_as_of     — tx-time query             │
+ │    remember_fact    — write a new fact          │
+ │    get_contested    — inspect conflicting facts │
+ │    request_adjudication — HITL interrupt gate   │
+ │    audit_trail      — compliance audit log      │
+ └─────────────┬───────────────────────────────────┘
+               │  tool calls
+               ▼
+ ┌─────────────────────────────────────────────────┐
+ │  mempill bi-temporal memory engine              │
+ │                                                 │
+ │  Stores every fact with:                        │
+ │    valid_time  — when it was true in the world  │
+ │    tx_time     — when it was recorded           │
+ │    provenance  — who asserted it                │
+ │    disposition — CommittedCheap / Contested /   │
+ │                  QueuedForAdjudication          │
+ └─────────────────────────────────────────────────┘
+```
+
+### HITL (Human-In-The-Loop)
+
+When the agent writes a fact that conflicts with an existing belief on the same
+valid-time window (`remember_fact` → `Contested` / `QueuedForAdjudication`), it
+calls `request_adjudication`. That tool calls `LangGraph interrupt(payload)` —
+the graph **pauses**. The human sends `Command(resume=verdict)` with one of:
+
+- `Affirm` — challenger is correct; incumbent is superseded.
+- `Deny` — incumbent survives; challenger is rejected.
+- `Abstain` — defer; both remain Contested.
+- Pasted candidate value (e.g. `Acme Corp / CTO`) → maps to Affirm or Deny automatically.
+
+The oracle queue in mempill receives the verdict via `submit_adjudication()` and
+resolves the conflict. Post-resolution recall returns `Resolved` status.
+
+### Naive-vs-mempill contrast
+
+The `NaiveAdapter` demonstrates what a simpler non-temporal store cannot do:
+- No `query_at` (no bi-temporal) — asking about past state is impossible.
+- No Contested detection — conflicting facts silently overwrite each other.
+- No provenance — who said it and when is not recorded.
+- No audit trail — compliance replay is structurally impossible.
+
+`build_app_from_settings(Settings(naive_mode=True))` returns `(None, NaiveAdapter)` —
+the LangGraph toolchain literally cannot be built without the bi-temporal API.
+
+### mempill value demonstration
+
+| Question | Without mempill | With mempill |
+|---|---|---|
+| "What was Alice's city in March 2024?" | Overwrites — no history | `recall_at(valid_at=2024-03)` → Austin TX |
+| "Did we believe VP Eng before the CTO update?" | No tx-time axis | `recall_as_of(as_of_tx_time=<before>)` → VP Engineering |
+| "Two sources conflict on Alice's title" | Silent overwrite | `Contested` → HITL → human resolves |
+| "Show the provenance chain for compliance" | Impossible | `audit_trail` → full ledger |
 
 ---
 
@@ -40,18 +115,28 @@ All commands below assume the venv is active OR you prefix with `.venv/bin/`.
 
 ## Commands
 
-### Run the 8-beat scenario
+### Run the 6-beat ReAct agent scenario
 
 ```bash
-# As a module (always works):
+# As a module:
 .venv/bin/python -m mempill_showcase.scenarios.executive_assistant
 
 # As a console script (after editable install):
 .venv/bin/mempill-showcase
 ```
 
-Runs all 8 scenario beats (T-01..T-08) deterministically. No LLM calls,
-no API key. Prints a Rich beat summary table.
+Runs all 6 scenario beats (B-01..B-06) via the free-form ReAct agent:
+
+| Beat | Description |
+|---|---|
+| B-01 | Ask-anything: Alice's dietary restriction (recall_subject) |
+| B-02 | Point-in-time: Alice's city in March 2024 (recall_at → Austin TX) |
+| B-03 | New fact write: alice-chen/travel_preference (remember_fact, CommittedCheap) |
+| B-04 | Contested: "Alice is CTO since June 2023" → HITL interrupt → Affirm → CTO wins |
+| B-05 | Confirm resolution: recall Alice's employer → CTO (Resolved) |
+| B-06 | Compliance audit: audit_trail → full write event history |
+
+**Requires `ANTHROPIC_API_KEY` in `.env` at the repo root.**
 
 ---
 
@@ -65,7 +150,7 @@ no API key. Prints a Rich beat summary table.
 ```
 
 Side-by-side comparison of NaiveAdapter vs MempillAdapter across the 4
-"money-shot" contrast moments from SCENARIO.md §4.
+"money-shot" contrast moments from the scenario.
 
 ---
 
@@ -93,31 +178,22 @@ without faking past dates.
 
 ---
 
-### Try it in Studio — interactive demo recipe
+### Try it in Studio — interactive ReAct agent demo
 
-LangGraph Studio lets you visualize and interactively run the supervisor→crews→hitl
-graph with a UI.
+LangGraph Studio lets you visualize and interactively run the free-form ReAct
+agent with a UI.
 
 **Default model:** `claude-haiku-4-5` (overridable via `ANTHROPIC_MODEL` in `.env`).
 
 **Setup:**
 
-1. Add your Anthropic API key to `.env` at the repo root to enable the full LLM
-   routing + extraction path (required for free-form input to work correctly):
+1. Add your Anthropic API key to `.env` at the repo root (required for the ReAct LLM):
 
    ```dotenv
    ANTHROPIC_API_KEY=sk-ant-...
    # Optional — override the default model:
    # ANTHROPIC_MODEL=claude-haiku-4-5
    ```
-
-   With `ANTHROPIC_API_KEY` set, the graph uses:
-   - `LLMSupervisor` (claude-haiku-4-5) for intent classification, and
-   - `LLMExtractor` (single structured call) to parse entity/predicate/value/valid_from
-     from free-form sentences before writing to mempill.
-
-   Without the key, `MockSupervisor` (deterministic keyword routing) + shell heuristics
-   are used — the demo still works for standard inputs but may misroute unusual phrasing.
 
 2. Start Studio:
 
@@ -132,72 +208,44 @@ graph with a UI.
 
 **What happens at startup:**
 
-The graph module seeds 7 Day-0 facts for agent `jordan-park-001` automatically
-(Alice Chen: Austin TX, Acme Corp / VP Engineering, vegetarian; Bob Liu: Meridian
-Ventures / Partner, travel prefs; Acme Corp CEO Diane Foster; Jordan Park hotel).
+The graph module seeds 7 Day-0 facts for agent `jordan-park-001` automatically.
 The in-memory store persists across turns within a single `langgraph dev` session.
 
 **How to use the Input form:**
 
-Fill in **only the `User Input` field** — leave all other fields blank.
-`agent_id` defaults to `jordan-park-001` automatically.
+Fill in only the **messages** field as a natural-language question. The agent
+normalises entity names (e.g. "Alice Chen" → "alice-chen") and selects tools
+automatically.
 
-**Verified demo sequence (with ANTHROPIC_API_KEY):**
-
-| Turn | User Input | Expected behaviour |
-|------|-----------|-------------------|
-| 1 | `What's Alice Chen's current city?` | crew_c RECALL_HISTORY → `Austin TX` (seeded Day-0) |
-| 2 | `Alice moved to New York in February 2025` | LLMSupervisor → UPDATE_CONTACT → crew_a: LLMExtractor extracts `alice-chen/city=New York valid_from=2025-02` → mempill writes CommittedCheap succession; current belief becomes `New York` |
-| 3 | `What's Alice Chen's city now?` | crew_c → `New York` (succession committed in turn 2) |
-| 4 | `What was Alice's city in Q1 2024?` | crew_c RECALL_HISTORY → bi-temporal query at 2024-06-01 → `Austin TX` (before the move) |
-| 5 | `Alice is now CTO of Acme` | LLMExtractor maps to `alice-chen/employer=Acme Corp / CTO` (no date → overlaps open-ended VP Engineering belief) → **Contested** → graph routes to `hitl_node` |
-
-**LLM extraction details:**
-
-`LLMExtractor` makes one structured Anthropic API call per UPDATE_CONTACT turn to
-extract `{entity, predicate, value, valid_from}` from free-form text. The Python
-`mempill_remember` tool then writes to mempill (reliable — no agent tool-loops).
-
-Examples verified with `claude-haiku-4-5`:
-- `"Alice moved to New York in February 2025"` → `alice-chen / city = "New York" @ 2025-02` → CommittedCheap (clean succession over Austin TX 2023-06..2025-02)
-- `"Alice is now CTO of Acme"` → `alice-chen / employer = "Acme Corp / CTO" @ null` → Contested vs VP Engineering (no date → overlapping) → HITL
-- Bi-temporal: `query_at(alice-chen, city, valid_at=2024-06-01)` → `"Austin TX"` ✓
-
-**Handling Contested writes (HITL interrupt):**
-
-When turn 5 triggers a conflict, Studio shows an **Interrupts** panel on the right.
-The interrupt payload describes the incumbent belief vs. the challenger claim.
-To resume:
-
-1. Open the **Interrupts** panel.
-2. Enter a verdict in the resume field: `Affirm` (accept the new claim), `Deny`
-   (keep the incumbent), or `Abstain` (leave it Contested).
-3. Click **Submit**. The graph resumes at `hitl_node`, resolves the belief, and
-   sets `hitl_verdict` in the final state.
-
-**Notes:**
-
-- Writes within a session accumulate — turn 2's NYC write is visible in turn 3.
-- The store resets when you restart `langgraph dev` (in-memory only).
-- Stop Studio with `Ctrl-C`.
-
-The `langgraph.json` manifest at the repo root points Studio to:
-```
-src/mempill_showcase/frameworks/langgraph/studio_graph.py:graph
-```
+See `STUDIO_DEMO.md` for the full turn-by-turn script with exact inputs.
 
 ---
 
 ### Run the deterministic test suite
 
 ```bash
-.venv/bin/python -m pytest src/mempill_showcase/tests/ -v -m "not live"
+.venv/bin/python -m pytest -m "not live" -q
 ```
 
-Runs all non-live tests (no API key required). Expected result: **255 passed**.
+Runs all non-live tests (no API key required). Expected result: **279 passed**.
 
-Tests are located in `src/mempill_showcase/tests/`. The `-m "not live"` flag
-excludes tests that require `ANTHROPIC_API_KEY`.
+```bash
+.venv/bin/python -m pytest -m live -q
+```
+
+Runs live semantic E2E tests (requires `ANTHROPIC_API_KEY`). Expected: **12 passed**.
+
+Live tests covered:
+
+| Test | What it asserts |
+|---|---|
+| LIVE-A | Dietary query → "vegetarian", no spurious interrupt |
+| LIVE-B | Role query (no alias map) → employer fact answered linguistically |
+| LIVE-C | Novel attribute write + read-back (bob-liu/preferred_airline) |
+| LIVE-D | Contested → HITL interrupt → Affirm → recall returns CTO |
+| LIVE-E | Step-aside (Acme CEO query) → Diane Foster |
+| LIVE-F | Point-in-time valid_at (city early 2024 → Austin TX) |
+| LIVE-G | Audit trail returns event descriptions |
 
 ---
 
@@ -205,39 +253,22 @@ excludes tests that require `ANTHROPIC_API_KEY`.
 
 The CLI entry points (`mempill-showcase`, `mempill-showcase-compare`,
 `mempill-showcase-audit`) automatically load a `.env` file from the current
-working directory at startup. This means you can place your LangSmith and
-Anthropic credentials in a `.env` file at the repo root and they will be
-picked up without any shell export.
+working directory at startup.
 
 **Supported `.env` keys:**
 
 ```dotenv
+# Anthropic (required for the ReAct agent LLM)
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Optional: override the default model
+ANTHROPIC_MODEL=claude-haiku-4-5
+
 # LangSmith observability (all optional — tracing is a no-op without a key)
 LANGSMITH_API_KEY=ls__...        # your LangSmith API key
 LANGSMITH_TRACING=true           # set to true to enable trace export
 LANGSMITH_PROJECT=mempill-demo   # project name in LangSmith UI (default: mempill-showcase)
-
-# Anthropic (required only for the live LLM supervisor — MockSupervisor is used otherwise)
-ANTHROPIC_API_KEY=sk-ant-...
 ```
-
-When `LANGSMITH_API_KEY` and `LANGSMITH_TRACING=true` are present, running any
-CLI scenario will produce LangSmith traces in the named project. Each scenario
-run generates:
-
-- A top-level LangGraph run with all graph nodes as child spans.
-- `mempill.remember`, `mempill.recall`, `mempill.audit` tool spans (tagged
-  with `run_type="tool"`).
-- `mempill.contested` spans whenever a Functional write triggers a conflict
-  (shows the incumbent vs. challenger values in the LangSmith UI).
-
-The `.env` load is handled by `mempill_showcase.config.bootstrap.bootstrap()`,
-which is called only inside CLI `main()` functions — never at module import
-time. Test code that imports scenario or tool modules will never accidentally
-pick up a developer's local `.env`.
-
-**Shell env vars take precedence over `.env`:** if `LANGSMITH_API_KEY` is
-already set in your shell, the `.env` value is ignored (dotenv `override=False`).
 
 ---
 
@@ -249,17 +280,10 @@ Flip the whole showcase to the NaiveAdapter to watch it misbehave:
 NAIVE_MODE=true .venv/bin/python -m mempill_showcase.scenarios.compare
 ```
 
-Or set it in a `.env` file at the repo root:
-
-```
-NAIVE_MODE=true
-```
-
 With `NAIVE_MODE=true`:
-- `build_app_from_settings()` returns `(None, NaiveAdapter)` instead of
-  `(app, MempillAdapter)`
+- `build_app_from_settings()` returns `(None, NaiveAdapter)` instead of `(app, MempillAdapter)`
 - The NaiveAdapter has no `query_at` (no bi-temporal), no Contested detection,
-  no provenance — all 4 contrasts demonstrate failure
+  no provenance — all 4 contrasts demonstrate failure.
 
 ```python
 from mempill_showcase.config.di import build_app_from_settings
@@ -280,9 +304,9 @@ assert not hasattr(adapter, "query_at")
 
 | Script | Module | Purpose |
 |---|---|---|
-| `mempill-showcase` | `mempill_showcase.scenarios.executive_assistant:main` | 8-beat scenario |
+| `mempill-showcase` | `mempill_showcase.scenarios.executive_assistant:main` | 6-beat ReAct scenario |
 | `mempill-showcase-compare` | `mempill_showcase.scenarios.compare:main` | 4 naive-vs-mempill contrasts |
-| `mempill-showcase-audit` | `mempill_showcase.scenarios.compliance_replay:main` | T-08 compliance replay |
+| `mempill-showcase-audit` | `mempill_showcase.scenarios.compliance_replay:main` | Compliance replay |
 | `mempill-console` | `mempill_demo.__main__:main` | Legacy console demo |
 
 Scripts are registered in `pyproject.toml [project.scripts]` and installed by:

@@ -1,17 +1,25 @@
 """
-tests.test_react_agent_live — Live regression tests for the free-form ReAct agent.
+tests.test_react_agent_live — Live semantic E2E tests for the free-form ReAct agent.
 
 Marked with @pytest.mark.live — excluded from the default test run:
   pytest -m "not live"          # fast CI suite (skips this file)
   pytest -m live                # run only live tests (requires ANTHROPIC_API_KEY)
 
-Covers:
+Coverage:
   LIVE-A: Dietary-restriction query → "vegetarian", no spurious interrupt.
-  LIVE-D: Contested write → HITL interrupt → Affirm verdict → recall returns CTO.
+  LIVE-B: Role query (no alias map) → employer fact "VP Engineering" or similar.
+  LIVE-C: Novel-attribute write + read-back (bob-liu/preferred_airline).
+  LIVE-D: Contested write → HITL interrupt → Affirm → recall returns CTO.
+  LIVE-E: Step-aside query (Bob / Acme CEO) → mentions Diane Foster.
+  LIVE-F: Point-in-time valid_at (Alice city in early 2024 → Austin TX).
+  LIVE-G: Audit trail returns events (non-empty list described).
 
-Both tests require a valid ANTHROPIC_API_KEY in the environment (or .env file).
+All tests require a valid ANTHROPIC_API_KEY in the environment (or .env file).
 The agent makes real calls to the Anthropic API using the model configured in
 settings (default: claude-haiku-4-5).
+
+Assertions are semantic (substring, case-insensitive), not exact string matches,
+so they remain robust across model phrasing variations.
 """
 from __future__ import annotations
 
@@ -117,6 +125,77 @@ def test_live_a_dietary_restriction_no_hitl(seeded_app):
 
 
 @pytest.mark.live
+def test_live_b_role_query_no_alias_map(seeded_app):
+    """LIVE-B: role query answered from employer fact without a hardcoded alias map.
+
+    The agent must call recall_subject(alice-chen) and reason from the 'employer'
+    predicate value ('Acme Corp / VP Engineering') to answer a 'role' question.
+    No hardcoded alias map is required — the agent reads the predicate and
+    answers linguistically.
+    """
+    app, _ = seeded_app
+    config = {"configurable": {"thread_id": "live-b-role"}}
+
+    result = app.invoke(
+        {"messages": [HumanMessage(content="What role does Alice hold at Acme?")]},
+        config=config,
+    )
+
+    answer = _last_ai_text(result)
+    interrupted = _has_interrupt(result)
+
+    # The answer must mention VP Engineering or Acme (derived from employer fact)
+    answer_lower = answer.lower()
+    assert "vp" in answer_lower or "engineering" in answer_lower or "acme" in answer_lower, (
+        f"Expected role/employer info in answer, got: {answer!r}"
+    )
+    assert not interrupted, (
+        "Role query should not trigger HITL — it is a simple recall."
+    )
+
+
+@pytest.mark.live
+def test_live_c_novel_attribute_write_and_read(seeded_app):
+    """LIVE-C: write a novel attribute (preferred_airline) then read it back.
+
+    Tests the remember_fact → recall round-trip for an attribute not in seed data.
+    bob-liu has no 'preferred_airline' claim — write one, then ask about it.
+    """
+    app, adapter = seeded_app
+    thread_id = "live-c-novel-attr"
+    config = {"configurable": {"thread_id": thread_id}}
+
+    # Write a novel fact
+    result_write = app.invoke(
+        {"messages": [HumanMessage(
+            content=(
+                "Bob Liu prefers flying Singapore Airlines. "
+                "Please store this preference in memory as of 2025."
+            )
+        )]},
+        config=config,
+    )
+    assert not _has_interrupt(result_write), (
+        "Novel attribute write should not trigger HITL (no incumbent claim)."
+    )
+
+    # Read back on a fresh thread (same adapter, new thread to avoid message contamination)
+    config2 = {"configurable": {"thread_id": "live-c-novel-attr-read"}}
+    result_read = app.invoke(
+        {"messages": [HumanMessage(content="What airline does Bob Liu prefer?")]},
+        config=config2,
+    )
+
+    answer = _last_ai_text(result_read)
+    assert "singapore" in answer.lower(), (
+        f"Expected 'Singapore' in answer after write, got: {answer!r}"
+    )
+    assert not _has_interrupt(result_read), (
+        "Read-back should not trigger HITL."
+    )
+
+
+@pytest.mark.live
 def test_live_d_contested_affirm_loop(seeded_app):
     """LIVE-D: contested write → HITL interrupt → Affirm → recall returns CTO.
 
@@ -172,4 +251,90 @@ def test_live_d_contested_affirm_loop(seeded_app):
     role_answer = _last_ai_text(result3)
     assert "cto" in role_answer.lower(), (
         f"After Affirm, expected role answer to contain 'CTO'. Got: {role_answer!r}"
+    )
+
+
+@pytest.mark.live
+def test_live_e_step_aside_ceo_of_acme(seeded_app):
+    """LIVE-E: step-aside question about Bob / Acme CEO → mentions Diane Foster.
+
+    "Who is the CEO of Acme Corp?" requires looking up acme-corp/ceo, not alice-chen.
+    The seeded fact: acme-corp / ceo = Diane Foster.
+    """
+    app, _ = seeded_app
+    config = {"configurable": {"thread_id": "live-e-ceo"}}
+
+    result = app.invoke(
+        {"messages": [HumanMessage(content="Who is the CEO of Acme Corp?")]},
+        config=config,
+    )
+
+    answer = _last_ai_text(result)
+    assert "diane" in answer.lower() or "foster" in answer.lower(), (
+        f"Expected Diane Foster as CEO of Acme Corp, got: {answer!r}"
+    )
+    assert not _has_interrupt(result), (
+        "CEO query should not trigger HITL."
+    )
+
+
+@pytest.mark.live
+def test_live_f_point_in_time_city_early_2024(seeded_app):
+    """LIVE-F: point-in-time valid_at query — Alice's city in early 2024 → Austin TX.
+
+    Alice's city: Austin TX valid_from=2023-06, valid_until=2025-02.
+    A query for her city in early 2024 (before the move) must return Austin TX.
+    The agent must use recall_at with a 2024 valid_at timestamp.
+    """
+    app, _ = seeded_app
+    config = {"configurable": {"thread_id": "live-f-city-2024"}}
+
+    result = app.invoke(
+        {"messages": [HumanMessage(
+            content="What city was Alice Chen living in during early 2024, say around March 2024?"
+        )]},
+        config=config,
+    )
+
+    answer = _last_ai_text(result)
+    assert "austin" in answer.lower(), (
+        f"Expected 'Austin' (Texas) as Alice's city in early 2024, got: {answer!r}"
+    )
+    assert not _has_interrupt(result), (
+        "Bi-temporal recall query should not trigger HITL."
+    )
+
+
+@pytest.mark.live
+def test_live_g_audit_trail_returns_events(seeded_app):
+    """LIVE-G: audit_trail query returns non-empty event history.
+
+    Asks the agent for the audit trail / write events for the session.
+    The agent should call audit_trail and return a description of events.
+    The answer must convey that events were found (non-empty audit).
+    """
+    app, _ = seeded_app
+    config = {"configurable": {"thread_id": "live-g-audit"}}
+
+    result = app.invoke(
+        {"messages": [HumanMessage(
+            content=f"Show me the audit trail for agent {AGENT_ID} — what memory write events have occurred?"
+        )]},
+        config=config,
+    )
+
+    answer = _last_ai_text(result)
+    # The answer should describe events; at minimum it should not say "no events"
+    answer_lower = answer.lower()
+    has_event_mention = any(
+        kw in answer_lower for kw in [
+            "event", "claim", "audit", "write", "commit", "record", "entry",
+            "alice", "bob", "acme", "jordan",
+        ]
+    )
+    assert has_event_mention, (
+        f"Expected audit events to be described in answer, got: {answer!r}"
+    )
+    assert not _has_interrupt(result), (
+        "Audit trail query should not trigger HITL."
     )

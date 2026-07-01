@@ -116,7 +116,10 @@ class ComplianceReport:
 
 # ── Core runner ───────────────────────────────────────────────────────────────
 
-def run_compliance_replay(adapter: Optional["MempillAdapter"] = None) -> ComplianceReport:
+def run_compliance_replay(
+    adapter: Optional["MempillAdapter"] = None,
+    compliance_tx_time_override: Optional[str] = None,
+) -> ComplianceReport:
     """Run the compliance audit replay and return a structured ComplianceReport.
 
     If adapter is None, runs the full 8-beat executive-assistant scenario
@@ -155,34 +158,56 @@ def run_compliance_replay(adapter: Optional["MempillAdapter"] = None) -> Complia
         # (Austin→NYC succession) correctly. The file-backed engine is for the CLI
         # and LangGraph Studio paths, not for in-process scenario testing.
         from mempill_showcase.scenarios.executive_assistant import run_scenario
+        from mempill_showcase.core.domain.models import ClaimInput as _ClaimInput
+        import mempill as _mempill
         adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
         trace = run_scenario(adapter, agent_id=_agent_id)
-        # Use the scenario's captured pre-NYC tx timestamp as the compliance moment.
+        # tx_before_nyc_write is the Austin city claim's tx time — captured during
+        # scenario seed phase.  We need a NYC write AFTER this point so the axis
+        # (AS-OF Austin vs NOW NYC) can be proven.
         compliance_tx_time = trace.tx_before_nyc_write
+        # Write the NYC succession via the adapter directly so we can prove the axis
+        # without re-running the full LLM path.  Austin is bounded to valid_until=2025-02
+        # so this write is a CommittedCheap succession — no HITL needed.
+        nyc_claim = _ClaimInput(
+            subject="alice-chen",
+            predicate="city",
+            value="New York NY",
+            valid_from="2025-02",
+            valid_until=None,
+            confidence=1.0,
+            provenance=_mempill.ProvenanceLabel.external_user_asserted(),
+            cardinality="Functional",
+            criticality="Medium",
+        )
+        adapter.write_claim(_agent_id, nyc_claim)
     else:
-        # Adapter was supplied (test path). We need to capture the compliance
-        # tx timestamp ourselves. The caller is responsible for ensuring the
-        # adapter has a realistic belief state seeded before calling this.
-        # We look for the Austin city claim's tx time in the audit log.
-        from mempill import ProvenanceLabel
+        # Adapter was supplied (test path). The caller is responsible for
+        # ensuring the adapter has a realistic belief state seeded before
+        # calling this.  If the caller supplies a pre-captured tx timestamp
+        # (compliance_tx_time_override), use it directly — this is the
+        # correct approach when the adapter already has NYC written (because
+        # recall("city") would return NYC, not Austin, making it impossible
+        # to find Austin's claim_ref via recall).
+        if compliance_tx_time_override:
+            compliance_tx_time = compliance_tx_time_override
+        else:
+            # No override: try to find the earliest audit entry for city
+            # (which should be Austin if the adapter is freshly seeded).
+            all_audit = adapter.audit(_agent_id, limit=50)
+            # Seed data if not already present (idempotent — skips if already seeded)
+            austin_belief = adapter.recall(_agent_id, "alice-chen", "city")
+            if austin_belief.status in ("NoBelief",):
+                load_seed_claims(adapter, _agent_id)
+                all_audit = adapter.audit(_agent_id, limit=50)
 
-        # Seed data if not already present (idempotent — skips if already seeded)
-        austin_belief = adapter.recall(_agent_id, "alice-chen", "city")
-        if austin_belief.status in ("NoBelief",):
-            load_seed_claims(adapter, _agent_id)
-
-        # Capture the Austin claim's tx time
-        all_audit = adapter.audit(_agent_id, limit=50)
-        austin_belief2 = adapter.recall(_agent_id, "alice-chen", "city")
-        austin_ref = austin_belief2.claim_ref
-
-        for e in all_audit:
-            if e.claim_ref == austin_ref:
-                compliance_tx_time = e.recorded_at
-                break
-
-        if not compliance_tx_time and all_audit:
-            compliance_tx_time = all_audit[0].recorded_at
+            # Walk the full audit in reverse-chronological order (newest first)
+            # and take the OLDEST entry for the city predicate — that's Austin.
+            city_entries = [e for e in all_audit if "city" in (e.rationale or "").lower()]
+            if city_entries:
+                compliance_tx_time = city_entries[-1].recorded_at
+            elif all_audit:
+                compliance_tx_time = all_audit[-1].recorded_at
 
     # ── T-08: Bi-temporal belief queries as_of compliance_tx_time ────────────
     # These are the 3 alice-chen predicates relevant to the March briefing.

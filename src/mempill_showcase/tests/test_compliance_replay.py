@@ -24,14 +24,81 @@ import pytest
 def compliance_report():
     """Run the full compliance scenario once and return the ComplianceReport.
 
-    Wave B NOTE: run_scenario() (used by run_compliance_replay) is not yet ported
-    to the ReAct agent graph.  Tests that depend on this fixture are skip-marked
-    with pytest.skip() until Wave C ports run_scenario().
+    Uses the adapter-supplied path (no LLM calls required) so this fixture
+    runs as part of the default 'not live' test suite.
+
+    The fixture:
+      1. Builds a fresh oracle-backed in-memory adapter.
+      2. Seeds Day-0 claims (7 claims: alice-chen Austin TX, VP Engineering, etc.)
+      3. Captures Austin city claim's tx time as the compliance moment.
+      4. Writes a NYC succession claim (CommittedCheap — no HITL needed because
+         Austin is bounded valid_until=2025-02, so no overlap).
+      5. Writes a CTO claim at the same valid_from=2023-06 as VP Engineering to
+         create a Contested situation, then resolves it via oracle Affirm.
+      6. Calls run_compliance_replay(adapter) to build the ComplianceReport.
+
+    This proves the bi-temporal axis (Austin→NYC) and the oracle resolution (VP→CTO)
+    without requiring any LLM calls.
     """
-    pytest.skip(
-        "TODO(waveC): compliance_report fixture depends on run_scenario() which is "
-        "not yet ported to the ReAct agent graph. Deferred to Wave C."
+    import time as _time
+    import mempill as _mempill
+    from mempill_showcase.config.di import build_mempill_adapter
+    from mempill_showcase.core.domain.models import ClaimInput
+    from mempill_showcase.scenarios.seed_data import AGENT_ID, load_seed_claims
+    from mempill_showcase.scenarios.compliance_replay import run_compliance_replay
+
+    adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
+    load_seed_claims(adapter, AGENT_ID)
+
+    # Capture Austin city claim's tx time BEFORE the NYC write
+    austin_belief = adapter.recall(AGENT_ID, "alice-chen", "city")
+    austin_ref = austin_belief.claim_ref
+    all_audit = adapter.audit(AGENT_ID, limit=20)
+    compliance_tx_time = None
+    for e in all_audit:
+        if e.claim_ref == austin_ref:
+            compliance_tx_time = e.recorded_at
+            break
+
+    # Small sleep to guarantee NYC write gets a strictly later tx timestamp
+    _time.sleep(0.005)
+
+    # Write NYC succession (CommittedCheap — Austin bounded to 2025-02, no overlap)
+    nyc_claim = ClaimInput(
+        subject="alice-chen",
+        predicate="city",
+        value="New York NY",
+        valid_from="2025-02",
+        valid_until=None,
+        confidence=1.0,
+        provenance=_mempill.ProvenanceLabel.external_user_asserted(),
+        cardinality="Functional",
+        criticality="Medium",
     )
+    adapter.write_claim(AGENT_ID, nyc_claim)
+
+    # Write CTO claim (same valid_from=2023-06 as VP Engineering → Contested)
+    cto_claim = ClaimInput(
+        subject="alice-chen",
+        predicate="employer",
+        value="Acme Corp / CTO",
+        valid_from="2023-06-01",
+        valid_until=None,
+        confidence=1.0,
+        provenance=_mempill.ProvenanceLabel.external_user_asserted(),
+        cardinality="Functional",
+        criticality="Medium",
+    )
+    adapter.write_claim(AGENT_ID, cto_claim)
+
+    # Resolve via oracle: Affirm → CTO wins, VP Engineering superseded
+    pending = adapter.list_pending_adjudications(AGENT_ID)
+    for entry in pending:
+        if entry.get("subject") == "alice-chen" and entry.get("predicate") == "employer":
+            adapter.submit_adjudication(AGENT_ID, entry["handle_id"], "Affirm")
+            break
+
+    return run_compliance_replay(adapter=adapter, compliance_tx_time_override=compliance_tx_time)
 
 
 @pytest.fixture()
