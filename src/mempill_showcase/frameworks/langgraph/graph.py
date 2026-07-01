@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from mempill_showcase.tools.audit_trail_tool import AuditTrailTool
     from mempill_showcase.tools.get_contested_tool import GetContestedTool
     from mempill_showcase.tools.list_pending_adjudications_tool import ListPendingAdjudicationsTool
+    from mempill_showcase.tools.query_history_tool import QueryHistoryTool
     from mempill_showcase.tools.recall_as_of_tool import RecallAsOfTool
     from mempill_showcase.tools.recall_at_tool import RecallAtTool
     from mempill_showcase.tools.recall_subject_tool import RecallSubjectTool
@@ -145,8 +146,33 @@ TOOL SELECTION GUIDE:
    → this automatically collapses any OTHER pending rows on the same
      subject/predicate so the belief converges to a single winner with zero
      stale pending rows left behind.
+   → If resolve_adjudication returns status="not_found" for a handle_id, that
+     means the adjudication is ALREADY resolved/superseded — this is
+     INFORMATIONAL, not an error. Simply report the current state via
+     recall_subject/recall_at; do NOT call remember_fact to "fix" it.
+
+11. For "history / succession / over time / who held X before" questions about
+    a specific (subject, predicate) — e.g. "what is the history of Acme's CEOs
+    over time?", "who held the CTO role before Alice?":
+   → call query_history(agent_id, subject, predicate).
+   → This returns the ALREADY-CORRECT chronological, non-overlapping
+     (adjudicated) timeline — each entry's valid_from/valid_until/status is
+     authoritative and may be TRUNCATED relative to what that claim originally
+     stated (a later adjudication can shorten an earlier entry's end date).
+   → Report the entries exactly as returned, in order. Do NOT reconstruct
+     history by hand from audit_trail or recall_subject, and do NOT narrate
+     each claim's originally-stated valid_from/valid_until — those may have
+     been overridden by later adjudication and would produce a stale or
+     overlapping (incorrect) narrative.
 
 RULES:
+- BEFORE calling remember_fact to (re-)assert a fact: if recall_subject or
+  recall_at already shows the SAME value as the CURRENT Resolved belief for
+  that (subject, predicate), do NOT call remember_fact again — just report the
+  existing state. Only call remember_fact when the value is actually
+  NEW/DIFFERENT or you are correcting an existing claim. Re-writing an
+  already-current fact needlessly re-litigates it and can create duplicate
+  claims or spurious contested writes.
 - Always consult memory before answering; never invent facts.
 - agent_id is always "jordan-park-001" unless the user specifies otherwise.
 - When recall returns NoBelief, say so honestly — do not guess.
@@ -169,7 +195,7 @@ RULES:
 
 
 class ShowcaseTools(NamedTuple):
-    """9 agent tools needed by the ReAct graph."""
+    """10 agent tools needed by the ReAct graph."""
     recall_subject_tool: "RecallSubjectTool"
     recall_at_tool: "RecallAtTool"
     recall_as_of_tool: "RecallAsOfTool"
@@ -179,6 +205,7 @@ class ShowcaseTools(NamedTuple):
     audit_trail_tool: "AuditTrailTool"
     list_pending_adjudications_tool: "ListPendingAdjudicationsTool"
     resolve_adjudication_tool: "ResolveAdjudicationTool"
+    query_history_tool: "QueryHistoryTool"
 
 
 # ── Sentinel for checkpointer default ────────────────────────────────────────

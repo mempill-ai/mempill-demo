@@ -70,6 +70,12 @@ class ResolveAdjudicationTool(BaseTool):
 
     Returns JSON with the outcome: disposition, winning_value, and how many
     other pending rows were swept.
+
+    If the target handle is already resolved or superseded by the time this
+    tool submits it (a stale/orphaned handle — see
+    RESEARCH_STALE_ADJUDICATIONS.md), this is INFORMATIONAL, not an error:
+    the tool returns status="already_resolved" with the current live belief.
+    Do NOT respond to that by calling remember_fact to re-assert the fact.
     """
 
     name: str = "resolve_adjudication"
@@ -151,8 +157,35 @@ class ResolveAdjudicationTool(BaseTool):
 
         winning_value = challenger_value if normalized == "Affirm" else incumbent_value
 
-        # 1. Resolve the target handle.
-        target_result = self.adapter.submit_adjudication(agent_id, handle_id, normalized)
+        # 1. Resolve the target handle. The handle was found in list_pending_
+        #    adjudications above, but it can still go stale between that list
+        #    call and this submit (its challenger claim already Superseded by a
+        #    later resolution — the orphaning behaviour from
+        #    RESEARCH_STALE_ADJUDICATIONS.md). Surface that as an INFORMATIONAL
+        #    "already resolved" result, not a raw engine error the agent might
+        #    try to "fix" by re-writing the fact via remember_fact.
+        try:
+            target_result = self.adapter.submit_adjudication(agent_id, handle_id, normalized)
+        except Exception as exc:
+            log.info(
+                "ResolveAdjudicationTool: target handle=%s already resolved/superseded "
+                "(stale handle): %s", handle_id[:8], exc,
+            )
+            current = self.adapter.recall(agent_id, subject, predicate)
+            result = {
+                "status": "already_resolved",
+                "handle_id": handle_id,
+                "subject": subject,
+                "predicate": predicate,
+                "current_value": current.value,
+                "current_status": current.status,
+                "message": (
+                    f"Adjudication handle {handle_id[:8]} for {subject}/{predicate} is "
+                    "already resolved or superseded — nothing to do. Current belief: "
+                    f"{current.value!r} (status={current.status})."
+                ),
+            }
+            return json.dumps(result, default=str)
         log.info(
             "ResolveAdjudicationTool: target handle=%s verdict=%s -> disposition=%s",
             handle_id[:8], normalized, target_result.get("disposition"),

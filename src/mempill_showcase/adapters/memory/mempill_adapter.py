@@ -383,6 +383,36 @@ class MempillAdapter:
         )
         return result
 
+    # ── Read path — canonical history (truncated, non-overlapping fold) ──────
+
+    def query_history(self, agent_id: str, subject: str, predicate: str) -> list[dict]:
+        """Return the engine's canonical, chronologically-folded history timeline.
+
+        Delegates to engine.query_history({agent_id, subject, predicate}). Entries
+        are ordered oldest→newest and ALREADY truncated/non-overlapping — later
+        adjudications may have shortened an earlier entry's valid_until below what
+        that claim originally stated. Do not reinterpret or re-derive the timeline
+        from audit_trail/recall_subject; this fold IS the authoritative answer to
+        "history over time" questions.
+
+        Returns a list of dicts, each containing:
+          claim_ref, value, valid_from, valid_until, status ("Current"/"Superseded"),
+          provenance, value_confidence.
+        """
+        log.debug(
+            "query_history agent=%s subject=%s predicate=%s", agent_id, subject, predicate
+        )
+        raw = self._engine.query_history({
+            "agent_id": agent_id,
+            "subject": subject,
+            "predicate": predicate,
+        })
+        entries: list[dict] = list(raw.get("entries") or [])
+        log.debug(
+            "query_history returned %d entries for %s/%s", len(entries), subject, predicate
+        )
+        return entries
+
     # ── Read path — subject enumeration ──────────────────────────────────────
 
     def query_subject(
