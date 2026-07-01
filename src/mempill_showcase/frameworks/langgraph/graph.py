@@ -73,7 +73,12 @@ TOOL SELECTION GUIDE:
    → call recall_as_of(agent_id, subject, predicate, as_of_tx_time="YYYY-MM-DDTHH:MM:SSZ")
 
 4. To record a new fact ("Alice is now CTO of Acme since June 2023"):
-   → call remember_fact(agent_id, subject, predicate, value, valid_from, provenance)
+   → FIRST call recall_subject to find the existing predicate for this type of fact.
+   → Reuse the SAME predicate name and value FORMAT already stored. Do NOT split or rename.
+   → Example: if recall_subject shows predicate="employer", value="Acme Corp / VP Engineering"
+     and the user says "Alice is now CTO", write:
+       remember_fact(subject="alice-chen", predicate="employer", value="Acme Corp / CTO", ...)
+     NOT a new predicate "role" — keep it in the existing "employer" predicate, same format.
    → if the result shows is_contested=true: call get_contested, then call request_adjudication
    → NEVER use a contested fact without resolving it first
 
@@ -96,7 +101,9 @@ RULES:
   do NOT use a contested value in an action (write, briefing) without adjudication.
 - Subject normalisation: strip → lowercase → spaces→hyphens.
   ("Alice Chen" → "alice-chen", "Acme Corp" → "acme-corp")
-- Predicate names are stored as you see them in recall results — reuse them on writes.
+- Predicate names AND value formats are stored as you see them in recall results.
+  ALWAYS reuse the same predicate and value format on writes — never split or rename.
+  ("Alice is CTO of Acme" updates predicate="employer" with value="Acme Corp / CTO")
 """
 
 # ── ShowcaseTools NamedTuple (kept for DI wiring compatibility) ───────────────
