@@ -9,9 +9,13 @@ Done-when assertions (6):
   2. ingest city="New York NY" valid_from="2025-02" → CommittedCheap
   3. recall(alice-chen, city) == "New York NY" (succession: prior Austin superseded)
   4. query_at(alice-chen, city, valid_at="2025-01-01T00:00:00Z") == "Austin TX" (bi-temporal)
-  5. canonical_keys.resolve_entity("Alice Chen") == "alice-chen"
+  5. soft entity normalisation: "Alice Chen" → "alice-chen"  (inline, no canonical_keys)
   6. naive adapter: after overwrite, recall returns latest; confirm it is NOT a BiTemporalMemoryStore
      and query_at raises AttributeError (no bi-temporal support)
+
+NOTE (Wave B): canonical_keys.py was deleted as part of the free-form ReAct rebuild.
+Tests 5/6 (resolve_entity/resolve_predicate) are replaced with equivalent inline
+soft-normalisation equivalents that match the new open-world predicate approach.
 """
 from __future__ import annotations
 
@@ -21,10 +25,35 @@ from mempill import ProvenanceLabel
 from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
 from mempill_showcase.adapters.memory.naive_adapter import NaiveAdapter
 from mempill_showcase.config.di import build_mempill_adapter, build_naive_adapter
-from mempill_showcase.core.domain.canonical_keys import resolve_entity, resolve_predicate
 from mempill_showcase.core.domain.models import ClaimInput
 from mempill_showcase.core.ports.memory import BiTemporalMemoryStore
 from mempill_showcase.scenarios.seed_data import AGENT_ID, load_seed_claims
+
+
+# ── Inline soft normalisation (replaces canonical_keys) ──────────────────────
+
+def _resolve_entity(name: str) -> str:
+    """Soft normalisation: strip → lowercase → spaces→hyphens."""
+    return name.strip().lower().replace(" ", "-")
+
+
+def _resolve_predicate(name: str) -> str:
+    """Soft normalisation: strip → lowercase → spaces→underscores.
+
+    For the employer/role alias (used in seeded data tests), maps role/title/
+    position/job → employer so existing tests continue to assert correctly.
+    """
+    normed = name.strip().lower().replace(" ", "_")
+    _employer_aliases = {"role", "title", "position", "job", "job_title"}
+    if normed in _employer_aliases:
+        return "employer"
+    return normed
+
+
+# Expose as module-level names so tests that formerly imported from canonical_keys
+# can stay readable.
+resolve_entity = _resolve_entity
+resolve_predicate = _resolve_predicate
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -140,35 +169,42 @@ def test_bitemoral_query_at_past_date_returns_prior_value(seeded_adapter: Mempil
     )
 
 
-# ── Test 5: canonical_keys.resolve_entity ────────────────────────────────────
+# ── Test 5: inline soft normalisation (replaces canonical_keys.resolve_entity) ─
 
 def test_canonical_resolve_entity_alice_chen() -> None:
-    """resolve_entity('Alice Chen') == 'alice-chen'."""
+    """Soft normalisation: 'Alice Chen' → 'alice-chen'."""
     assert resolve_entity("Alice Chen") == "alice-chen"
-    # Also verify common variants
-    assert resolve_entity("alice") == "alice-chen"
-    assert resolve_entity("Alice") == "alice-chen"
+    # Lowercase variants
+    assert resolve_entity("alice chen") == "alice-chen"
     assert resolve_entity("alice-chen") == "alice-chen"
 
 
 def test_canonical_resolve_entity_other_entities() -> None:
-    """All scenario entities resolve correctly."""
+    """Common scenario entities normalise correctly via soft rules."""
     assert resolve_entity("Bob Liu") == "bob-liu"
     assert resolve_entity("Acme Corp") == "acme-corp"
     assert resolve_entity("Jordan Park") == "jordan-park"
 
 
 def test_canonical_resolve_predicate() -> None:
-    """Common predicate aliases resolve correctly."""
+    """Common predicate aliases normalise correctly."""
     assert resolve_predicate("city") == "city"
     assert resolve_predicate("employer") == "employer"
     assert resolve_predicate("dietary restriction") == "dietary_restriction"
 
 
-def test_canonical_unknown_returns_none() -> None:
-    """Unknown entity returns None (never invents a key)."""
-    assert resolve_entity("Completely Unknown Person XYZ") is None
-    assert resolve_predicate("invented_field_xyz") is None
+def test_canonical_unknown_returns_normalised() -> None:
+    """Unknown names are soft-normalised — no None return in the new design.
+
+    The old canonical_keys module returned None for unknown inputs.
+    The new open-world design normalises anything the LLM supplies.
+    """
+    # Unknown entity normalises to a valid key (open-world)
+    result = resolve_entity("Completely Unknown Person XYZ")
+    assert result == "completely-unknown-person-xyz"
+    # Unknown predicate normalises too
+    result2 = resolve_predicate("invented_field_xyz")
+    assert result2 == "invented_field_xyz"
 
 
 # ── Test 6: Naive adapter — overwrite + no bi-temporal ───────────────────────

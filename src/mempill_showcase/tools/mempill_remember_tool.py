@@ -25,9 +25,9 @@ SUCCESSION ENCAPSULATION (the recall-then-close pattern):
   4. If there is no incumbent (NoBelief) or status is already Contested, we
      write the new claim normally without the close-step.
 
-CANONICAL KEYS:
-  subject and predicate MUST already be canonical keys from canonical_keys.py.
-  The tool asserts this and raises ValueError if either is unknown.
+NOTE (Wave B): The canonical_keys guard (subject/predicate must be in a closed
+vocabulary) has been removed. The new open-world design applies soft normalisation
+(lowercase + separator) only. The succession logic is unchanged.
 """
 from __future__ import annotations
 
@@ -40,10 +40,6 @@ from pydantic import BaseModel, Field
 
 from mempill import ProvenanceLabel
 from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
-from mempill_showcase.core.domain.canonical_keys import (
-    all_canonical_entities,
-    all_canonical_predicates,
-)
 from mempill_showcase.core.domain.models import ClaimInput, WriteReceipt
 
 from mempill_showcase.observability import emit_contested_span, traceable_mempill
@@ -96,9 +92,9 @@ class MempillRememberTool(BaseTool):
       unclear ordering), the engine returns Contested. HITL waves resolve this;
       the tool does NOT force-resolve genuine conflicts.
 
-    Canonical key enforcement:
-      Both subject and predicate must be resolvable canonical keys. Use
-      canonical_keys.resolve_entity / resolve_predicate before calling this tool.
+    Soft normalisation (Wave B):
+      Subject and predicate are normalised (lowercase + separator) before storage.
+      No closed vocabulary check is applied.
     """
 
     name: str = "mempill_remember"
@@ -132,21 +128,10 @@ class MempillRememberTool(BaseTool):
         criticality: str = "Medium",
         **kwargs: Any,
     ) -> str:
-        # Canonical key guard
-        known_entities = all_canonical_entities()
-        known_predicates = all_canonical_predicates()
-        if subject not in known_entities:
-            raise ValueError(
-                f"Unknown entity key '{subject}'. "
-                f"Resolve via canonical_keys.resolve_entity() first. "
-                f"Known: {sorted(known_entities)}"
-            )
-        if predicate not in known_predicates:
-            raise ValueError(
-                f"Unknown predicate key '{predicate}'. "
-                f"Resolve via canonical_keys.resolve_predicate() first. "
-                f"Known: {sorted(known_predicates)}"
-            )
+        # Soft normalisation only (canonical_keys guard removed in Wave B)
+        # The LLM supplies any subject/predicate; soft rules ensure storage consistency.
+        subject = subject.strip().lower().replace(" ", "-")
+        predicate = predicate.strip().lower().replace(" ", "_")
 
         prov = _build_provenance(provenance_channel)
         claim = ClaimInput(

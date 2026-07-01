@@ -1,42 +1,29 @@
 """
 mempill_showcase.frameworks.langgraph.state — ExecAssistantState TypedDict.
 
-Single state object threaded through every node in the LangGraph StateGraph.
-Designed so each node reads what it needs and writes only its slice.
+State for the ReAct agent graph.  The agent is a create_react_agent node; the
+only fields the graph infrastructure needs beyond the built-in ``messages`` list
+are:
 
-Fields:
   Core input
-    user_input    — raw user turn text
+    user_input    — raw user turn text (still accepted for backward-compat wrappers)
     agent_id      — mempill session owner (e.g. "jordan-park-001")
 
-  Routing
-    intent        — classified intent string (see IntentLabel)
-    route         — next node target after supervisor ("crew_a" | "crew_b" | "crew_c" | "hitl")
-
-  Crew payloads
-    recall_result — JSON string returned by the last MempillRecallTool invocation
-    write_result  — JSON string returned by the last MempillRememberTool invocation
-    audit_result  — JSON string returned by the last MempillAuditTool invocation
-    briefing_text — human-readable output from Crew C (scheduling / briefing)
-
-  HITL
-    pending_contested — dict describing the contested write that triggered HITL:
-        {
-          "subject":      "alice-chen",
-          "predicate":    "employer",
-          "incumbent":    {"value": ..., "valid_from_display": ..., "claim_ref": ...},
-          "challenger":   {"value": ..., "valid_from_display": ..., "claim_ref": ...},
-          "claim_refs":   [<contested claim refs>],
-        }
-        None → no pending HITL gate.
-    hitl_verdict  — verdict returned by the human via Command(resume=...):
-        "Affirm" | "Deny" | "Abstain"
-        None before the HITL node resolves.
-    hitl_resolved_belief — JSON string of the post-resolution recall (or None).
+  HITL (set by request_adjudication_tool after interrupt/resume)
+    hitl_verdict         — canonical verdict after human resumes: "Affirm" | "Deny" | "Abstain"
+    hitl_resolved_belief — JSON string of the post-resolution recall (or None)
 
   Session output
-    output_text   — final human-facing output (set by the last active node)
-    error         — non-None if a node encountered an unrecoverable error
+    output_text   — last assistant message text (convenience alias; populated by
+                    the graph wrapper from the final AIMessage)
+    error         — non-None if an unrecoverable error occurred
+
+Removed (old classifier fields, not needed by ReAct):
+  intent, route, recall_result, write_result, audit_result, briefing_text,
+  pending_contested.
+
+IntentLabel is retained as a re-export so existing imports from other modules
+that reference it do not break during the transition period.
 """
 from __future__ import annotations
 
@@ -45,7 +32,7 @@ from typing_extensions import TypedDict
 
 
 class IntentLabel:
-    """Canonical intent strings — used by supervisor and routing edges."""
+    """Retained for backward-compatibility only.  Not used by the ReAct agent."""
     UPDATE_CONTACT    = "UPDATE_CONTACT"
     RESEARCH          = "RESEARCH"
     PREPARE_BRIEFING  = "PREPARE_BRIEFING"
@@ -66,20 +53,12 @@ class ExecAssistantState(TypedDict, total=False):
     user_input: str
     agent_id: str
 
-    # ── Routing ───────────────────────────────────────────────────────────────
-    intent: str               # one of IntentLabel constants
-    route: str                # "crew_a" | "crew_b" | "crew_c" | "hitl" | "end"
+    # ── LangGraph ReAct built-in: message list ────────────────────────────────
+    messages: list[Any]
 
-    # ── Crew payloads ─────────────────────────────────────────────────────────
-    recall_result: Optional[str]   # JSON from MempillRecallTool
-    write_result: Optional[str]    # JSON from MempillRememberTool
-    audit_result: Optional[str]    # JSON from MempillAuditTool
-    briefing_text: Optional[str]   # human-readable output from Crew C
-
-    # ── HITL ──────────────────────────────────────────────────────────────────
-    pending_contested: Optional[dict[str, Any]]  # see docstring; None = no gate
-    hitl_verdict: Optional[str]                  # "Affirm" | "Deny" | "Abstain"
-    hitl_resolved_belief: Optional[str]          # JSON of post-resolution recall
+    # ── HITL (populated after interrupt/resume inside request_adjudication) ───
+    hitl_verdict: Optional[str]           # "Affirm" | "Deny" | "Abstain"
+    hitl_resolved_belief: Optional[str]   # JSON of post-resolution recall
 
     # ── Session output ────────────────────────────────────────────────────────
     output_text: Optional[str]

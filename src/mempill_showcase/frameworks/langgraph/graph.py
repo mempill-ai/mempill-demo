@@ -1,220 +1,167 @@
 """
-mempill_showcase.frameworks.langgraph.graph — StateGraph assembly + build factory.
+mempill_showcase.frameworks.langgraph.graph — ReAct agent assembly + build factory.
 
-Graph topology:
-  supervisor → (conditional) → crew_a | crew_b | crew_c
-  crew_a     → (conditional) → hitl_node (if pending_contested) | END
-  crew_b     → (conditional) → hitl_node (if pending_contested) | END
-  crew_c     → END
-  hitl_node  → END
+Graph topology (2-node ReAct):
+  create_react_agent(model, tools, checkpointer=MemorySaver(), prompt=SYSTEM)
+
+  Normal Q:     Agent → recall_subject → Agent → END
+  Contested:    Agent → remember_fact (is_contested) → Agent
+                     → get_contested → Agent
+                     → request_adjudication → [PAUSE] → resume → Agent → END
+
+HITL via tool interrupt:
+  request_adjudication_tool calls LangGraph interrupt(payload); the graph pauses.
+  On Command(resume=<verdict>) the tool resolves and returns the winning value;
+  the agent continues to END.
 
 Checkpointer:
   MemorySaver is attached so interrupt() / Command(resume=...) state persists
   across invocations on the same thread_id.
 
-Factory:
-  `build_graph(adapter, tools, classifier)` is the public entry point.
-  - `adapter`    — MempillAdapter (the single mempill boundary)
-  - `tools`      — ShowcaseTools NamedTuple (all W2 tool instances)
-  - `classifier` — SupervisorClassifier impl (default: MockSupervisor)
+Factory (public):
+  build_graph(adapter, tools)         → compiled app (MemorySaver)
+  build_app(adapter=None)             → (app, adapter)
+  build_app_from_settings(settings)   → (app, adapter) | (None, NaiveAdapter)
 
-DI integration:
-  config/di.py calls build_graph(...) to wire the full graph in a single call.
+NAIVE_MODE:
+  When NAIVE_MODE=true, build_app_from_settings returns (None, NaiveAdapter).
+  NaiveAdapter does not have a LangGraph app — callers interact with it directly.
 """
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, StateGraph
-
-from mempill_showcase.frameworks.langgraph.crew_nodes import (
-    make_crew_a_node,
-    make_crew_b_node,
-    make_crew_c_node,
-)
-from mempill_showcase.frameworks.langgraph.hitl_node import make_hitl_node
-from mempill_showcase.frameworks.langgraph.state import ExecAssistantState
-from mempill_showcase.frameworks.langgraph.supervisor_node import (
-    MockSupervisor,
-    SupervisorClassifier,
-    make_supervisor_node,
-)
+from langgraph.prebuilt import create_react_agent
 
 if TYPE_CHECKING:
     from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
-    from mempill_showcase.tools.date_parser_tool import DateParserTool
-    from mempill_showcase.tools.mempill_audit_tool import MempillAuditTool
-    from mempill_showcase.tools.mempill_recall_tool import MempillRecallTool
-    from mempill_showcase.tools.mempill_remember_tool import MempillRememberTool
-    from mempill_showcase.tools.rag_read_tool import RAGReadTool
-    from mempill_showcase.tools.rag_write_tool import RAGWriteTool
+    from mempill_showcase.tools.audit_trail_tool import AuditTrailTool
+    from mempill_showcase.tools.get_contested_tool import GetContestedTool
+    from mempill_showcase.tools.recall_as_of_tool import RecallAsOfTool
+    from mempill_showcase.tools.recall_at_tool import RecallAtTool
+    from mempill_showcase.tools.recall_subject_tool import RecallSubjectTool
+    from mempill_showcase.tools.remember_fact_tool import RememberFactTool
+    from mempill_showcase.tools.request_adjudication_tool import RequestAdjudicationTool
 
 log = logging.getLogger(__name__)
 
+# ── System prompt ─────────────────────────────────────────────────────────────
+
+_SYSTEM_PROMPT = """\
+You are a bi-temporal memory assistant backed by the mempill engine.
+You answer ANY natural-language question by consulting memory tools — never invent facts.
+
+KNOWN ENTITIES (always normalise: lowercase, spaces→hyphens):
+  alice-chen, bob-liu, acme-corp, jordan-park
+
+TOOL SELECTION GUIDE:
+1. For questions about an entity ("what role does Alice hold?", "tell me about Bob"):
+   → call recall_subject(agent_id, subject). Read ALL returned predicates.
+   → example: recall_subject returns predicate="employer", value="Acme Corp / VP Engineering"
+   → answer: "Alice holds the role of VP Engineering at Acme Corp"
+   → NO alias map needed — read predicate names from the result and reason linguistically.
+
+2. For point-in-time world-history questions ("what was Alice's city in June 2024?"):
+   → call recall_at(agent_id, subject, predicate, valid_at="YYYY-MM-DDTHH:MM:SSZ")
+
+3. For transaction-time queries ("what did the system know about Alice's employer last year?"):
+   → call recall_as_of(agent_id, subject, predicate, as_of_tx_time="YYYY-MM-DDTHH:MM:SSZ")
+
+4. To record a new fact ("Alice is now CTO of Acme since June 2023"):
+   → call remember_fact(agent_id, subject, predicate, value, valid_from, provenance)
+   → if the result shows is_contested=true: call get_contested, then call request_adjudication
+   → NEVER use a contested fact without resolving it first
+
+5. To inspect what values conflict for a contested fact:
+   → call get_contested(agent_id, subject, predicate)
+
+6. To request human adjudication of a contested write:
+   → call request_adjudication(agent_id, subject, predicate, reason,
+       incumbent_value, challenger_value, claim_refs)
+   → the graph will pause; wait for the human resume verdict; then report the winner
+
+7. For compliance/audit queries ("show me all write events"):
+   → call audit_trail(agent_id, limit)
+
+RULES:
+- Always consult memory before answering; never invent facts.
+- agent_id is always "jordan-park-001" unless the user specifies otherwise.
+- When recall returns NoBelief, say so honestly — do not guess.
+- When recall returns Contested, call get_contested and surface both values;
+  do NOT use a contested value in an action (write, briefing) without adjudication.
+- Subject normalisation: strip → lowercase → spaces→hyphens.
+  ("Alice Chen" → "alice-chen", "Acme Corp" → "acme-corp")
+- Predicate names are stored as you see them in recall results — reuse them on writes.
+"""
+
+# ── ShowcaseTools NamedTuple (kept for DI wiring compatibility) ───────────────
+
 
 class ShowcaseTools(NamedTuple):
-    """All W2 tool instances needed by the graph nodes."""
-    remember_tool: "MempillRememberTool"
-    recall_tool: "MempillRecallTool"
-    audit_tool: "MempillAuditTool"
-    date_parser: "DateParserTool"
-    rag_write_tool: "RAGWriteTool"
-    rag_read_tool: "RAGReadTool"
+    """7 agent tools needed by the ReAct graph."""
+    recall_subject_tool: "RecallSubjectTool"
+    recall_at_tool: "RecallAtTool"
+    recall_as_of_tool: "RecallAsOfTool"
+    remember_fact_tool: "RememberFactTool"
+    get_contested_tool: "GetContestedTool"
+    request_adjudication_tool: "RequestAdjudicationTool"
+    audit_trail_tool: "AuditTrailTool"
 
 
-# ── Routing helpers ───────────────────────────────────────────────────────────
-
-def _supervisor_router(state: ExecAssistantState) -> str:
-    """Edge from supervisor: route to the correct crew node."""
-    route = state.get("route", "crew_c")
-    log.debug("supervisor_router: route=%s", route)
-    return route
-
-
-def _crew_a_router(state: ExecAssistantState) -> str:
-    """Edge from crew_a: go to hitl if contested, else end."""
-    pending = state.get("pending_contested")
-    if pending:
-        log.debug("crew_a_router: Contested detected → hitl_node")
-        return "hitl"
-    return END
-
-
-def _crew_b_router(state: ExecAssistantState) -> str:
-    """Edge from crew_b: go to hitl if contested, else end."""
-    pending = state.get("pending_contested")
-    if pending:
-        log.debug("crew_b_router: Contested detected → hitl_node")
-        return "hitl"
-    return END
-
-
-# ── Graph builder ─────────────────────────────────────────────────────────────
+# ── Sentinel for checkpointer default ────────────────────────────────────────
 
 _SENTINEL = object()
 
 
+# ── Graph builder ─────────────────────────────────────────────────────────────
+
 def build_graph(
     adapter: "MempillAdapter",
     tools: ShowcaseTools,
-    classifier: Optional[SupervisorClassifier] = None,
-    crews: Optional[Any] = None,
     checkpointer: Any = _SENTINEL,
-) -> "CompiledGraph":  # type: ignore[type-arg]
-    """Build and compile the ExecAssistant StateGraph.
+    model_name: Optional[str] = None,
+) -> Any:
+    """Build and compile the ReAct ExecAssistant agent.
 
     Returns a compiled LangGraph app.  By default a MemorySaver checkpointer is
     attached so interrupt() / Command(resume=...) state persists across invocations
-    on the same thread_id (used by tests and the CLI scenario runner).
+    on the same thread_id.
 
-    LangGraph Studio / ``langgraph dev`` injects its own persistence layer and
-    rejects graphs that carry a custom MemorySaver.  Pass ``checkpointer=None`` to
-    compile without any checkpointer (Studio path).  The platform then handles
-    persistence transparently.
+    Pass checkpointer=None to compile without a checkpointer (LangGraph Studio path).
 
     Args:
         adapter:      MempillAdapter — the single mempill boundary.
-        tools:        ShowcaseTools NamedTuple with all W2 tool instances.
-        classifier:   SupervisorClassifier impl. Defaults to MockSupervisor()
-                      (deterministic, no API key). Swap for LLMSupervisor in W6.
-        crews:        Optional ShowcaseCrews NamedTuple (crew_a, crew_b, crew_c).
-                      When provided, each crew node invokes crew.kickoff() instead of
-                      the W3 shell heuristics.  When None, shell path runs (CI-safe).
-        checkpointer: Checkpointer instance to attach, or None (no checkpointer —
-                      use for LangGraph Studio).  Sentinel default attaches a fresh
-                      MemorySaver (backward-compatible behaviour for tests/CLI).
+        tools:        ShowcaseTools NamedTuple with all 7 agent tool instances.
+        checkpointer: Checkpointer instance, None, or _SENTINEL (default=MemorySaver).
+        model_name:   Anthropic model string. Defaults to ANTHROPIC_MODEL env var
+                      or "claude-haiku-4-5".
     """
-    if classifier is None:
-        classifier = MockSupervisor()
+    if model_name is None:
+        model_name = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
 
-    # Unpack optional CrewAI crews (None → shell path for each node)
-    crew_a = getattr(crews, "crew_a", None) if crews is not None else None
-    crew_b = getattr(crews, "crew_b", None) if crews is not None else None
-    crew_c = getattr(crews, "crew_c", None) if crews is not None else None
+    model = ChatAnthropic(model=model_name)  # type: ignore[call-arg]
 
-    # ── Build node functions ──────────────────────────────────────────────────
-    supervisor_fn = make_supervisor_node(classifier)
+    tool_list = list(tools)
 
-    crew_a_fn = make_crew_a_node(
-        remember_tool=tools.remember_tool,
-        date_parser=tools.date_parser,
-        adapter=adapter,
-        crew=crew_a,
-    )
-    crew_b_fn = make_crew_b_node(
-        remember_tool=tools.remember_tool,
-        rag_write_tool=tools.rag_write_tool,
-        adapter=adapter,
-        crew=crew_b,
-    )
-    crew_c_fn = make_crew_c_node(
-        recall_tool=tools.recall_tool,
-        audit_tool=tools.audit_tool,
-        crew=crew_c,
-    )
-    hitl_fn = make_hitl_node(
-        adapter=adapter,
-        recall_tool=tools.recall_tool,
-    )
-
-    # ── Assemble StateGraph ───────────────────────────────────────────────────
-    g = StateGraph(ExecAssistantState)
-
-    g.add_node("supervisor", supervisor_fn)
-    g.add_node("crew_a", crew_a_fn)
-    g.add_node("crew_b", crew_b_fn)
-    g.add_node("crew_c", crew_c_fn)
-    g.add_node("hitl_node", hitl_fn)
-
-    # Entry point
-    g.set_entry_point("supervisor")
-
-    # Supervisor → crew (conditional on intent/route)
-    g.add_conditional_edges(
-        "supervisor",
-        _supervisor_router,
-        {
-            "crew_a": "crew_a",
-            "crew_b": "crew_b",
-            "crew_c": "crew_c",
-        },
-    )
-
-    # Crew A → hitl or end (conditional on pending_contested)
-    g.add_conditional_edges(
-        "crew_a",
-        _crew_a_router,
-        {
-            "hitl": "hitl_node",
-            END: END,
-        },
-    )
-
-    # Crew B → hitl or end
-    g.add_conditional_edges(
-        "crew_b",
-        _crew_b_router,
-        {
-            "hitl": "hitl_node",
-            END: END,
-        },
-    )
-
-    # Crew C always ends (read-only)
-    g.add_edge("crew_c", END)
-
-    # HITL → end (after resolution)
-    g.add_edge("hitl_node", END)
-
-    # ── Compile with checkpointer ─────────────────────────────────────────────
-    # Default (sentinel): attach a fresh MemorySaver so interrupt()/Command(resume=...)
-    # work in the test / CLI scenario runner path.
-    # checkpointer=None: no checkpointer — used by LangGraph Studio which injects its own.
     if checkpointer is _SENTINEL:
         checkpointer = MemorySaver()
-    app = g.compile(checkpointer=checkpointer)
 
-    log.info("build_graph: ExecAssistant StateGraph compiled (classifier=%s)", type(classifier).__name__)
+    app = create_react_agent(
+        model=model,
+        tools=tool_list,
+        checkpointer=checkpointer,
+        prompt=_SYSTEM_PROMPT,
+    )
+
+    log.info(
+        "build_graph: ReAct ExecAssistant compiled (model=%s, tools=%d, checkpointer=%s)",
+        model_name,
+        len(tool_list),
+        type(checkpointer).__name__ if checkpointer else "None",
+    )
     return app

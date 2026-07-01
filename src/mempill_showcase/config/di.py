@@ -4,52 +4,38 @@ mempill_showcase.config.di — minimal dependency injection factory.
 Builds the engine + chosen adapter (mempill or naive) based on settings.
 All mempill imports are deferred to this module and the mempill_adapter.
 
-W3 additions:
-  build_tools(adapter)  — constructs ShowcaseTools (all W2 tool instances)
-  build_langgraph(...)  — constructs the full ExecAssistant StateGraph
+Public API:
+  build_mempill_adapter(in_memory, oracle_backed, db_path)
+    Build a MempillAdapter wrapping a real mempill engine.
 
-W4 additions:
-  build_langgraph(..., use_crewai=False, llm=None)
-    use_crewai=False (default): deterministic shell path (no API key, CI-safe)
-    use_crewai=True:            CrewAI crews injected into the graph nodes
-    llm:                        LiteLLM model string or crewai.LLM instance;
-                                forwarded to build_crews() when use_crewai=True
+  build_naive_adapter()
+    Build a NaiveAdapter (no mempill, no valid-time, no provenance).
 
-W6 additions:
-  build_app(use_crewai=False, classifier=None, adapter=None)
-    Single-call factory for the compiled runnable graph.
-    Returns (app, adapter) — the same contract as build_langgraph().
-    - classifier=None: defaults to MockSupervisor (no API key required).
-    - classifier=LLMSupervisor(...): real-LLM path (requires ANTHROPIC_API_KEY).
-    - adapter=None: creates a fresh in-memory MempillAdapter internally.
-    - adapter=<existing>: reuse a pre-seeded adapter (tests / CLI).
+  build_agent_tools(adapter)
+    Construct ShowcaseTools (all 7 ReAct agent tool instances).
 
-W7 additions:
-  build_mempill_adapter(in_memory=True, oracle_backed=True)
-    oracle_backed=True (NEW DEFAULT for showcase):
-      Opens engine with open_oracle_in_memory(HumanOracle()) so that genuine
-      conflicting Functional writes return QueuedForAdjudication (not bare Contested)
-      and sit in the pending queue until submit_adjudication() resolves them.
-      The adapter gains list_pending_adjudications() and submit_adjudication().
-    oracle_backed=False:
-      Falls back to open_in_memory() (non-oracle engine, W1-W6 behaviour).
-      Genuine conflicts still return Contested; oracle methods raise AttributeError.
-    Tests that need predictable CommittedCheap-only behaviour may pass
-    oracle_backed=False explicitly.
+  build_graph(adapter, tools, checkpointer, model_name)
+    Build + compile the ReAct ExecAssistant agent.
 
-W9 additions:
+  build_app(adapter=None, model_name=None)
+    Single-call factory: (app, adapter).
+
   build_app_from_settings(settings)
-    Settings-driven factory that selects the adapter based on NAIVE_MODE.
-    settings.naive_mode=False (default) → MempillAdapter (bi-temporal, oracle-backed)
-    settings.naive_mode=True            → NaiveAdapter (last-write-wins, no bi-temporal)
-    Returns (app, adapter) — same contract as build_app().
+    Settings-driven factory: selects adapter based on NAIVE_MODE.
+    naive_mode=False → MempillAdapter → (app, adapter)
+    naive_mode=True  → NaiveAdapter  → (None, adapter)
 
-Environment variables (W6):
-  ANTHROPIC_API_KEY  — required for LLMSupervisor; absent = MockSupervisor.
-  ANTHROPIC_MODEL    — Anthropic model for LLMSupervisor (default: claude-haiku-4-5).
+NAIVE_MODE:
+  When NAIVE_MODE=true, build_app_from_settings returns (None, NaiveAdapter).
+  NaiveAdapter does not have a LangGraph app.
+
+Environment variables:
+  ANTHROPIC_API_KEY  — required for the ReAct LLM; absent = no LLM calls.
+  ANTHROPIC_MODEL    — Anthropic model string (default: claude-haiku-4-5).
   LANGSMITH_API_KEY  — enables LangSmith tracing (optional; absent = no-op).
   LANGSMITH_TRACING  — set to "true" to force-enable tracing.
   LANGSMITH_PROJECT  — LangSmith project name (default: "mempill-showcase").
+  MEMPILL_DB_PATH    — optional persistent SQLite engine path.
 """
 from __future__ import annotations
 
@@ -60,10 +46,7 @@ from mempill_showcase.adapters.memory.naive_adapter import NaiveAdapter
 
 
 def _adapter_from_settings(settings=None):
-    """Return a MempillAdapter configured from settings (db_path, oracle_backed).
-
-    Shared by build_app_from_settings and the CLI entry points.
-    """
+    """Return a MempillAdapter configured from settings (db_path, oracle_backed)."""
     if settings is None:
         from mempill_showcase.config.settings import get_settings
         settings = get_settings()
@@ -93,13 +76,10 @@ def build_mempill_adapter(
                        genuine conflicting Functional writes return QueuedForAdjudication
                        and queue for human adjudication via list_pending_adjudications /
                        submit_adjudication.
-                       False → open_in_memory() (non-oracle, W1-W6 behaviour).
-                       Genuine conflicts return Contested; oracle methods raise AttributeError.
-                       Always True when db_path is supplied (file-backed engines are oracle-backed).
+                       False → open_in_memory() (non-oracle).
+                       Always True when db_path is supplied.
         db_path:       Optional filesystem path for a persistent SQLite-backed engine.
                        When set, opens via mempill.open_oracle(path, HumanOracle()).
-                       Parent directories are created automatically.
-                       When None (default), honours the in_memory / oracle_backed flags.
     """
     import mempill
     from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
@@ -130,11 +110,7 @@ def build_adapter(
     mode: AdapterMode = AdapterMode.MEMPILL,
     in_memory: bool = True,
 ) -> Union["MempillAdapter", NaiveAdapter]:  # type: ignore[name-defined]
-    """Factory: return the adapter for the requested mode.
-
-    mode=MEMPILL → MempillAdapter (BiTemporalMemoryStore)
-    mode=NAIVE   → NaiveAdapter (MemoryStore only)
-    """
+    """Factory: return the adapter for the requested mode."""
     if mode == AdapterMode.MEMPILL:
         return build_mempill_adapter(in_memory=in_memory)
     elif mode == AdapterMode.NAIVE:
@@ -143,30 +119,121 @@ def build_adapter(
         raise ValueError(f"Unknown AdapterMode: {mode!r}")
 
 
-def build_tools(adapter):
-    """Build a ShowcaseTools NamedTuple from a MempillAdapter.
+def build_agent_tools(adapter):
+    """Build a ShowcaseTools NamedTuple with the 7 ReAct agent tools.
 
-    All W2 tool instances are constructed here and returned as a bundle
-    for injection into the graph nodes (W3+).
+    All tool instances are bound to the provided MempillAdapter and returned
+    as a bundle for injection into build_graph().
     """
     from mempill_showcase.frameworks.langgraph.graph import ShowcaseTools
-    from mempill_showcase.tools.date_parser_tool import DateParserTool
-    from mempill_showcase.tools.mempill_audit_tool import MempillAuditTool
+    from mempill_showcase.tools.audit_trail_tool import AuditTrailTool
+    from mempill_showcase.tools.get_contested_tool import GetContestedTool
     from mempill_showcase.tools.mempill_recall_tool import MempillRecallTool
-    from mempill_showcase.tools.mempill_remember_tool import MempillRememberTool
-    from mempill_showcase.tools.rag_read_tool import RAGReadTool
-    from mempill_showcase.tools.rag_write_tool import InMemoryRAGStore, RAGWriteTool
+    from mempill_showcase.tools.recall_as_of_tool import RecallAsOfTool
+    from mempill_showcase.tools.recall_at_tool import RecallAtTool
+    from mempill_showcase.tools.recall_subject_tool import RecallSubjectTool
+    from mempill_showcase.tools.remember_fact_tool import RememberFactTool
+    from mempill_showcase.tools.request_adjudication_tool import RequestAdjudicationTool
 
-    rag_store = InMemoryRAGStore()
+    recall_tool = MempillRecallTool(adapter=adapter)
+
     return ShowcaseTools(
-        remember_tool=MempillRememberTool(adapter=adapter),
-        recall_tool=MempillRecallTool(adapter=adapter),
-        audit_tool=MempillAuditTool(adapter=adapter),
-        date_parser=DateParserTool(),
-        rag_write_tool=RAGWriteTool(store=rag_store),
-        rag_read_tool=RAGReadTool(store=rag_store),
+        recall_subject_tool=RecallSubjectTool(adapter=adapter),
+        recall_at_tool=RecallAtTool(adapter=adapter),
+        recall_as_of_tool=RecallAsOfTool(adapter=adapter),
+        remember_fact_tool=RememberFactTool(adapter=adapter),
+        get_contested_tool=GetContestedTool(adapter=adapter),
+        request_adjudication_tool=RequestAdjudicationTool(
+            adapter=adapter,
+            recall_tool=recall_tool,
+        ),
+        audit_trail_tool=AuditTrailTool(adapter=adapter),
     )
 
+
+# Backward-compat alias: old code that calls build_tools() still works.
+# build_tools was the W3 ShowcaseTools constructor (remember_tool, recall_tool, etc.).
+# It is now replaced by build_agent_tools() but is kept to avoid import errors in
+# any surviving callers (e.g. test fixtures that have not yet been migrated).
+def build_tools(adapter):
+    """Backward-compat alias for build_agent_tools(). Prefer build_agent_tools()."""
+    return build_agent_tools(adapter)
+
+
+def build_graph_from_adapter(adapter, checkpointer=None, model_name=None):
+    """Build + compile the ReAct ExecAssistant agent from an adapter.
+
+    Returns the compiled app.
+    """
+    from mempill_showcase.frameworks.langgraph.graph import build_graph, _SENTINEL
+
+    tools = build_agent_tools(adapter)
+    cp = checkpointer if checkpointer is not None else _SENTINEL
+    return build_graph(adapter=adapter, tools=tools, checkpointer=cp, model_name=model_name)
+
+
+def build_app(
+    adapter=None,
+    model_name: Optional[str] = None,
+    # Legacy params accepted but ignored — kept for call-site compat
+    use_crewai: bool = False,
+    classifier=None,
+    llm=None,
+):
+    """Single-call factory: assemble the runnable ExecAssistant ReAct agent.
+
+    Args:
+        adapter:     Pre-built MempillAdapter to reuse (or None → fresh in-memory).
+        model_name:  Anthropic model string. Defaults to ANTHROPIC_MODEL env var or
+                     settings.anthropic_model or "claude-haiku-4-5".
+        use_crewai:  Ignored (CrewAI deleted). Accepted for call-site compat.
+        classifier:  Ignored (no classifier in ReAct topology). Accepted for compat.
+        llm:         Ignored. Accepted for call-site compat.
+
+    Returns:
+        (app, adapter) — compiled LangGraph app + the MempillAdapter instance.
+    """
+    if adapter is None:
+        adapter = build_mempill_adapter(in_memory=True)
+
+    if model_name is None:
+        try:
+            from mempill_showcase.config.settings import get_settings
+            model_name = get_settings().anthropic_model
+        except Exception:
+            model_name = "claude-haiku-4-5"
+
+    app = build_graph_from_adapter(adapter, model_name=model_name)
+    return app, adapter
+
+
+def build_app_from_settings(settings=None):
+    """Settings-driven factory: select adapter based on NAIVE_MODE.
+
+    Args:
+        settings: a Settings instance (or compatible object with .naive_mode).
+                  If None, loads from environment via get_settings().
+
+    Returns:
+        (app, adapter) — compiled ReAct agent + the chosen adapter.
+        When naive_mode=True, app is None (NaiveAdapter has no LangGraph app).
+    """
+    if settings is None:
+        from mempill_showcase.config.settings import get_settings
+        settings = get_settings()
+
+    from mempill_showcase.observability import configure_tracing_from_settings
+    configure_tracing_from_settings(settings)
+
+    if settings.naive_mode:
+        adapter = build_naive_adapter()
+        return None, adapter
+    else:
+        adapter = _adapter_from_settings(settings)
+        return build_app(adapter=adapter, model_name=settings.anthropic_model)
+
+
+# ── Legacy build_langgraph (backward-compat) ─────────────────────────────────
 
 def build_langgraph(
     in_memory: bool = True,
@@ -174,137 +241,6 @@ def build_langgraph(
     use_crewai: bool = False,
     llm=None,
 ):
-    """Build the full ExecAssistant LangGraph app.
-
-    Returns (app, adapter) so callers can seed data or inspect state after the graph.
-
-    Args:
-        in_memory:   Use in-memory mempill engine (True for tests/demos).
-        classifier:  SupervisorClassifier implementation; defaults to MockSupervisor.
-        use_crewai:  False (default) → deterministic shell path (no API key, CI-safe).
-                     True → CrewAI crews are injected into crew_a/b/c nodes.
-                     The shell heuristics remain as a fallback if kickoff() fails.
-        llm:         LiteLLM model string (e.g. "anthropic/claude-haiku-4-5")
-                     or a crewai.LLM instance.  Forwarded to build_crews().
-                     Ignored when use_crewai=False.
-    """
-    from mempill_showcase.frameworks.langgraph.graph import build_graph
-
+    """Backward-compat shim for build_langgraph().  Delegates to build_app()."""
     adapter = build_mempill_adapter(in_memory=in_memory)
-    tools = build_tools(adapter)
-
-    crews = None
-    if use_crewai:
-        from mempill_showcase.frameworks.crewai.crews import build_crews
-        crews = build_crews(adapter=adapter, tools=tools, llm=llm)
-
-    app = build_graph(adapter=adapter, tools=tools, classifier=classifier, crews=crews)
-    return app, adapter
-
-
-# ── W9: build_app_from_settings (NAIVE_MODE toggle) ──────────────────────────
-
-def build_app_from_settings(settings=None):
-    """W9 settings-driven factory: select adapter based on NAIVE_MODE.
-
-    Args:
-        settings: a Settings instance (or compatible object with .naive_mode).
-                  If None, loads from environment via get_settings().
-
-    Returns:
-        (app, adapter) — compiled LangGraph app + the chosen adapter.
-
-    Adapter selection:
-        settings.naive_mode=False (default) → MempillAdapter (bi-temporal, oracle-backed)
-        settings.naive_mode=True            → NaiveAdapter (last-write-wins, no bi-temporal)
-
-    Example — default (mempill):
-        app, adapter = build_app_from_settings()
-        # adapter is MempillAdapter
-
-    Example — naive mode via env (NAIVE_MODE=true):
-        import os; os.environ["NAIVE_MODE"] = "true"
-        app, adapter = build_app_from_settings()
-        # adapter is NaiveAdapter — watch it misbehave
-
-    Example — explicit settings:
-        from mempill_showcase.config.settings import Settings
-        app, adapter = build_app_from_settings(Settings(naive_mode=True))
-    """
-    if settings is None:
-        from mempill_showcase.config.settings import get_settings
-        settings = get_settings()
-
-    # Wire LangSmith tracing from settings (no-op without a key)
-    from mempill_showcase.observability import configure_tracing_from_settings
-    configure_tracing_from_settings(settings)
-
-    if settings.naive_mode:
-        # Naive mode: return the NaiveAdapter without a LangGraph app.
-        # The NaiveAdapter is intentionally NOT a BiTemporalMemoryStore, so the
-        # mempill-specific LangChain tools (MempillRememberTool etc.) cannot be
-        # built against it. Callers in naive mode should interact with the adapter
-        # directly (write_claim / recall / audit) or via naive_baseline.py.
-        # We return (None, adapter) so callers can still inspect the adapter.
-        adapter = build_naive_adapter()
-        return None, adapter
-    else:
-        adapter = _adapter_from_settings(settings)
-        return build_app(adapter=adapter)
-
-
-def build_app(
-    use_crewai: bool = False,
-    classifier=None,
-    adapter=None,
-    llm=None,
-):
-    """W6 single-call factory: assemble the runnable ExecAssistant graph.
-
-    This is the canonical entry point for both deterministic (test/demo) and
-    live (API key) graph assembly.
-
-    Args:
-        use_crewai:  False (default) → deterministic shell path (no API key, CI-safe).
-                     True → inject CrewAI crews into crew_a/b/c nodes.
-        classifier:  SupervisorClassifier implementation.
-                     None (default) → MockSupervisor (deterministic, no API key).
-                     Pass LLMSupervisor(...) for the live path.
-                     The function NEVER auto-selects LLMSupervisor — the caller
-                     must explicitly opt in to avoid surprise API calls.
-        adapter:     Pre-built MempillAdapter to reuse (e.g. a pre-seeded adapter
-                     from a test or CLI). When None, a fresh in-memory adapter
-                     is created internally.
-        llm:         LiteLLM model string (e.g. "anthropic/claude-haiku-4-5") or
-                     crewai.LLM instance; forwarded to build_crews() when
-                     use_crewai=True. Ignored otherwise.
-
-    Returns:
-        (app, adapter) — compiled LangGraph app + the MempillAdapter instance.
-        The caller can use adapter to seed data, inspect state, or run
-        bi-temporal queries after the graph executes.
-
-    Example — deterministic (no API key):
-        app, adapter = build_app()
-        result = app.invoke({"user_input": "...", "agent_id": "..."}, config)
-
-    Example — live LLM supervisor:
-        from mempill_showcase.frameworks.langgraph.supervisor_node import LLMSupervisor
-        app, adapter = build_app(classifier=LLMSupervisor())
-        result = app.invoke({"user_input": "...", "agent_id": "..."}, config)
-    """
-    import os
-    from mempill_showcase.frameworks.langgraph.graph import build_graph
-
-    if adapter is None:
-        adapter = build_mempill_adapter(in_memory=True)
-
-    tools = build_tools(adapter)
-
-    crews = None
-    if use_crewai:
-        from mempill_showcase.frameworks.crewai.crews import build_crews
-        crews = build_crews(adapter=adapter, tools=tools, llm=llm)
-
-    app = build_graph(adapter=adapter, tools=tools, classifier=classifier, crews=crews)
-    return app, adapter
+    return build_app(adapter=adapter)
