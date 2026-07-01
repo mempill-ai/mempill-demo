@@ -30,6 +30,11 @@ from mempill_showcase.observability import traceable_mempill
 
 log = logging.getLogger(__name__)
 
+# Hard cap on the number of audit entries a single call can return. A natural-
+# language request for a "full audit trail" must never be able to trigger an
+# unbounded fetch against a ledger that may hold billions of records.
+_MAX_LIMIT = 200
+
 
 class AuditTrailInput(BaseModel):
     agent_id: str = Field(
@@ -38,11 +43,22 @@ class AuditTrailInput(BaseModel):
     )
     limit: int = Field(
         default=50,
-        description="Maximum number of audit entries to return (most recent first).",
+        description=(
+            f"Maximum number of audit entries to return (most recent first). "
+            f"Hard-capped at {_MAX_LIMIT} regardless of the requested value."
+        ),
     )
     claim_ref: Optional[str] = Field(
         default=None,
         description="Optional UUID to filter audit entries to a specific claim.",
+    )
+    from_tx_time: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional ISO-8601 UTC lower bound for pagination — only entries "
+            "recorded at or after this transaction time are returned. Use this "
+            "to page through a trail larger than the hard cap."
+        ),
     )
 
 
@@ -62,16 +78,23 @@ class AuditTrailTool(BaseTool):
 
     This tool reuses adapter.audit() — same logic as MempillAuditTool,
     with an optional agent_id defaulting to 'demo-agent' for convenience.
+
+    limit is hard-capped at _MAX_LIMIT: a request exceeding the cap is silently
+    clamped and the result carries a 'note' explaining the clamp, so a natural-
+    language "show me the full audit trail" can never trigger an unbounded
+    fetch. Use from_tx_time to page through a trail larger than the cap.
     """
 
     name: str = "audit_trail"
     description: str = (
         "Return the mempill audit ledger — the chronological log of every claim "
         "write, succession, contested event, and oracle resolution. "
-        "Supply optional agent_id (default 'demo-agent'), optional limit (default 50), "
-        "and optional claim_ref filter. "
+        "Supply optional agent_id (default 'demo-agent'), optional limit (default 50, "
+        f"hard-capped at {_MAX_LIMIT}), optional claim_ref filter, and optional "
+        "from_tx_time (ISO-8601 UTC) to page past the cap. "
         "Returns JSON with entry_count and an entries list (claim_ref, event_kind, "
-        "disposition, recorded_at, rationale)."
+        "disposition, recorded_at, rationale); includes a 'note' if the requested "
+        "limit was clamped."
     )
     args_schema: Type[BaseModel] = AuditTrailInput
 
@@ -85,20 +108,24 @@ class AuditTrailTool(BaseTool):
         agent_id: str = "demo-agent",
         limit: int = 50,
         claim_ref: Optional[str] = None,
+        from_tx_time: Optional[str] = None,
         **kwargs: Any,
     ) -> str:
+        clamped = limit > _MAX_LIMIT
+        effective_limit = min(limit, _MAX_LIMIT)
+
         log.debug(
-            "AuditTrailTool: agent=%s limit=%d claim_ref=%s",
-            agent_id, limit, claim_ref,
+            "AuditTrailTool: agent=%s limit=%d effective_limit=%d claim_ref=%s from_tx_time=%s",
+            agent_id, limit, effective_limit, claim_ref, from_tx_time,
         )
 
-        entries = self.adapter.audit(agent_id, limit=limit)
+        entries = self.adapter.audit(agent_id, limit=effective_limit, from_tx_time=from_tx_time)
 
         # Optionally filter to a single claim_ref
         if claim_ref:
             entries = [e for e in entries if e.claim_ref == claim_ref]
 
-        result = {
+        result: dict[str, Any] = {
             "agent_id": agent_id,
             "entry_count": len(entries),
             "entries": [
@@ -112,7 +139,13 @@ class AuditTrailTool(BaseTool):
                 for e in entries
             ],
         }
-        log.debug("AuditTrailTool returned %d entries", len(entries))
+        if clamped:
+            result["note"] = (
+                f"Requested limit {limit} exceeds the hard cap of {_MAX_LIMIT}; "
+                f"showing the {_MAX_LIMIT} most recent of the trail. "
+                "Narrow with from_tx_time or claim_ref."
+            )
+        log.debug("AuditTrailTool returned %d entries (clamped=%s)", len(entries), clamped)
         return json.dumps(result, default=str)
 
     async def _arun(
@@ -120,11 +153,13 @@ class AuditTrailTool(BaseTool):
         agent_id: str = "demo-agent",
         limit: int = 50,
         claim_ref: Optional[str] = None,
+        from_tx_time: Optional[str] = None,
         **kwargs: Any,
     ) -> str:
         return self._run(
             agent_id=agent_id,
             limit=limit,
             claim_ref=claim_ref,
+            from_tx_time=from_tx_time,
             **kwargs,
         )

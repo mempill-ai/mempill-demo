@@ -306,6 +306,41 @@ def test_live_f_point_in_time_city_early_2024(seeded_app):
 
 
 @pytest.mark.live
+def test_live_h_ceo_appointment_contests_org_seat(seeded_app):
+    """LIVE-H: a new CEO appointment is modeled as an ORG attribute and CONTESTS.
+
+    Seeded fact: acme-corp / ceo = Diane Foster (open-ended, valid_from=2021-04).
+    "Joan was appointed as Acme's CEO since Sep 2024 until Nov 2025" is a statement
+    about the ORG's leadership seat — the agent must write acme-corp/ceo="Joan"
+    (NOT joan/employer), with a bounded valid_from/valid_until, and because
+    acme-corp/ceo already holds "Diane Foster" this CONTESTS and triggers HITL.
+    """
+    app, _ = seeded_app
+    config = {"configurable": {"thread_id": "live-h-ceo-contest"}}
+
+    result = app.invoke(
+        {"messages": [HumanMessage(
+            content="Joan was appointed as Acme's CEO since Sep 2024 until Nov 2025"
+        )]},
+        config=config,
+    )
+
+    assert _has_interrupt(result), (
+        "Expected the CEO appointment to contest the incumbent (Diane Foster) and "
+        f"pause for adjudication. Last agent text: {_last_ai_text(result)!r}"
+    )
+
+    payload = _interrupt_payload(result)
+    assert payload is not None, "Interrupt payload must not be None"
+    assert payload.get("subject") == "acme-corp", (
+        f"Expected the contested write on the ORG (acme-corp), got subject={payload.get('subject')!r}"
+    )
+    assert payload.get("predicate") == "ceo", (
+        f"Expected predicate='ceo', got {payload.get('predicate')!r}"
+    )
+
+
+@pytest.mark.live
 def test_live_g_audit_trail_returns_events(seeded_app):
     """LIVE-G: audit_trail query returns non-empty event history.
 

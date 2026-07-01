@@ -603,6 +603,93 @@ class TestRememberFactTool:
         assert "disposition" in result
         assert "is_contested" in result
 
+    def test_valid_until_stores_bounded_interval(
+        self,
+        remember_fact_tool: RememberFactTool,
+        recall_subject_tool: RecallSubjectTool,
+    ) -> None:
+        """A write with valid_until produces a non-null valid_until_display on recall."""
+        raw = remember_fact_tool.invoke({
+            "agent_id": AGENT_ID,
+            "subject": "diane-foster",
+            "predicate": "acme-board-seat",
+            "value": "true",
+            "valid_from": "2024-09",
+            "valid_until": "2025-11",
+        })
+        result = json.loads(raw)
+        assert result["disposition"] in ("CommittedCheap", "Contested", "QueuedForAdjudication")
+
+        raw_subject = recall_subject_tool.invoke({"agent_id": AGENT_ID, "subject": "diane-foster"})
+        subject_result = json.loads(raw_subject)
+        facts = [f for f in subject_result["facts"] if f["predicate"] == "acme-board-seat"]
+        assert facts, "Expected the written fact to be recallable"
+        assert facts[0]["valid_until_display"] is not None, (
+            f"Expected a non-null valid_until_display, got {facts[0]}"
+        )
+        assert "2025-11" in facts[0]["valid_until_display"]
+
+    def test_open_ended_successor_still_auto_closes_incumbent(
+        self,
+        remember_fact_tool: RememberFactTool,
+        recall_subject_tool: RecallSubjectTool,
+    ) -> None:
+        """An OPEN-ENDED successor (no valid_until) still auto-closes the incumbent
+        via recall-then-close — the pre-existing succession behaviour is unchanged
+        when the new claim itself is open-ended."""
+        remember_fact_tool.invoke({
+            "agent_id": AGENT_ID,
+            "subject": "diane-foster",
+            "predicate": "title",
+            "value": "Acme CEO",
+            "valid_from": "2021-04",
+        })
+        raw = remember_fact_tool.invoke({
+            "agent_id": AGENT_ID,
+            "subject": "diane-foster",
+            "predicate": "title",
+            "value": "Acme Chair",
+            "valid_from": "2025-01",
+        })
+        result = json.loads(raw)
+        assert result["disposition"] == "CommittedCheap", (
+            f"Expected succession close to yield CommittedCheap, got {result}"
+        )
+
+        raw_subject = recall_subject_tool.invoke({"agent_id": AGENT_ID, "subject": "diane-foster"})
+        subject_result = json.loads(raw_subject)
+        titles = [f for f in subject_result["facts"] if f["predicate"] == "title"]
+        assert titles and titles[0]["value"] == "Acme Chair"
+
+    def test_bounded_challenger_against_open_incumbent_contests(
+        self,
+        remember_fact_tool: RememberFactTool,
+    ) -> None:
+        """A BOUNDED challenger (valid_until set) against an open-ended incumbent
+        must CONTEST, not silently succeed — it overlaps the incumbent's open end
+        by the engine's own non-overlap rule. This is the exact modeling that
+        makes competing fixed-term appointments (e.g. two org-role claims) surface
+        as a genuine conflict instead of being auto-closed away."""
+        remember_fact_tool.invoke({
+            "agent_id": AGENT_ID,
+            "subject": "acme-corp",
+            "predicate": "ceo",
+            "value": "Diane Foster",
+            "valid_from": "2021-04",
+        })
+        raw = remember_fact_tool.invoke({
+            "agent_id": AGENT_ID,
+            "subject": "acme-corp",
+            "predicate": "ceo",
+            "value": "Joan",
+            "valid_from": "2024-09",
+            "valid_until": "2025-11",
+        })
+        result = json.loads(raw)
+        assert result["is_contested"] is True, (
+            f"Expected a bounded challenger vs. open incumbent to contest, got {result}"
+        )
+
 
 # ── A6: GetContestedTool ─────────────────────────────────────────────────────
 
@@ -804,6 +891,64 @@ class TestAuditTrailTool:
         raw = audit_trail_tool.invoke({"agent_id": AGENT_ID})
         result = json.loads(raw)
         assert result["agent_id"] == AGENT_ID
+
+    def test_limit_clamped_to_hard_cap(
+        self,
+        audit_trail_tool: AuditTrailTool,
+        adapter: MempillAdapter,
+    ) -> None:
+        """A huge limit is clamped to _MAX_LIMIT and a 'note' explains the clamp."""
+        from mempill_showcase.tools.audit_trail_tool import _MAX_LIMIT
+
+        _seed_claims(adapter)
+        raw = audit_trail_tool.invoke({"agent_id": AGENT_ID, "limit": 1_000_000_000})
+        result = json.loads(raw)
+        assert result["entry_count"] <= _MAX_LIMIT
+        assert "note" in result, "Expected a clamp note when limit exceeds the hard cap"
+        assert str(_MAX_LIMIT) in result["note"]
+
+    def test_limit_within_cap_no_note(
+        self,
+        audit_trail_tool: AuditTrailTool,
+        adapter: MempillAdapter,
+    ) -> None:
+        """A limit within the cap does not add a clamp note."""
+        _seed_claims(adapter)
+        raw = audit_trail_tool.invoke({"agent_id": AGENT_ID, "limit": 10})
+        result = json.loads(raw)
+        assert "note" not in result
+
+    def test_from_tx_time_filters_pagination(
+        self,
+        audit_trail_tool: AuditTrailTool,
+        adapter: MempillAdapter,
+    ) -> None:
+        """from_tx_time narrows results to entries at/after that tx time."""
+        _seed_claims(adapter)
+
+        raw_all = audit_trail_tool.invoke({"agent_id": AGENT_ID, "limit": 50})
+        all_entries = json.loads(raw_all)["entries"]
+        assert all_entries, "Expected at least one audit entry after seeding"
+
+        # A far-future from_tx_time should exclude everything already recorded.
+        raw_future = audit_trail_tool.invoke({
+            "agent_id": AGENT_ID,
+            "limit": 50,
+            "from_tx_time": "2099-01-01T00:00:00Z",
+        })
+        future_entries = json.loads(raw_future)["entries"]
+        assert len(future_entries) == 0, (
+            f"Expected no entries at/after 2099, got {len(future_entries)}"
+        )
+
+        # An early from_tx_time should include everything.
+        raw_past = audit_trail_tool.invoke({
+            "agent_id": AGENT_ID,
+            "limit": 50,
+            "from_tx_time": "2000-01-01T00:00:00Z",
+        })
+        past_entries = json.loads(raw_past)["entries"]
+        assert len(past_entries) == len(all_entries)
 
 
 # ── N1: normalise_key unit tests ──────────────────────────────────────────────
