@@ -41,6 +41,15 @@ User question (free-form natural language)
  │    get_contested    — inspect conflicting facts │
  │    request_adjudication — HITL interrupt gate   │
  │    audit_trail      — compliance audit log      │
+ │                                                 │
+ │  Capabilities:                                  │
+ │    • Bounded valid-time intervals (valid_from  │
+ │      + valid_until) on remember_fact           │
+ │    • Role-holder modeling: org leadership seats │
+ │      are org attributes (acme-corp/ceo), so    │
+ │      re-appointments conflict with incumbents  │
+ │    • Audit capped at 200 entries with cursor   │
+ │      pagination (from_tx_time)                 │
  └─────────────┬───────────────────────────────────┘
                │  tool calls
                ▼

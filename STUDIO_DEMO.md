@@ -188,6 +188,48 @@ Show me the full audit trail for agent jordan-park-001
 
 ---
 
+### Turn 8 — Role-holder org modeling + bounded interval
+
+**User Input (use this exact phrasing):**
+```
+Joan was appointed as Acme's CEO since Sep 2024 until Nov 2025
+```
+
+> **Why this matters:** (1) Demonstrates bounded valid-time intervals using both `valid_from` and `valid_until`.
+> (2) Leadership seats are modeled as **org attributes** (`acme-corp/ceo = "Joan"`) NOT per-person;
+> re-appointing to the same seat **conflicts** with the incumbent (Diane Foster seeded at seed-time).
+
+**Expected behaviour:**
+1. Agent calls `recall_subject(acme-corp)` → sees ceo = "Diane Foster"
+2. Agent calls `remember_fact(subject="acme-corp", predicate="ceo", value="Joan", valid_from="2024-09", valid_until="2025-11", ...)` → `is_contested=true` (same predicate, overlapping interval)
+3. Agent calls `get_contested(acme-corp, ceo)` → sees Diane Foster (incumbent) vs Joan (challenger)
+4. Agent calls `request_adjudication(...)` → **graph PAUSES**
+5. Studio shows the **Interrupts** panel
+
+**Interrupt payload shown in Studio:**
+```
+Conflict on acme-corp/ceo:
+  Incumbent:  'Diane Foster'
+  Challenger: 'Joan'
+  Challenger interval: 2024-09 to 2025-11
+Reason: [agent's explanation]
+Which is correct? Reply: 'Affirm' (challenger wins), 'Deny' (incumbent wins), or 'Abstain' (defer).
+```
+
+**Resume with Affirm** (in a separate sub-turn, like Turn 5):
+```
+Affirm
+```
+
+**Expected after Affirm:**
+- Joan's appointment is committed with bounded `valid_from=2024-09` and `valid_until=2025-11`
+- Diane Foster's incumbent claim is superseded
+- Post-resolution recall shows `status=Resolved, value="Joan", valid_until="2025-11"`
+
+**What to verify:** Interrupts panel clears; answer confirms Joan's appointment is valid through November 2025.
+
+---
+
 ## Deny and Abstain paths (separate fresh threads)
 
 ### Deny path
