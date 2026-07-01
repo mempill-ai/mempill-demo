@@ -3,13 +3,14 @@ name = "mempill-demo"
 version = "0.1.0"
 description = "Runnable demonstration of mempill temporal-validity + console agent"
 requires-python = ">=3.12"
-# mempill is published on PyPI (>=0.2.1) and listed below.
+# mempill 0.3.0 wheel is built locally (not yet on PyPI); setup.sh force-installs
+# the local wheel. The pin below reflects the local 0.3.0 build (query_subject/valid_at/granularity).
 # mempill-mcp is NOT on PyPI (pure Python, unpublished); setup.sh path-installs it
 # from the sibling repo ../mempill/mempill-mcp/ for the optional MCP demo.
 dependencies = [
     "anthropic>=0.111,<1",
     "mcp>=1.9,<2",
-    "mempill>=0.2.1,<0.3",
+    "mempill>=0.3.0,<0.4",
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
     "rich>=13",
