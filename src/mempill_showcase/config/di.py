@@ -135,6 +135,7 @@ def build_agent_tools(adapter):
     from mempill_showcase.tools.get_contested_tool import GetContestedTool
     from mempill_showcase.tools.list_pending_adjudications_tool import ListPendingAdjudicationsTool
     from mempill_showcase.tools.mempill_recall_tool import MempillRecallTool
+    from mempill_showcase.tools.query_history_tool import QueryHistoryTool
     from mempill_showcase.tools.recall_as_of_tool import RecallAsOfTool
     from mempill_showcase.tools.recall_at_tool import RecallAtTool
     from mempill_showcase.tools.recall_subject_tool import RecallSubjectTool
@@ -157,6 +158,7 @@ def build_agent_tools(adapter):
         audit_trail_tool=AuditTrailTool(adapter=adapter),
         list_pending_adjudications_tool=ListPendingAdjudicationsTool(adapter=adapter),
         resolve_adjudication_tool=ResolveAdjudicationTool(adapter=adapter),
+        query_history_tool=QueryHistoryTool(adapter=adapter),
     )
 
 
