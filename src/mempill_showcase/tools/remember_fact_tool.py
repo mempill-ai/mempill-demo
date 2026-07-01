@@ -70,6 +70,14 @@ class RememberFactInput(BaseModel):
         default=None,
         description="World-time start (YYYY / YYYY-MM / YYYY-MM-DD / RFC3339). None = unknown.",
     )
+    valid_until: Optional[str] = Field(
+        default=None,
+        description=(
+            "World-time end (YYYY / YYYY-MM / YYYY-MM-DD / RFC3339); "
+            "None = open-ended. Supply this for a bounded interval, e.g. a "
+            "fixed-term appointment or a known end date."
+        ),
+    )
     provenance: Optional[str] = Field(
         default="UserAsserted",
         description=(
@@ -88,11 +96,15 @@ class RememberFactTool(BaseTool):
     spaces are replaced with hyphens before storage.
 
     Succession rule (preserved from MempillRememberTool):
-      If an open-ended incumbent exists for the same (subject, predicate) and the
-      new valid_from is AFTER the incumbent's start, the tool closes the old window
-      (recall-then-close pattern) and reconciles — returning CommittedCheap. Genuine
-      overlapping conflicts (same valid_from, ambiguous order) return Contested and
-      require HITL resolution.
+      If an open-ended incumbent exists for the same (subject, predicate), the new
+      claim is ALSO open-ended (no valid_until), and the new valid_from is AFTER the
+      incumbent's start, the tool closes the old window (recall-then-close pattern)
+      and reconciles — returning CommittedCheap. A BOUNDED challenger (valid_until
+      present) against an open-ended incumbent is left alone here: it overlaps by
+      the engine's own non-overlap rule and returns Contested, requiring HITL
+      resolution — this is how competing bounded appointments (e.g. two people
+      both claiming the same org role) surface as genuine conflicts instead of
+      being silently superseded.
 
     Returns JSON with claim_ref, disposition (CommittedCheap or Contested), and
     is_contested. Callers must check is_contested before trusting the write.
@@ -103,7 +115,8 @@ class RememberFactTool(BaseTool):
         "Write a new fact claim to the mempill memory engine. "
         "Accepts any free-form subject and predicate — no vocabulary check. "
         "Supply agent_id, subject, predicate, value, optional valid_from date, "
-        "optional provenance channel, and optional confidence. "
+        "optionally valid_until for a bounded interval, e.g. a fixed-term appointment "
+        "(None = open-ended), optional provenance channel, and optional confidence. "
         "Handles succession automatically: if an earlier open claim exists for the "
         "same (subject, predicate), the tool closes the prior window before writing the "
         "new claim. Returns JSON with claim_ref, disposition, and is_contested."
@@ -122,6 +135,7 @@ class RememberFactTool(BaseTool):
         predicate: str,
         value: str,
         valid_from: Optional[str] = None,
+        valid_until: Optional[str] = None,
         provenance: Optional[str] = "UserAsserted",
         confidence: float = 1.0,
         **kwargs: Any,
@@ -131,8 +145,8 @@ class RememberFactTool(BaseTool):
         prov = _build_provenance(provenance or "UserAsserted")
 
         log.debug(
-            "RememberFactTool: agent=%s subject=%s predicate=%s value=%r valid_from=%s",
-            agent_id, subject, predicate, value, valid_from,
+            "RememberFactTool: agent=%s subject=%s predicate=%s value=%r valid_from=%s valid_until=%s",
+            agent_id, subject, predicate, value, valid_from, valid_until,
         )
 
         claim = ClaimInput(
@@ -140,6 +154,7 @@ class RememberFactTool(BaseTool):
             predicate=predicate,
             value=value,
             valid_from=valid_from,
+            valid_until=valid_until,
             confidence=confidence,
             provenance=prov,
             cardinality="Functional",
@@ -147,8 +162,14 @@ class RememberFactTool(BaseTool):
         )
 
         # ── Succession encapsulation (recall-then-close) ──────────────────────
+        # Only auto-close the incumbent when the CHALLENGER is itself open-ended
+        # (a true "X replaces Y indefinitely" succession). A bounded challenger
+        # (valid_until present) against an open-ended incumbent OVERLAPS by the
+        # engine's own non_overlapping rule (open end == infinity, always >
+        # any finite start) — that is a genuine conflict, not a clean handoff,
+        # and must be left for ingest_claim/reconcile to surface as Contested.
         close_step_performed = False
-        if valid_from:
+        if valid_from and not valid_until:
             incumbent = self.adapter.recall(agent_id, subject, predicate)
             if (
                 incumbent.status == "Resolved"
@@ -220,6 +241,7 @@ class RememberFactTool(BaseTool):
         predicate: str,
         value: str,
         valid_from: Optional[str] = None,
+        valid_until: Optional[str] = None,
         provenance: Optional[str] = "UserAsserted",
         confidence: float = 1.0,
         **kwargs: Any,
@@ -230,6 +252,7 @@ class RememberFactTool(BaseTool):
             predicate=predicate,
             value=value,
             valid_from=valid_from,
+            valid_until=valid_until,
             provenance=provenance,
             confidence=confidence,
             **kwargs,

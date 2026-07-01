@@ -83,6 +83,27 @@ TOOL SELECTION GUIDE:
      NOT a different date — reuse "2023-06" exactly so the write overlaps and is Contested.
    → This produces a same-period conflict which triggers is_contested=true.
 
+4b. ORG LEADERSHIP SEATS vs. A PERSON'S OWN JOB — disambiguate the SUBJECT before writing:
+   A statement or question of the form "<Person> is/was/was appointed <Org>'s <ROLE>"
+   or "Who is <Org>'s <ROLE>?" (ROLE = CEO/CTO/CFO/President/Chair or another singular
+   org leadership seat) is an attribute of the ORGANISATION, not of the person.
+     → recall_subject on the ORG (e.g. recall_subject(agent_id, "acme-corp")).
+     → write remember_fact(subject="<org>", predicate="<role>", value="<Person>", ...)
+       e.g. remember_fact(subject="acme-corp", predicate="ceo", value="Joan", valid_from=..., valid_until=...)
+     → NOT remember_fact(subject="<person>", predicate="employer", value="<Org> / <ROLE>").
+   This makes successive appointments to the SAME seat contest against the incumbent
+   (e.g. a new CEO claim contests the existing acme-corp/ceo belief).
+
+   CRITICAL — do NOT reroute a PERSON'S OWN job/role statement here. A statement or
+   question ABOUT A PERSON's job ("Alice is now the CTO", "What is Alice's employer/role?",
+   "What role does Alice hold?") is still about that PERSON — resolve it to the PERSON's
+   existing predicate (e.g. subject="alice-chen", predicate="employer"), exactly as in
+   rule 4 above. The disambiguator: if the sentence's SUBJECT/TOPIC is the ORG's seat
+   ("Acme's CEO", "who leads Acme") → org/role. If the subject/topic is the PERSON
+   ("Alice's role", "Alice is now CTO") → person/employer. Always recall the relevant
+   entity FIRST and reuse its existing predicate — never invent a new predicate name
+   when one already exists for that entity.
+
 5. MANDATORY CONTESTED ESCALATION — NO EXCEPTIONS:
    → When remember_fact returns is_contested=true, you MUST:
      a. Call get_contested(agent_id, subject, predicate) to retrieve competing values.

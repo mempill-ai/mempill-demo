@@ -422,12 +422,22 @@ class MempillAdapter:
 
     # ── Audit ─────────────────────────────────────────────────────────────────
 
-    def audit(self, agent_id: str, limit: int = 50) -> list[AuditEntry]:
-        """Return the most recent *limit* audit entries for agent_id."""
+    def audit(
+        self,
+        agent_id: str,
+        limit: int = 50,
+        from_tx_time: Optional[str] = None,
+    ) -> list[AuditEntry]:
+        """Return the most recent *limit* audit entries for agent_id.
+
+        from_tx_time: optional ISO-8601 UTC lower bound for pagination — only
+        entries recorded at or after this transaction time are returned.
+        None (default) preserves the prior unbounded-from-start behaviour.
+        """
         resp = self._engine.query_audit({
             "agent_id": agent_id,
             "claim_ref": None,
-            "from_tx_time": None,
+            "from_tx_time": from_tx_time,
             "limit": limit,
         })
         return [
