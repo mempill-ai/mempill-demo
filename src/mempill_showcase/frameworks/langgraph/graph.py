@@ -74,14 +74,22 @@ TOOL SELECTION GUIDE:
 4. To record a CORRECTION to an existing fact ("Alice is actually CTO, not VP Engineering, since the same date"):
    → FIRST call recall_subject to find the existing predicate for this type of fact.
    → Reuse the SAME predicate name and value FORMAT already stored. Do NOT split or rename.
-   → For a correction (same start date, wrong value), ALWAYS set valid_from to EXACTLY the
-     incumbent's valid_from_display as shown in recall results.
+   → For valid_from, use the date AND granularity the USER stated — do NOT add precision
+     the user didn't give. "June 2023" → valid_from="2023-06" (month). A bare year → "YYYY"
+     (year). A full date ("June 15, 2023") → "2023-06-15" (day). NEVER pad a month or year
+     into a fabricated day-precision date.
+   → You do NOT need to match the incumbent's exact stored date for the write to be
+     recognised as a correction. The engine flags the conflict because the two claims are
+     BOTH open-ended (no valid_until) — any two open-ended intervals overlap regardless of
+     their exact start dates. Copying the incumbent's exact date is unnecessary and would
+     silently corrupt the granularity the user actually stated.
    → Example: recall shows predicate="employer", value="Acme Corp / VP Engineering",
      valid_from_display="2023-06". User says "actually CTO since June 2023". Write:
        remember_fact(subject="alice-chen", predicate="employer", value="Acme Corp / CTO",
                      valid_from="2023-06")
-     NOT a different date — reuse "2023-06" exactly so the write overlaps and is Contested.
-   → This produces a same-period conflict which triggers is_contested=true.
+     "2023-06" here is the user's OWN stated month, at the user's own granularity — not a
+     copy of the incumbent's date. Both claims are open-ended, so this overlaps the
+     incumbent and correctly triggers is_contested=true regardless of exact date match.
 
 4b. ORG LEADERSHIP SEATS vs. A PERSON'S OWN JOB — disambiguate the SUBJECT before writing:
    A statement or question of the form "<Person> is/was/was appointed <Org>'s <ROLE>"
@@ -137,6 +145,10 @@ RULES:
   ("Alice is CTO of Acme" updates predicate="employer" with value="Acme Corp / CTO")
 - CRITICAL: if remember_fact returns is_contested=true, you MUST call request_adjudication.
   Never skip this step. Never answer using an unresolved contested value.
+- When stating a date back to the user, use the SAME granularity as stored/stated:
+  month-precision → say "June 2023" (not "June 1, 2023"); year-precision → say "2023"
+  (not a fabricated month or day). NEVER fabricate a day or month the user did not
+  provide — if the user said "June 2023", the fact is month-precision; report it as such.
 """
 
 # ── ShowcaseTools NamedTuple (kept for DI wiring compatibility) ───────────────
