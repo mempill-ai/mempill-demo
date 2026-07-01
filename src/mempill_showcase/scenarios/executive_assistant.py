@@ -431,12 +431,60 @@ def run_scenario(
 
 # ── CLI entry ─────────────────────────────────────────────────────────────────
 
+def _reset_db(db_path: str | None, console: object) -> None:
+    """Delete db_path and any SQLite sidecar files (-wal, -shm) if db_path is set.
+
+    Guards:
+      - Only deletes db_path itself and the two well-known SQLite sidecar suffixes.
+      - Never deletes a path outside the configured db_path's parent directory.
+      - When db_path is None (in-memory store), logs a no-op message.
+    """
+    import pathlib
+
+    _print = getattr(console, "print", print)
+
+    if not db_path:
+        _print("[dim]--reset-db: in-memory store — nothing to delete.[/dim]")
+        return
+
+    base = pathlib.Path(db_path).resolve()
+    for suffix in ("", "-wal", "-shm"):
+        target = pathlib.Path(str(base) + suffix)
+        if target.exists():
+            target.unlink()
+            _print(f"[yellow]--reset-db: deleted {target}[/yellow]")
+        else:
+            _print(f"[dim]--reset-db: {target} not found, skipping.[/dim]")
+    _print(f"[green]--reset-db: reset DB at {base}[/green]")
+
+
 def main() -> None:
     """CLI entry point: mempill-showcase console command.
 
     Runs the 6-beat executive-assistant scenario through the ReAct agent
     and prints a summary. Requires ANTHROPIC_API_KEY in the environment or .env.
+
+    Flags:
+      --reset-db   Delete the file-backed DB (and -wal/-shm sidecars) before
+                   running so the demo starts from a clean seed. For an in-memory
+                   store this is a no-op.
     """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="mempill Executive Assistant Scenario (6-beat ReAct agent)"
+    )
+    parser.add_argument(
+        "--reset-db",
+        action="store_true",
+        default=False,
+        help=(
+            "Delete the file-backed DB (MEMPILL_DB_PATH) before running so the "
+            "demo starts from a clean seed. For an in-memory store this is a no-op."
+        ),
+    )
+    args = parser.parse_args()
+
     from mempill_showcase.config.bootstrap import bootstrap
     bootstrap()
 
@@ -450,6 +498,10 @@ def main() -> None:
 
     console = Console()
     _settings = get_settings()
+
+    if args.reset_db:
+        _reset_db(_settings.mempill_db_path, console)
+
     console.print()
     console.print(Panel(
         "[bold white]mempill Executive Assistant Scenario[/bold white]\n"
