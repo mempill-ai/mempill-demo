@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from mempill import ProvenanceLabel
 from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
 from mempill_showcase.core.domain.models import ClaimInput
+from mempill_showcase.core.domain.dates import is_later
 from mempill_showcase.core.domain.normalise import normalise_key
 from mempill_showcase.observability import traceable_mempill
 
@@ -156,7 +157,7 @@ class RememberFactTool(BaseTool):
                 and incumbent.claim_ref
             ):
                 inc_display = incumbent.vt_start_display or ""
-                if inc_display and inc_display < valid_from and incumbent.value != value:
+                if inc_display and is_later(valid_from, inc_display) and incumbent.value != value:
                     log.debug(
                         "RememberFactTool: closing open incumbent %s valid_from=%s at %s",
                         incumbent.claim_ref, inc_display, valid_from,

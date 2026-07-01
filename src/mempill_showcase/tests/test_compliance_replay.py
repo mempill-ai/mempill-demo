@@ -50,8 +50,12 @@ def compliance_report():
     adapter = build_mempill_adapter(in_memory=True, oracle_backed=True)
     load_seed_claims(adapter, AGENT_ID)
 
-    # Capture Austin city claim's tx time BEFORE the NYC write
+    # Capture Austin city claim's tx time BEFORE the NYC write.
+    # Lookup is deterministic: match by claim_ref, not by substring-scanning rationale.
     austin_belief = adapter.recall(AGENT_ID, "alice-chen", "city")
+    assert austin_belief.claim_ref, (
+        "Austin city belief has no claim_ref — seed may not have run correctly."
+    )
     austin_ref = austin_belief.claim_ref
     all_audit = adapter.audit(AGENT_ID, limit=20)
     compliance_tx_time = None
@@ -59,6 +63,14 @@ def compliance_report():
         if e.claim_ref == austin_ref:
             compliance_tx_time = e.recorded_at
             break
+
+    # Fail loudly if the Austin tx-time was not found — a None here would silently
+    # defeat the fixture's purpose of proving point-in-time correctness.
+    assert compliance_tx_time is not None, (
+        f"Austin city claim (ref={austin_ref!r}) not found in audit log "
+        f"({len(all_audit)} entries). Cannot prove bi-temporal axis without a "
+        f"deterministic compliance tx-time."
+    )
 
     # Small sleep to guarantee NYC write gets a strictly later tx timestamp
     _time.sleep(0.005)
