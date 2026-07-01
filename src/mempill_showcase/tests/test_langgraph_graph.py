@@ -61,12 +61,12 @@ class TestBuildGraph:
         assert compiled is not None, "build_graph must return a compiled app"
 
     def test_tools_is_showcase_tools(self, tools):
-        """build_agent_tools returns a ShowcaseTools NamedTuple with 7 tools."""
+        """build_agent_tools returns a ShowcaseTools NamedTuple with 9 tools."""
         assert isinstance(tools, ShowcaseTools)
-        assert len(tools) == 7, f"ShowcaseTools must have 7 tools, got {len(tools)}"
+        assert len(tools) == 9, f"ShowcaseTools must have 9 tools, got {len(tools)}"
 
     def test_all_tool_names_are_unique(self, tools):
-        """All 7 tool names are distinct."""
+        """All 9 tool names are distinct."""
         names = [t.name for t in tools]
         assert len(set(names)) == len(names), f"Duplicate tool names: {names}"
 

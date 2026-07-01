@@ -12,13 +12,22 @@ Design (W7 — real oracle):
   - On `Command(resume=<verdict>)` the graph resumes inside `hitl_node`.
     The node receives the verdict from `interrupt()` return value.
   - With an oracle-backed engine:
-      1. adapter.list_pending_adjudications(agent_id) → finds the handle_id for
-         the subject/predicate conflict in the oracle queue.
-      2. adapter.submit_adjudication(agent_id, handle_id, verdict) → engine resolves:
-           Affirm → challenger CommittedCheap, incumbent Superseded.
-           Deny   → challenger Superseded, incumbent CommittedCheap.
-      3. Post-resolution recall via recall_tool confirms Resolved status.
+      1. adapter.list_pending_adjudications(agent_id) → finds ALL pending handles
+         for the subject/predicate conflict in the oracle queue (there may be
+         more than one stacked row — see RESEARCH_STALE_ADJUDICATIONS.md).
+      2. QUEUE-COLLAPSE: determine the winning value from the human verdict on
+         the decided row, then Affirm the row whose challenger == winner and
+         Deny every OTHER pending row on that subject-line. This collapses the
+         whole stack to a SINGLE live belief instead of leaving orphaned pending
+         rows or producing multiple live winners.
+      3. Post-resolution sweep asserts zero pending rows remain for the
+         subject-line; any residual is defensively Denied.
+      4. Post-resolution recall via recall_tool confirms Resolved status.
   - With a non-oracle engine (open_in_memory), falls back to reconcile().
+  - Stale rows the CURRENT interrupt does not know about (never surfaced by any
+    live interrupt) can be listed via the list_pending_adjudications tool and
+    resolved directly via the resolve_adjudication tool, which applies the same
+    queue-collapse policy.
   - After resolution the node recalls the resolved belief, stores it in
     `hitl_resolved_belief`, and clears `pending_contested`.
   - The W6 observability `mempill.contested` span is emitted before the interrupt.
@@ -333,17 +342,30 @@ def _resolve_via_oracle_or_reconcile(
     Returns:
         (winning_value, disposition) where winning_value is the value of the winning
         claim (challenger for Affirm, incumbent for Deny) and disposition is the
-        engine disposition string (e.g. "CommittedCheap").  Both may be None if the
-        oracle path was not taken or the entry was not found.
+        engine disposition string (e.g. "CommittedCheap") for the FIRST-decided
+        handle.  Both may be None if the oracle path was not taken or the entry
+        was not found.
 
     Oracle path (preferred — open_oracle_in_memory engines):
       1. adapter.list_pending_adjudications(agent_id) → list of pending entries.
-      2. Find the entry whose subject/predicate matches.
-         From the entry: capture incumbent_value and challenger_value.
-      3. adapter.submit_adjudication(agent_id, handle_id, verdict) → disposition.
-      4. Derive winning_value from verdict:
-           Affirm → challenger wins → winning_value = challenger_value
-           Deny   → incumbent wins → winning_value = incumbent_value
+      2. Find ALL entries whose subject/predicate matches (multiple writes can
+         queue multiple pending rows when a conflict is written more than once
+         before resolution — every row is frozen against the SAME original
+         incumbent, see tasks/20-multiagent-showcase/RESEARCH_STALE_ADJUDICATIONS.md).
+      3. QUEUE-COLLAPSE POLICY (fixes stale/orphaned pending rows):
+         a. Determine the WINNER from the human verdict on the row that matches
+            the current interrupt's claim_refs (or the first matching row if
+            claim_refs don't disambiguate):
+              Affirm → winner = that row's challenger_value
+              Deny   → winner = that row's incumbent_value
+         b. For EVERY pending row on this (agent_id, subject, predicate):
+              - the row whose challenger_value == winner is Affirmed
+              - every OTHER row is Denied (its stale challenger is superseded)
+            This collapses the whole fan of `(incumbent, X)` rows to a SINGLE
+            live belief instead of producing multiple live winners or leaving
+            orphaned pending rows (see RESEARCH doc Q2/Q3).
+      4. Post-resolution sweep: re-list pending for this subject/predicate and
+         Deny any residual rows (defensive; should normally be zero after step 3).
 
     Fallback (non-oracle engines):
       adapter.reconcile(agent_id, [[subject, predicate]]).
@@ -356,41 +378,78 @@ def _resolve_via_oracle_or_reconcile(
     if oracle_available:
         try:
             pending = adapter.list_pending_adjudications(agent_id)
-            # Collect ALL handles for this subject/predicate (multiple writes can queue
-            # multiple entries when a conflict is written more than once before resolution)
-            matching_entries: list[dict] = []
-            for entry in pending:
-                if entry.get("subject") == subject and entry.get("predicate") == predicate:
-                    h = entry.get("handle_id")
-                    if h:
-                        matching_entries.append(entry)
+            matching_entries: list[dict] = [
+                entry for entry in pending
+                if entry.get("subject") == subject
+                and entry.get("predicate") == predicate
+                and entry.get("handle_id")
+            ]
 
             if matching_entries:
-                # Use the FIRST matching entry to determine the winning value.
-                # challenger_value/incumbent_value are direct fields in the pending entry.
-                first_entry = matching_entries[0]
-                incumbent_value: str | None = first_entry.get("incumbent_value")
-                challenger_value: str | None = first_entry.get("challenger_value")
-                winning_value: str | None = challenger_value if verdict == "Affirm" else incumbent_value
+                # Prefer the entry whose challenger claim_ref matches the current
+                # interrupt's claim_refs (the row this verdict was actually meant
+                # for); fall back to the first matching entry when claim_refs are
+                # absent or don't match anything (e.g. legacy callers).
+                decided_entry = matching_entries[0]
+                if claim_refs:
+                    for entry in matching_entries:
+                        payload = entry.get("request_payload") or {}
+                        challenger_ref = (payload.get("challenger") or {}).get("claim_ref")
+                        if challenger_ref and challenger_ref in claim_refs:
+                            decided_entry = entry
+                            break
 
-                last_disposition: str | None = None
+                incumbent_value: str | None = decided_entry.get("incumbent_value")
+                challenger_value: str | None = decided_entry.get("challenger_value")
+                winning_value: str | None = (
+                    challenger_value if verdict == "Affirm" else incumbent_value
+                )
+
+                first_disposition: str | None = None
                 for entry in matching_entries:
                     handle_id = entry["handle_id"]
+                    entry_challenger = entry.get("challenger_value")
+                    # Queue-collapse: Affirm the row whose challenger IS the
+                    # winner; Deny every other row on this subject-line so the
+                    # belief converges to exactly one live claim.
+                    row_verdict = "Affirm" if entry_challenger == winning_value else "Deny"
                     try:
-                        result = adapter.submit_adjudication(agent_id, handle_id, verdict)
-                        last_disposition = result.get("disposition")
+                        result = adapter.submit_adjudication(agent_id, handle_id, row_verdict)
+                        disposition = result.get("disposition")
+                        if first_disposition is None:
+                            first_disposition = disposition
                         log.info(
-                            "hitl_node: oracle submit handle=%s verdict=%s → disposition=%s "
+                            "hitl_node: oracle submit handle=%s row_verdict=%s → disposition=%s "
                             "incumbent=%r challenger=%r winning=%r",
-                            handle_id[:8], verdict, last_disposition,
-                            incumbent_value, challenger_value, winning_value,
+                            handle_id[:8], row_verdict, disposition,
+                            incumbent_value, entry_challenger, winning_value,
                         )
                     except Exception as sub_exc:
                         log.warning(
                             "hitl_node: oracle submit handle=%s failed: %s",
                             handle_id[:8], sub_exc,
                         )
-                return winning_value, last_disposition  # Oracle path complete
+
+                # Post-resolution sweep: assert zero pending rows remain for this
+                # subject-line; Deny any residual (defensive — should be a no-op).
+                try:
+                    residual = adapter.list_pending_adjudications(agent_id)
+                    for entry in residual:
+                        if entry.get("subject") == subject and entry.get("predicate") == predicate:
+                            residual_handle = entry.get("handle_id")
+                            adapter.submit_adjudication(agent_id, residual_handle, "Deny")
+                            log.warning(
+                                "hitl_node: residual pending row swept (Deny) handle=%s for %s/%s",
+                                residual_handle[:8] if residual_handle else residual_handle,
+                                subject, predicate,
+                            )
+                except Exception as sweep_exc:
+                    log.warning(
+                        "hitl_node: post-resolution sweep failed for %s/%s: %s",
+                        subject, predicate, sweep_exc,
+                    )
+
+                return winning_value, first_disposition  # Oracle path complete
             else:
                 log.info(
                     "hitl_node: oracle queue has no pending entry for %s/%s "

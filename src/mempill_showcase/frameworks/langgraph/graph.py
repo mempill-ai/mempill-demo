@@ -41,11 +41,13 @@ if TYPE_CHECKING:
     from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
     from mempill_showcase.tools.audit_trail_tool import AuditTrailTool
     from mempill_showcase.tools.get_contested_tool import GetContestedTool
+    from mempill_showcase.tools.list_pending_adjudications_tool import ListPendingAdjudicationsTool
     from mempill_showcase.tools.recall_as_of_tool import RecallAsOfTool
     from mempill_showcase.tools.recall_at_tool import RecallAtTool
     from mempill_showcase.tools.recall_subject_tool import RecallSubjectTool
     from mempill_showcase.tools.remember_fact_tool import RememberFactTool
     from mempill_showcase.tools.request_adjudication_tool import RequestAdjudicationTool
+    from mempill_showcase.tools.resolve_adjudication_tool import ResolveAdjudicationTool
 
 log = logging.getLogger(__name__)
 
@@ -132,6 +134,18 @@ TOOL SELECTION GUIDE:
 8. For compliance/audit queries ("show me all write events"):
    → call audit_trail(agent_id, limit)
 
+9. To see ALL outstanding conflicts awaiting a human decision (including stale
+   ones that never triggered a live interrupt, e.g. a second/third contested
+   write on the same subject/predicate before the first was resolved):
+   → call list_pending_adjudications(agent_id)
+
+10. To resolve a SPECIFIC pending adjudication by its handle_id (from
+    list_pending_adjudications), without needing a live interrupt:
+   → call resolve_adjudication(agent_id, handle_id, verdict)
+   → this automatically collapses any OTHER pending rows on the same
+     subject/predicate so the belief converges to a single winner with zero
+     stale pending rows left behind.
+
 RULES:
 - Always consult memory before answering; never invent facts.
 - agent_id is always "jordan-park-001" unless the user specifies otherwise.
@@ -155,7 +169,7 @@ RULES:
 
 
 class ShowcaseTools(NamedTuple):
-    """7 agent tools needed by the ReAct graph."""
+    """9 agent tools needed by the ReAct graph."""
     recall_subject_tool: "RecallSubjectTool"
     recall_at_tool: "RecallAtTool"
     recall_as_of_tool: "RecallAsOfTool"
@@ -163,6 +177,8 @@ class ShowcaseTools(NamedTuple):
     get_contested_tool: "GetContestedTool"
     request_adjudication_tool: "RequestAdjudicationTool"
     audit_trail_tool: "AuditTrailTool"
+    list_pending_adjudications_tool: "ListPendingAdjudicationsTool"
+    resolve_adjudication_tool: "ResolveAdjudicationTool"
 
 
 # ── Sentinel for checkpointer default ────────────────────────────────────────
