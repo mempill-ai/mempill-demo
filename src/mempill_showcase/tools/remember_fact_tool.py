@@ -31,19 +31,10 @@ from pydantic import BaseModel, Field
 from mempill import ProvenanceLabel
 from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
 from mempill_showcase.core.domain.models import ClaimInput
+from mempill_showcase.core.domain.normalise import normalise_key
 from mempill_showcase.observability import traceable_mempill
 
 log = logging.getLogger(__name__)
-
-
-def _normalise_subject(s: str) -> str:
-    """Soft normalisation: strip → lowercase → spaces→hyphens."""
-    return s.strip().lower().replace(" ", "-")
-
-
-def _normalise_predicate(p: str) -> str:
-    """Soft normalisation: strip → lowercase → spaces→hyphens."""
-    return p.strip().lower().replace(" ", "-")
 
 
 def _build_provenance(channel: str) -> dict:
@@ -134,8 +125,8 @@ class RememberFactTool(BaseTool):
         confidence: float = 1.0,
         **kwargs: Any,
     ) -> str:
-        subject = _normalise_subject(subject)
-        predicate = _normalise_predicate(predicate)
+        subject = normalise_key(subject)
+        predicate = normalise_key(predicate)
         prov = _build_provenance(provenance or "UserAsserted")
 
         log.debug(

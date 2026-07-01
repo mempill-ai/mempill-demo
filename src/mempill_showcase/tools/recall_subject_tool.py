@@ -27,6 +27,7 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
+from mempill_showcase.core.domain.normalise import normalise_key
 from mempill_showcase.observability import traceable_mempill
 
 log = logging.getLogger(__name__)
@@ -102,8 +103,7 @@ class RecallSubjectTool(BaseTool):
         as_of_tx_time: Optional[str] = None,
         **kwargs: Any,
     ) -> str:
-        # Soft normalisation: strip + lowercase + spaces→hyphens
-        subject = subject.strip().lower().replace(" ", "-")
+        subject = normalise_key(subject)
 
         log.debug(
             "RecallSubjectTool: agent=%s subject=%s valid_at=%s as_of=%s",
