@@ -92,5 +92,16 @@ class MempillAuditTool(BaseTool):
         log.debug("MempillAuditTool returned %d entries", len(entries))
         return json.dumps(result, default=str)
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> str:
-        raise NotImplementedError("MempillAuditTool does not support async")
+    async def _arun(
+        self,
+        agent_id: str,
+        limit: int = 50,
+        claim_ref: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        return self._run(
+            agent_id=agent_id,
+            limit=limit,
+            claim_ref=claim_ref,
+            **kwargs,
+        )

@@ -213,5 +213,24 @@ class RememberFactTool(BaseTool):
         log.debug("RememberFactTool result: %s", result)
         return json.dumps(result)
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> str:
-        raise NotImplementedError("RememberFactTool does not support async")
+    async def _arun(
+        self,
+        agent_id: str,
+        subject: str,
+        predicate: str,
+        value: str,
+        valid_from: Optional[str] = None,
+        provenance: Optional[str] = "UserAsserted",
+        confidence: float = 1.0,
+        **kwargs: Any,
+    ) -> str:
+        return self._run(
+            agent_id=agent_id,
+            subject=subject,
+            predicate=predicate,
+            value=value,
+            valid_from=valid_from,
+            provenance=provenance,
+            confidence=confidence,
+            **kwargs,
+        )

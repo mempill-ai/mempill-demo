@@ -148,5 +148,20 @@ class MempillRecallTool(BaseTool):
 
         return json.dumps(result, default=str)
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> str:
-        raise NotImplementedError("MempillRecallTool does not support async")
+    async def _arun(
+        self,
+        agent_id: str,
+        subject: str,
+        predicate: str,
+        valid_at: Optional[str] = None,
+        as_of_tx_time: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        return self._run(
+            agent_id=agent_id,
+            subject=subject,
+            predicate=predicate,
+            valid_at=valid_at,
+            as_of_tx_time=as_of_tx_time,
+            **kwargs,
+        )

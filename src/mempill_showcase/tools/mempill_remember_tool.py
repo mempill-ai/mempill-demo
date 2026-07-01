@@ -272,5 +272,28 @@ class MempillRememberTool(BaseTool):
 
         return json.dumps(result)
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> str:
-        raise NotImplementedError("MempillRememberTool does not support async")
+    async def _arun(
+        self,
+        agent_id: str,
+        subject: str,
+        predicate: str,
+        value: str,
+        valid_from: Optional[str] = None,
+        confidence: float = 1.0,
+        provenance_channel: str = "UserAsserted",
+        cardinality: str = "Functional",
+        criticality: str = "Medium",
+        **kwargs: Any,
+    ) -> str:
+        return self._run(
+            agent_id=agent_id,
+            subject=subject,
+            predicate=predicate,
+            value=value,
+            valid_from=valid_from,
+            confidence=confidence,
+            provenance_channel=provenance_channel,
+            cardinality=cardinality,
+            criticality=criticality,
+            **kwargs,
+        )

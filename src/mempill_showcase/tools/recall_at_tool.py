@@ -109,5 +109,18 @@ class RecallAtTool(BaseTool):
         log.debug("RecallAtTool result: %s", result)
         return json.dumps(result, default=str)
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> str:
-        raise NotImplementedError("RecallAtTool does not support async")
+    async def _arun(
+        self,
+        agent_id: str,
+        subject: str,
+        predicate: str,
+        valid_at: str,
+        **kwargs: Any,
+    ) -> str:
+        return self._run(
+            agent_id=agent_id,
+            subject=subject,
+            predicate=predicate,
+            valid_at=valid_at,
+            **kwargs,
+        )
