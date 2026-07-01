@@ -383,6 +383,43 @@ class MempillAdapter:
         )
         return result
 
+    # ── Read path — subject enumeration ──────────────────────────────────────
+
+    def query_subject(
+        self,
+        agent_id: str,
+        subject: str,
+        valid_at: Optional[str] = None,
+        as_of_tx_time: Optional[str] = None,
+    ) -> list[dict]:
+        """Return all known predicate/value pairs for a subject.
+
+        Delegates to engine.query_subject({agent_id, subject, valid_at?, as_of_tx_time?}).
+        The engine returns one entry per stored predicate with the same bi-temporal
+        axes as query_memory — so callers can ask "what was everything true about
+        Alice on 2024-01-01?" without knowing her predicate vocabulary in advance.
+
+        valid_at=None → current valid-time (most recent open claim per predicate).
+        as_of_tx_time=None → latest recorded facts (all ingested claims visible).
+
+        Returns a list of dicts, each containing:
+          predicate, value, status, valid_from_display, valid_until_display,
+          provenance, claim_ref, conf.
+        """
+        log.debug(
+            "query_subject agent=%s subject=%s valid_at=%s as_of=%s",
+            agent_id, subject, valid_at, as_of_tx_time,
+        )
+        req: dict[str, Any] = {"agent_id": agent_id, "subject": subject}
+        if valid_at is not None:
+            req["valid_at"] = valid_at
+        if as_of_tx_time is not None:
+            req["as_of_tx_time"] = as_of_tx_time
+
+        result: list[dict] = self._engine.query_subject(req)
+        log.debug("query_subject returned %d entries for subject=%s", len(result), subject)
+        return result
+
     # ── Audit ─────────────────────────────────────────────────────────────────
 
     def audit(self, agent_id: str, limit: int = 50) -> list[AuditEntry]:
