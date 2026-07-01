@@ -7,7 +7,7 @@ contains seed data for the given agent_id and skips if present — safe for both
 in-memory and file-backed (persistent) engines.
 
 Seed claims (from SCENARIO.md § System Starting State):
-  alice-chen  / employer           = Acme Corp / VP Engineering  valid_from=2023-06-01  UserAsserted
+  alice-chen  / employer           = Acme Corp / VP Engineering  valid_from=2023-06     UserAsserted
   alice-chen  / city               = Austin TX                    valid_from=2023-06-01  UserAsserted
   alice-chen  / dietary_restriction= vegetarian                   valid_from=2024-01-01  UserAsserted
   bob-liu     / employer           = Meridian Ventures / Partner  valid_from=2022-09-01  UserAsserted
@@ -47,7 +47,7 @@ _SEED_CLAIMS = [
     # alice-chen/city is bounded at valid_until=2025-02 (Austin is the Day-0 belief;
     # valid_until is set to the known move date so the successor NYC claim at 2025-02
     # does not overlap → CommittedCheap succession without oracle conflict).
-    ("alice-chen",  "employer",            "Acme Corp / VP Engineering",   "2023-06-01",  None,       "UserAsserted"),
+    ("alice-chen",  "employer",            "Acme Corp / VP Engineering",   "2023-06",     None,       "UserAsserted"),
     ("alice-chen",  "city",                "Austin TX",                    "2023-06-01",  "2025-02",  "UserAsserted"),
     ("alice-chen",  "dietary_restriction", "vegetarian",                   "2024-01-01",  None,       "UserAsserted"),
     ("bob-liu",     "employer",            "Meridian Ventures / Partner",  "2022-09-01",  None,       "UserAsserted"),
