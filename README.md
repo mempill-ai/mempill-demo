@@ -2,15 +2,16 @@
 
 A runnable demonstration of mempill's bi-temporal memory engine inside a multi-agent system.
 The primary deliverable is `mempill_showcase` — a production-style reference app showing
-LangGraph (CEO + HITL) → CrewAI crews → one shared mempill `MemoryPort`, with a naive
-last-write-wins adapter for contrast and a full compliance audit replay.
+a single free-form ReAct agent (`create_react_agent`) with 7 memory tools + a thin LangGraph
+shell for durable HITL `interrupt()`, backed by mempill bi-temporal memory, with a naive
+last-write-wins adapter (`NaiveAdapter`) for contrast and a full compliance audit replay.
 
 ---
 
 ## Quickstart — mempill_showcase
 
-**Python 3.12 required.** mempill is installed from a local prerelease wheel
-(not the PyPI version) until mempill 0.3.0 publishes. `scripts/setup.sh` handles this.
+**Python 3.12 required.** mempill is installed from a local prerelease wheel (0.2.1, built
+from source — not on PyPI). `scripts/setup.sh` handles this.
 
 ```bash
 git clone <this-repo> mempill-demo
@@ -18,7 +19,7 @@ cd mempill-demo
 bash scripts/setup.sh        # creates .venv, installs prerelease mempill wheel + all extras
 ```
 
-Run the 8-beat executive-assistant scenario (no API key, deterministic):
+Run the 6-beat executive-assistant scenario (B-01..B-06) via the free-form ReAct agent:
 
 ```bash
 .venv/bin/mempill-showcase       # full scenario: ingestion, conflict, HITL, bi-temporal recall
@@ -26,29 +27,30 @@ Run the 8-beat executive-assistant scenario (no API key, deterministic):
 .venv/bin/mempill-showcase-audit    # compliance audit: tx-time replay + full provenance ledger
 ```
 
-Run the test suite (238 tests, no API key, no network):
+Run the test suite (304 deterministic + 12 live tests):
 
 ```bash
-.venv/bin/python -m pytest src/mempill_showcase/tests/ -v -m "not live"
-# Expected: 238 passed
+.venv/bin/python -m pytest -m "not live" -q
+# Expected: 304 passed
 ```
 
-See [SHOWCASE.md](SHOWCASE.md) for the full architecture, 8-beat scenario walkthrough,
+See [SHOWCASE.md](SHOWCASE.md) for the full architecture, 6-beat scenario walkthrough,
 design decisions, and bi-temporal query examples.
 
 ---
 
 ## Architecture (one line)
 
-LangGraph CEO supervisor + HITL interrupt → three CrewAI crews (Ingestion / Recall / Audit)
-→ one shared mempill `MemoryPort`; naive-vs-mempill adapter toggle via `NAIVE_MODE=true`.
+A single free-form ReAct agent (`create_react_agent`) with 7 memory tools + a thin LangGraph
+shell for durable HITL `interrupt()`, backed by mempill bi-temporal memory;
+naive-vs-mempill adapter toggle via `NAIVE_MODE=true`.
 
 ---
 
 ## Console agent (mempill_demo)
 
 A simpler REPL demonstrating mempill's three core acts (temporal validity, contested conflict,
-amplification firewall) without LangGraph or CrewAI:
+amplification firewall) without any multi-agent framework:
 
 ```bash
 .venv/bin/python -m mempill_demo --scenario    # auto-play 3-act story then REPL
@@ -63,8 +65,8 @@ amplification firewall) without LangGraph or CrewAI:
 | Variable | Default | Effect |
 |---|---|---|
 | `NAIVE_MODE` | `false` | `true` → use NaiveAdapter (last-write-wins, no bi-temporal) |
-| `ANTHROPIC_API_KEY` | — | Required for live LLM supervisor; absent → MockSupervisor |
-| `ANTHROPIC_MODEL` | `claude-3-5-haiku-20241022` | Model for LLMSupervisor |
+| `ANTHROPIC_API_KEY` | — | Required for the free-form ReAct agent LLM (tool-calling) |
+| `ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` | Anthropic model for the ReAct agent |
 | `LANGSMITH_API_KEY` | — | Enables LangSmith tracing; absent → no-op |
 | `LANGSMITH_TRACING` | — | `true` to force-enable tracing |
 | `LANGSMITH_PROJECT` | `mempill-showcase` | LangSmith project name |
@@ -129,7 +131,7 @@ Launches `mempill-mcp` via stdio, handshakes, lists 4 tools, calls `ingest_claim
 ```
 mempill-demo/
   src/
-    mempill_showcase/    ← PRIMARY: multi-agent reference app (LangGraph + CrewAI + mempill)
+    mempill_showcase/    ← PRIMARY: reference app (LangGraph ReAct agent + mempill bi-temporal memory)
     mempill_demo/        ← simpler console REPL (3-act mempill demo)
   tests/                 ← root-level tests for mempill_demo + edge cases
   scripts/setup.sh       ← creates .venv, installs prerelease mempill wheel
@@ -143,9 +145,9 @@ mempill-demo/
 
 ## Prerelease wheel note
 
-mempill is installed from the **local source-built wheel** (prerelease, includes `valid_at` +
-granularity + oracle HITL features) — not the PyPI release. This is required until mempill
-0.3.0 is published. `scripts/setup.sh` installs it automatically from the sibling repo.
+mempill is installed from the **local source-built wheel** (version 0.2.1, prerelease — not on
+PyPI) — includes `valid_at` + granularity + oracle HITL features. `scripts/setup.sh` installs
+it automatically from the sibling repo.
 
 To rebuild the wheel manually:
 ```bash

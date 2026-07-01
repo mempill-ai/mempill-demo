@@ -1,7 +1,7 @@
 # mempill Studio Demo Script
 
 Interactive demo for the free-form ReAct agent in LangGraph Studio.
-Verified end-to-end with real LLM (`claude-haiku-4-5`).
+Verified end-to-end with real LLM (`claude-haiku-4-5-20251001`).
 
 ---
 
@@ -13,7 +13,7 @@ Verified end-to-end with real LLM (`claude-haiku-4-5`).
 # Do NOT run uv sync or reinstall mempill — use .venv/bin/python
 
 # Optional: reset the persistent DB to start fresh
-rm -f .mempill/showcase_1.db
+rm -f .mempill/showcase.db
 ```
 
 **2. Start LangGraph Studio**
@@ -29,7 +29,7 @@ rm -f .mempill/showcase_1.db
 
 **4. Configuration**
 - In the **Input** panel, fill the `messages` field with a natural-language question
-- Day-0 facts are seeded automatically on first run:
+- Day-0 facts are seeded automatically at graph module-import time (when `langgraph dev` starts):
   - alice-chen / employer = Acme Corp / VP Engineering (since 2023-06)
   - alice-chen / city = Austin TX (since 2023-06, bounded 2025-02)
   - alice-chen / dietary_restriction = vegetarian (since 2024-01)
@@ -88,8 +88,8 @@ Alice Chen prefers business class travel as of 2025. Please store this in memory
 
 **Expected behaviour:**
 - Agent calls `recall_subject(alice-chen)` first to check existing predicates
-- Calls `remember_fact(subject="alice-chen", predicate="travel_preference", value="business class", valid_from="2025", agent_id="jordan-park-001")`
-- alice-chen has no prior `travel_preference` claim → **CommittedCheap** (no conflict)
+- Calls `remember_fact(subject="alice-chen", predicate="travel-preference", value="business class", valid_from="2025", agent_id="jordan-park-001")`
+- alice-chen has no prior `travel-preference` claim → **CommittedCheap** (no conflict)
 - Answer: "I've stored Alice Chen's travel preference: business class, effective 2025."
 - No interrupt.
 
@@ -223,9 +223,9 @@ The agent reports that the decision is deferred.
 To run the demo again from scratch:
 ```bash
 # Stop langgraph dev (Ctrl+C)
-rm -f .mempill/showcase_1.db
+rm -f .mempill/showcase.db
 .venv/bin/langgraph dev
-# Day-0 facts re-seeded on next Studio invocation
+# Day-0 facts re-seeded at graph module-import time on next start
 ```
 
 ---

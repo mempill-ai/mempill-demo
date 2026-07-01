@@ -8,10 +8,10 @@
 
 ### Prerelease wheel note
 
-`mempill 0.3.0` is not yet on PyPI. The version in `.venv` is a locally built
-wheel installed from the sibling `mempill/` repo. Do NOT run `uv sync` or
-`pip install mempill` — that would pull an older `0.2.x` release from PyPI
-which lacks `query_at` / `as_of_tx_time` / `valid_from_display` support.
+The version in `.venv` is a **locally built prerelease wheel (0.2.1)** installed from the
+sibling `mempill/` repo — not on PyPI. Do NOT run `uv sync` or `pip install mempill` — that
+would pull an older release from PyPI which lacks `query_at` / `as_of_tx_time` /
+`valid_from_display` support.
 
 If you ever need to rebuild the venv from scratch, follow the project `README.md`
 setup instructions (which path-install the prerelease wheel first).
@@ -31,7 +31,7 @@ User question (free-form natural language)
        │
        ▼
  ┌─────────────────────────────────────────────────┐
- │  ReAct Agent  (claude-haiku-4-5)                │
+ │  ReAct Agent  (claude-haiku-4-5-20251001)        │
  │                                                 │
  │  Tools:                                         │
  │    recall_subject   — ask about an entity       │
@@ -183,7 +183,7 @@ without faking past dates.
 LangGraph Studio lets you visualize and interactively run the free-form ReAct
 agent with a UI.
 
-**Default model:** `claude-haiku-4-5` (overridable via `ANTHROPIC_MODEL` in `.env`).
+**Default model:** `claude-haiku-4-5-20251001` (short alias: `claude-haiku-4-5`; overridable via `ANTHROPIC_MODEL` in `.env`).
 
 **Setup:**
 
@@ -192,7 +192,7 @@ agent with a UI.
    ```dotenv
    ANTHROPIC_API_KEY=sk-ant-...
    # Optional — override the default model:
-   # ANTHROPIC_MODEL=claude-haiku-4-5
+   # ANTHROPIC_MODEL=claude-haiku-4-5-20251001
    ```
 
 2. Start Studio:
@@ -227,7 +227,7 @@ See `STUDIO_DEMO.md` for the full turn-by-turn script with exact inputs.
 .venv/bin/python -m pytest -m "not live" -q
 ```
 
-Runs all non-live tests (no API key required). Expected result: **279 passed**.
+Runs all non-live tests (no API key required). Expected result: **304 passed**.
 
 ```bash
 .venv/bin/python -m pytest -m live -q
@@ -262,7 +262,7 @@ working directory at startup.
 ANTHROPIC_API_KEY=sk-ant-...
 
 # Optional: override the default model
-ANTHROPIC_MODEL=claude-haiku-4-5
+ANTHROPIC_MODEL=claude-haiku-4-5-20251001
 
 # LangSmith observability (all optional — tracing is a no-op without a key)
 LANGSMITH_API_KEY=ls__...        # your LangSmith API key
