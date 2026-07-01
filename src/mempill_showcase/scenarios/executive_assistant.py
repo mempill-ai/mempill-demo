@@ -41,8 +41,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
-from mempill_showcase.config.di import build_agent_tools, build_graph_from_adapter
-from mempill_showcase.core.domain.models import ClaimInput
+from mempill_showcase.config.di import build_graph_from_adapter
 from mempill_showcase.scenarios.seed_data import AGENT_ID, load_seed_claims
 
 if TYPE_CHECKING:

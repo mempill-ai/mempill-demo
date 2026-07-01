@@ -192,21 +192,26 @@ def run_compliance_replay(
         if compliance_tx_time_override:
             compliance_tx_time = compliance_tx_time_override
         else:
-            # No override: try to find the earliest audit entry for city
-            # (which should be Austin if the adapter is freshly seeded).
-            all_audit = adapter.audit(_agent_id, limit=50)
-            # Seed data if not already present (idempotent — skips if already seeded)
+            # No override: capture the Austin city claim's tx-time deterministically
+            # via its claim_ref, exactly as the test fixture does.
+            # Seed data if not already present (idempotent — skips if already seeded).
             austin_belief = adapter.recall(_agent_id, "alice-chen", "city")
             if austin_belief.status in ("NoBelief",):
                 load_seed_claims(adapter, _agent_id)
-                all_audit = adapter.audit(_agent_id, limit=50)
+                austin_belief = adapter.recall(_agent_id, "alice-chen", "city")
 
-            # Walk the full audit in reverse-chronological order (newest first)
-            # and take the OLDEST entry for the city predicate — that's Austin.
-            city_entries = [e for e in all_audit if "city" in (e.rationale or "").lower()]
-            if city_entries:
-                compliance_tx_time = city_entries[-1].recorded_at
-            elif all_audit:
+            austin_ref = austin_belief.claim_ref
+            all_audit = adapter.audit(_agent_id, limit=50)
+            # Walk audit entries to find the one whose claim_ref matches the
+            # Austin city claim.  This is deterministic: no substring guessing
+            # on rationale text.
+            for e in all_audit:
+                if e.claim_ref == austin_ref:
+                    compliance_tx_time = e.recorded_at
+                    break
+            # Ultimate fallback: use the oldest audit entry (guarantees we
+            # always capture a time strictly before any writes done after seeding).
+            if compliance_tx_time is None and all_audit:
                 compliance_tx_time = all_audit[-1].recorded_at
 
     # ── T-08: Bi-temporal belief queries as_of compliance_tx_time ────────────
