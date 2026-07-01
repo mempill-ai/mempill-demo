@@ -106,5 +106,18 @@ class RAGReadTool(BaseTool):
             "documents": documents,
         }, default=str)
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> str:
-        raise NotImplementedError("RAGReadTool does not support async")
+    async def _arun(
+        self,
+        namespace: str = "research",
+        doc_id: Optional[str] = None,
+        query: Optional[str] = None,
+        max_results: int = 5,
+        **kwargs: Any,
+    ) -> str:
+        return self._run(
+            namespace=namespace,
+            doc_id=doc_id,
+            query=query,
+            max_results=max_results,
+            **kwargs,
+        )

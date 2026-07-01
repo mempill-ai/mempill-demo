@@ -141,5 +141,18 @@ class RAGWriteTool(BaseTool):
             "characters": len(text),
         })
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> str:
-        raise NotImplementedError("RAGWriteTool does not support async")
+    async def _arun(
+        self,
+        text: str,
+        namespace: str = "research",
+        doc_id: Optional[str] = None,
+        metadata: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        return self._run(
+            text=text,
+            namespace=namespace,
+            doc_id=doc_id,
+            metadata=metadata,
+            **kwargs,
+        )

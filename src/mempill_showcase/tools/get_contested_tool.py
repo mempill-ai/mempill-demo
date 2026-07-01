@@ -112,5 +112,16 @@ class GetContestedTool(BaseTool):
         log.debug("GetContestedTool result: status=%s alts=%d", belief.status, len(alts))
         return json.dumps(result, default=str)
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> str:
-        raise NotImplementedError("GetContestedTool does not support async")
+    async def _arun(
+        self,
+        agent_id: str,
+        subject: str,
+        predicate: str,
+        **kwargs: Any,
+    ) -> str:
+        return self._run(
+            agent_id=agent_id,
+            subject=subject,
+            predicate=predicate,
+            **kwargs,
+        )

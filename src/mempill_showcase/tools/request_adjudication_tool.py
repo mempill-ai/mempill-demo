@@ -236,5 +236,128 @@ class RequestAdjudicationTool(BaseTool):
         )
         return json.dumps(result)
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> str:
-        raise NotImplementedError("RequestAdjudicationTool does not support async")
+    async def _arun(
+        self,
+        agent_id: str,
+        subject: str,
+        predicate: str,
+        reason: str,
+        incumbent_value: Optional[str] = None,
+        challenger_value: Optional[str] = None,
+        claim_refs: Optional[list[str]] = None,
+        **kwargs: Any,
+    ) -> str:
+        # interrupt() reads LangGraph context via a contextvar that is NOT safe to
+        # transfer to a thread executor.  We therefore re-implement the body here
+        # in the async coroutine so that interrupt() runs on the event-loop thread
+        # where the contextvar is live — identical logic to _run.
+        interrupt_payload: dict[str, Any] = {
+            "question": (
+                f"Conflict on {subject}/{predicate}:\n"
+                f"  Incumbent:  {incumbent_value!r}\n"
+                f"  Challenger: {challenger_value!r}\n"
+                f"Reason: {reason}\n"
+                "Which is correct? Reply: 'Affirm' (challenger wins), "
+                "'Deny' (incumbent wins), or 'Abstain' (defer)."
+            ),
+            "subject": subject,
+            "predicate": predicate,
+            "incumbent": {"value": incumbent_value},
+            "challenger": {"value": challenger_value},
+            "claim_refs": claim_refs or [],
+            "reason": reason,
+        }
+
+        log.info(
+            "RequestAdjudicationTool (_arun): interrupting for %s/%s — awaiting human verdict",
+            subject, predicate,
+        )
+
+        # ── GRAPH PAUSES HERE ────────────────────────────────────────────────────
+        raw_verdict: str = interrupt(interrupt_payload)
+        # ── GRAPH RESUMES HERE with verdict from Command(resume=...) ─────────────
+
+        log.info(
+            "RequestAdjudicationTool (_arun): resumed raw_verdict=%r for %s/%s",
+            raw_verdict, subject, predicate,
+        )
+
+        verdict = _normalize_verdict(
+            raw_verdict,
+            challenger_value=challenger_value,
+            incumbent_value=incumbent_value,
+        )
+        log.info(
+            "RequestAdjudicationTool (_arun): normalized verdict=%r (raw=%r) for %s/%s",
+            verdict, raw_verdict, subject, predicate,
+        )
+
+        if verdict not in ("Affirm", "Deny", "Abstain"):
+            result = {
+                "verdict": raw_verdict,
+                "normalized": verdict,
+                "status": "invalid_verdict",
+                "message": (
+                    f"Unrecognised verdict {raw_verdict!r}. "
+                    "Reply Affirm, Deny, or Abstain."
+                ),
+            }
+            return json.dumps(result)
+
+        if verdict == "Abstain":
+            result = {
+                "verdict": "Abstain",
+                "status": "deferred",
+                "subject": subject,
+                "predicate": predicate,
+                "message": (
+                    f"Adjudication deferred for {subject}/{predicate}. "
+                    "Both claims remain Contested."
+                ),
+            }
+            return json.dumps(result)
+
+        # Affirm or Deny — submit and recall
+        winning_value, disposition = _resolve_via_oracle_or_reconcile(
+            self.adapter, agent_id, subject, predicate, verdict, claim_refs or [],
+        )
+
+        resolved_value: Optional[str] = None
+        resolved_status: Optional[str] = None
+        try:
+            raw_recall = self.recall_tool.invoke({
+                "agent_id": agent_id,
+                "subject": subject,
+                "predicate": predicate,
+            })
+            rb = json.loads(raw_recall)
+            resolved_value = rb.get("value")
+            resolved_status = rb.get("status")
+        except Exception as exc:
+            log.warning("RequestAdjudicationTool (_arun): post-resolution recall failed: %s", exc)
+
+        # Fallback to adjudication outcome when recall is TimingUncertain or null
+        if not resolved_value and winning_value:
+            resolved_value = winning_value
+            resolved_status = "Resolved" if disposition == "CommittedCheap" else "Adjudicated"
+
+        winning_label = "challenger" if verdict == "Affirm" else "incumbent"
+        result = {
+            "verdict": verdict,
+            "status": "resolved",
+            "subject": subject,
+            "predicate": predicate,
+            "winning_value": resolved_value,
+            "winning_label": winning_label,
+            "resolved_status": resolved_status,
+            "disposition": disposition,
+            "message": (
+                f"Conflict on {subject}/{predicate} resolved by {verdict}: "
+                f"{winning_label} wins → value is now {resolved_value!r}."
+            ),
+        }
+        log.info(
+            "RequestAdjudicationTool (_arun): resolved %s/%s verdict=%s value=%r",
+            subject, predicate, verdict, resolved_value,
+        )
+        return json.dumps(result)

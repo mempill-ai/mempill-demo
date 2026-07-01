@@ -169,5 +169,5 @@ class DateParserTool(BaseTool):
         log.debug("DateParserTool result: %s", result)
         return json.dumps(result)
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> str:
-        raise NotImplementedError("DateParserTool does not support async")
+    async def _arun(self, date_string: str, **kwargs: Any) -> str:
+        return self._run(date_string=date_string, **kwargs)

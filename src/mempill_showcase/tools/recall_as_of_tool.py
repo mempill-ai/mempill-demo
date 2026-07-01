@@ -114,5 +114,18 @@ class RecallAsOfTool(BaseTool):
         log.debug("RecallAsOfTool result: %s", result)
         return json.dumps(result, default=str)
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> str:
-        raise NotImplementedError("RecallAsOfTool does not support async")
+    async def _arun(
+        self,
+        agent_id: str,
+        subject: str,
+        predicate: str,
+        as_of_tx_time: str,
+        **kwargs: Any,
+    ) -> str:
+        return self._run(
+            agent_id=agent_id,
+            subject=subject,
+            predicate=predicate,
+            as_of_tx_time=as_of_tx_time,
+            **kwargs,
+        )

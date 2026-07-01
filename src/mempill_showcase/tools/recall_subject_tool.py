@@ -139,5 +139,18 @@ class RecallSubjectTool(BaseTool):
         log.debug("RecallSubjectTool: %d facts for subject=%s", len(facts), subject)
         return json.dumps(result, default=str)
 
-    async def _arun(self, *args: Any, **kwargs: Any) -> str:
-        raise NotImplementedError("RecallSubjectTool does not support async")
+    async def _arun(
+        self,
+        agent_id: str,
+        subject: str,
+        valid_at: Optional[str] = None,
+        as_of_tx_time: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        return self._run(
+            agent_id=agent_id,
+            subject=subject,
+            valid_at=valid_at,
+            as_of_tx_time=as_of_tx_time,
+            **kwargs,
+        )
