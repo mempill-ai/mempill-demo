@@ -53,6 +53,7 @@ from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
 from mempill_showcase.config.di import build_mempill_adapter
 from mempill_showcase.core.domain.models import ClaimInput
 from mempill_showcase.scenarios.seed_data import AGENT_ID
+from mempill_showcase.core.domain.normalise import normalise_key
 from mempill_showcase.tools.audit_trail_tool import AuditTrailTool
 from mempill_showcase.tools.get_contested_tool import GetContestedTool
 from mempill_showcase.tools.recall_as_of_tool import RecallAsOfTool
@@ -803,3 +804,138 @@ class TestAuditTrailTool:
         raw = audit_trail_tool.invoke({"agent_id": AGENT_ID})
         result = json.loads(raw)
         assert result["agent_id"] == AGENT_ID
+
+
+# ── N1: normalise_key unit tests ──────────────────────────────────────────────
+
+class TestNormaliseKey:
+    """N1 — normalise_key helper: deterministic key normalisation."""
+
+    def test_spaces_to_hyphens(self) -> None:
+        """Internal spaces are replaced with hyphens."""
+        assert normalise_key("Alice Chen") == "alice-chen"
+
+    def test_leading_trailing_whitespace_stripped(self) -> None:
+        """Leading and trailing whitespace is stripped before folding."""
+        assert normalise_key(" Employer ") == "employer"
+
+    def test_multiple_words(self) -> None:
+        """Multiple spaces are collapsed to a single hyphen each."""
+        assert normalise_key("favorite color") == "favorite-color"
+
+    def test_already_normalised_unchanged(self) -> None:
+        """Already-normalised keys pass through unchanged."""
+        assert normalise_key("alice-chen") == "alice-chen"
+
+    def test_uppercase_folded(self) -> None:
+        """Uppercase letters are lowercased."""
+        assert normalise_key("EMPLOYER") == "employer"
+
+    def test_multiple_internal_spaces_collapsed(self) -> None:
+        """A run of spaces becomes a single hyphen."""
+        assert normalise_key("a  b") == "a-b"
+
+
+# ── N2: cross-tool normalisation consistency ──────────────────────────────────
+
+class TestCrossToolNormalisationConsistency:
+    """N2 — writing with non-normalised subject/predicate is visible in ALL read tools.
+
+    Verifies the bug described in PR #39: a fact written via remember_fact with
+    subject "Alice Chen" (stored under "alice-chen") MUST be retrievable via
+    recall_at, recall_as_of, get_contested, and recall_subject using the SAME
+    non-normalised string "Alice Chen".
+    """
+
+    @pytest.fixture()
+    def all_tools(self, adapter: MempillAdapter):
+        return {
+            "remember": RememberFactTool(adapter=adapter),
+            "recall_subject": RecallSubjectTool(adapter=adapter),
+            "recall_at": RecallAtTool(adapter=adapter),
+            "recall_as_of": RecallAsOfTool(adapter=adapter),
+            "get_contested": GetContestedTool(adapter=adapter),
+        }
+
+    def test_recall_subject_with_unnormalised_subject(self, all_tools) -> None:
+        """recall_subject("Alice Chen") resolves fact written under "Alice Chen"."""
+        all_tools["remember"].invoke({
+            "agent_id": AGENT_ID,
+            "subject": "Alice Chen",
+            "predicate": "city",
+            "value": "Austin TX",
+            "valid_from": "2023-06",
+        })
+        raw = all_tools["recall_subject"].invoke({
+            "agent_id": AGENT_ID,
+            "subject": "Alice Chen",
+        })
+        result = json.loads(raw)
+        assert result["fact_count"] >= 1, (
+            "recall_subject('Alice Chen') must find fact stored via remember_fact('Alice Chen')"
+        )
+        values = {f["value"] for f in result["facts"]}
+        assert "Austin TX" in values
+
+    def test_recall_at_with_unnormalised_subject_and_predicate(self, all_tools) -> None:
+        """recall_at with "Alice Chen" / "Home City" resolves to the stored fact."""
+        all_tools["remember"].invoke({
+            "agent_id": AGENT_ID,
+            "subject": "Alice Chen",
+            "predicate": "Home City",
+            "value": "Austin TX",
+            "valid_from": "2023-06",
+        })
+        raw = all_tools["recall_at"].invoke({
+            "agent_id": AGENT_ID,
+            "subject": "Alice Chen",
+            "predicate": "Home City",
+            "valid_at": "2024-01-01T00:00:00Z",
+        })
+        result = json.loads(raw)
+        assert result["status"] == "Resolved", (
+            f"recall_at('Alice Chen','Home City') must resolve; got status={result['status']!r}"
+        )
+        assert result["value"] == "Austin TX"
+
+    def test_recall_as_of_with_unnormalised_subject_and_predicate(self, all_tools) -> None:
+        """recall_as_of with "Alice Chen" / "Home City" resolves to the stored fact."""
+        all_tools["remember"].invoke({
+            "agent_id": AGENT_ID,
+            "subject": "Alice Chen",
+            "predicate": "Home City",
+            "value": "Boston MA",
+            "valid_from": "2024-01",
+        })
+        raw = all_tools["recall_as_of"].invoke({
+            "agent_id": AGENT_ID,
+            "subject": "Alice Chen",
+            "predicate": "Home City",
+            "as_of_tx_time": "2099-01-01T00:00:00Z",
+        })
+        result = json.loads(raw)
+        assert result["status"] == "Resolved", (
+            f"recall_as_of('Alice Chen','Home City') must resolve; got status={result['status']!r}"
+        )
+        assert result["value"] == "Boston MA"
+
+    def test_get_contested_with_unnormalised_subject_and_predicate(self, all_tools) -> None:
+        """get_contested with "Alice Chen" / "employer" resolves without NoBelief miss."""
+        all_tools["remember"].invoke({
+            "agent_id": AGENT_ID,
+            "subject": "Alice Chen",
+            "predicate": "employer",
+            "value": "Acme Corp",
+            "valid_from": "2023-06",
+        })
+        raw = all_tools["get_contested"].invoke({
+            "agent_id": AGENT_ID,
+            "subject": "Alice Chen",
+            "predicate": "employer",
+        })
+        result = json.loads(raw)
+        # Should be Resolved (not NoBelief) — a miss would return NoBelief
+        assert result["status"] == "Resolved", (
+            f"get_contested('Alice Chen','employer') must return Resolved; "
+            f"got status={result['status']!r} — key normalisation missing"
+        )

@@ -25,6 +25,7 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
+from mempill_showcase.core.domain.normalise import normalise_key
 from mempill_showcase.observability import traceable_mempill
 
 log = logging.getLogger(__name__)
@@ -81,6 +82,9 @@ class RecallAtTool(BaseTool):
         valid_at: str,
         **kwargs: Any,
     ) -> str:
+        subject = normalise_key(subject)
+        predicate = normalise_key(predicate)
+
         log.debug(
             "RecallAtTool: agent=%s subject=%s predicate=%s valid_at=%s",
             agent_id, subject, predicate, valid_at,

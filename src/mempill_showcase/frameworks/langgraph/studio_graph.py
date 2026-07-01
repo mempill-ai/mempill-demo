@@ -1,72 +1,39 @@
 """
 mempill_showcase.frameworks.langgraph.studio_graph — LangGraph Studio entry point.
 
-Exposes a module-level `graph` (compiled StateGraph) for use with LangGraph Studio
+Exposes a module-level `graph` (compiled ReAct agent) for use with LangGraph Studio
 (`langgraph dev`) and the `langgraph.json` manifest.
 
 Design:
   - Builds an oracle-backed in-memory MempillAdapter ONCE at module level.
   - Calls load_seed_claims() immediately so the store has Day-0 facts on first turn.
-  - Defaults agent_id to "jordan-park-001" (the seeded agent) when the user leaves
-    that field blank in Studio.
-  - If ANTHROPIC_API_KEY is present in the environment (loaded via .env), uses
-    LLMSupervisor for natural-language intent routing AND CrewAI crews for LLM
-    extraction in crew_a/b/c nodes (full free-form input path).
-    Without a key: MockSupervisor + deterministic shell heuristics (CI-safe).
   - The graph is compiled WITHOUT a MemorySaver so LangGraph Studio / `langgraph dev`
     can attach its own checkpointer (Studio rejects graphs with a custom checkpointer).
   - Default model: claude-haiku-4-5 (overridable via ANTHROPIC_MODEL env var).
+  - ANTHROPIC_API_KEY is required for the ReAct agent to call the LLM.
 
 Usage (LangGraph Studio):
-  1. Set ANTHROPIC_API_KEY in .env to enable LLM routing + CrewAI extraction.
-     Without a key, MockSupervisor + shell heuristics are used (deterministic, no API).
+  1. Set ANTHROPIC_API_KEY in .env.
   2. .venv/bin/langgraph dev          # Studio opens at http://127.0.0.1:2024
-  3. In Studio, select the "exec_assistant" graph.
-  4. Fill ONLY the "User Input" field — agent_id defaults to "jordan-park-001".
-  5. The Day-0 seed is already loaded; try e.g.:
-       "What's Alice Chen's current city?"   → Austin TX (seeded)
-       "Alice moved to New York in February 2025" → succession write (UPDATE_CONTACT)
-
-Nodes:
-  supervisor  — intent classification + routing (with default agent_id injection)
-  crew_a      — UPDATE_CONTACT intake (write to mempill)
-  crew_b      — RESEARCH distillation (RAG + mempill distil)
-  crew_c      — PREPARE_BRIEFING / RECALL_HISTORY / COMPLIANCE_AUDIT (read-only)
-  hitl_node   — Human-in-the-loop gate for Contested writes
+  3. In Studio, select the graph.
+  4. Fill the "messages" field with a HumanMessage — agent_id defaults to "jordan-park-001".
+  5. The Day-0 seed is already loaded; try:
+       "What is Alice Chen's dietary restriction?"
+       "What role does Alice hold?"
+       "Alice has actually been CTO of Acme since June 2023, not VP Engineering"
 """
 from __future__ import annotations
 
 import logging
-import os
-
-from langgraph.graph import END, StateGraph
 
 from mempill_showcase.config.bootstrap import bootstrap
-from mempill_showcase.config.di import build_mempill_adapter, build_tools, _adapter_from_settings
-from mempill_showcase.frameworks.langgraph.crew_nodes import (
-    make_crew_a_node,
-    make_crew_b_node,
-    make_crew_c_node,
-)
-from mempill_showcase.frameworks.langgraph.graph import (
-    _crew_a_router,
-    _crew_b_router,
-    _supervisor_router,
-)
-from mempill_showcase.frameworks.langgraph.hitl_node import make_hitl_node
-from mempill_showcase.frameworks.langgraph.state import ExecAssistantState
-from mempill_showcase.frameworks.langgraph.crew_nodes import LLMExtractor, LLMResearcher
-from mempill_showcase.frameworks.langgraph.supervisor_node import (
-    MockSupervisor,
-    make_supervisor_node,
-)
+from mempill_showcase.config.di import build_agent_tools, build_mempill_adapter, _adapter_from_settings
+from mempill_showcase.frameworks.langgraph.graph import build_graph
 from mempill_showcase.scenarios.seed_data import AGENT_ID, load_seed_claims
 
 log = logging.getLogger(__name__)
 
-# ── Default agent_id ──────────────────────────────────────────────────────────
-# Loaded from Settings (MEMPILL_AGENT_ID env var) so it is fully configurable.
-# Falls back to the seed_data module constant if Settings cannot be loaded.
+
 def _load_default_agent_id() -> str:
     try:
         from mempill_showcase.config.settings import get_settings
@@ -79,34 +46,24 @@ _DEFAULT_AGENT_ID = _load_default_agent_id()
 
 
 def _build_studio_graph():
-    """Build the compiled StateGraph for LangGraph Studio.
+    """Build the compiled ReAct agent for LangGraph Studio.
 
     Steps:
-      1. Call bootstrap() to load .env (picks up ANTHROPIC_API_KEY if present).
+      1. Call bootstrap() to load .env.
       2. Build oracle-backed in-memory MempillAdapter.
-      3. Seed Day-0 claims so the store has real facts from turn 1.
-      4. Select LLMSupervisor (if ANTHROPIC_API_KEY present) or MockSupervisor.
-         When a key is present, also build CrewAI crews for LLM extraction in nodes.
-      5. Wrap the supervisor node to inject default agent_id when blank.
-      6. Compile the graph without a MemorySaver (Studio manages persistence).
+      3. Seed Day-0 claims.
+      4. Build 7 agent tools.
+      5. Compile the graph without MemorySaver (Studio manages persistence).
 
-    Returns (compiled_graph, adapter, classifier).
-    The adapter is module-level — seed writes from one turn are visible in
-    subsequent turns within the same `langgraph dev` server process.
+    Returns (compiled_graph, adapter).
     """
-    # Step 1: load .env so ANTHROPIC_API_KEY etc. reach os.environ before we inspect them.
-    # bootstrap() is idempotent; safe to call at import time here because
-    # studio_graph is only imported by `langgraph dev`, not by the test suite.
     bootstrap()
 
-    # Load settings after bootstrap so .env values are present.
     from mempill_showcase.config.settings import get_settings
     _settings = get_settings()
 
-    # Step 2: build the adapter — file-backed if MEMPILL_DB_PATH is set, else in-memory.
     adapter = _adapter_from_settings(_settings)
 
-    # Step 3: seed Day-0 facts (idempotent — skips if data already present for file-backed engines)
     _seed_count = 0
     try:
         refs = load_seed_claims(adapter, agent_id=_DEFAULT_AGENT_ID)
@@ -114,8 +71,7 @@ def _build_studio_graph():
         if _seed_count:
             log.info(
                 "studio_graph: seeded %d Day-0 claims for agent_id=%r",
-                _seed_count,
-                _DEFAULT_AGENT_ID,
+                _seed_count, _DEFAULT_AGENT_ID,
             )
         else:
             log.info(
@@ -123,147 +79,30 @@ def _build_studio_graph():
                 _DEFAULT_AGENT_ID,
             )
     except Exception as exc:
-        log.warning("studio_graph: seed failed (%s) — graph will start with existing store state", exc)
+        log.warning("studio_graph: seed failed (%s) — starting with existing store state", exc)
 
-    # Step 4: supervisor selection
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if api_key:
-        try:
-            from mempill_showcase.frameworks.langgraph.supervisor_node import LLMSupervisor
-            classifier = LLMSupervisor()
-            log.info("studio_graph: ANTHROPIC_API_KEY present — using LLMSupervisor")
-        except Exception as exc:
-            log.warning(
-                "studio_graph: LLMSupervisor init failed (%s) — falling back to MockSupervisor",
-                exc,
-            )
-            classifier = MockSupervisor()
-    else:
-        classifier = MockSupervisor()
-        log.info("studio_graph: no ANTHROPIC_API_KEY — using MockSupervisor (deterministic)")
+    tools = build_agent_tools(adapter)
 
-    # Step 5: build nodes
-    tools = build_tools(adapter)
-
-    # When API key is available, build focused LLM components for extraction/research.
-    # LLMExtractor (crew_a): single structured Anthropic call → {entity, predicate,
-    #   value, valid_from}; Python remember_tool writes to mempill (reliable).
-    # LLMResearcher (crew_b): single structured Anthropic call → factual summary
-    #   (→ RAG) + ≤3 distilled claims (→ mempill via remember_tool).
-    # Both replace the unreliable CrewAI kickoff path.
-    # Without an API key: extractor=None, researcher=None → shell heuristics.
-    extractor = None
-    researcher = None
-    if api_key:
-        llm_model = _settings.anthropic_model
-        try:
-            extractor = LLMExtractor(model_name=llm_model)
-            log.info(
-                "studio_graph: LLMExtractor built with model=%r (LLM extraction path active for crew_a)",
-                llm_model,
-            )
-        except Exception as exc:
-            log.warning(
-                "studio_graph: LLMExtractor init failed (%s) — falling back to shell extraction",
-                exc,
-            )
-            extractor = None
-        try:
-            researcher = LLMResearcher(model_name=llm_model)
-            log.info(
-                "studio_graph: LLMResearcher built with model=%r (LLM research path active for crew_b)",
-                llm_model,
-            )
-        except Exception as exc:
-            log.warning(
-                "studio_graph: LLMResearcher init failed (%s) — falling back to shell research",
-                exc,
-            )
-            researcher = None
-
-    inner_supervisor_fn = make_supervisor_node(classifier)
-
-    def supervisor_with_default(state: ExecAssistantState) -> dict:
-        """Classify intent; inject default agent_id when user leaves it blank."""
-        if not state.get("agent_id"):
-            state = dict(state)
-            state["agent_id"] = _DEFAULT_AGENT_ID
-            log.debug("studio_graph: agent_id defaulted to %r", _DEFAULT_AGENT_ID)
-        updates = inner_supervisor_fn(state)
-        # Ensure agent_id is propagated into the state patch so downstream nodes see it
-        if not updates.get("agent_id"):
-            updates = {**updates, "agent_id": state["agent_id"]}
-        return updates
-
-    supervisor_with_default.__name__ = "supervisor_node"
-
-    crew_a_fn = make_crew_a_node(
-        remember_tool=tools.remember_tool,
-        date_parser=tools.date_parser,
+    # No checkpointer — Studio injects its own persistence layer
+    compiled = build_graph(
         adapter=adapter,
-        crew=None,
-        extractor=extractor,
-    )
-    crew_b_fn = make_crew_b_node(
-        remember_tool=tools.remember_tool,
-        rag_write_tool=tools.rag_write_tool,
-        adapter=adapter,
-        crew=None,
-        researcher=researcher,
-    )
-    crew_c_fn = make_crew_c_node(
-        recall_tool=tools.recall_tool,
-        audit_tool=tools.audit_tool,
-        crew=None,
-    )
-    hitl_fn = make_hitl_node(
-        adapter=adapter,
-        recall_tool=tools.recall_tool,
+        tools=tools,
+        checkpointer=None,
+        model_name=_settings.anthropic_model,
     )
 
-    # Step 6: assemble and compile the graph (no MemorySaver — Studio injects its own)
-    g = StateGraph(ExecAssistantState)
-    g.add_node("supervisor", supervisor_with_default)
-    g.add_node("crew_a", crew_a_fn)
-    g.add_node("crew_b", crew_b_fn)
-    g.add_node("crew_c", crew_c_fn)
-    g.add_node("hitl_node", hitl_fn)
-
-    g.set_entry_point("supervisor")
-    g.add_conditional_edges(
-        "supervisor",
-        _supervisor_router,
-        {"crew_a": "crew_a", "crew_b": "crew_b", "crew_c": "crew_c"},
-    )
-    g.add_conditional_edges(
-        "crew_a",
-        _crew_a_router,
-        {"hitl": "hitl_node", END: END},
-    )
-    g.add_conditional_edges(
-        "crew_b",
-        _crew_b_router,
-        {"hitl": "hitl_node", END: END},
-    )
-    g.add_edge("crew_c", END)
-    g.add_edge("hitl_node", END)
-
-    compiled = g.compile(checkpointer=None)
     log.info(
-        "studio_graph: compiled ExecAssistant StateGraph "
-        "(classifier=%s, extraction=%s, research=%s, seeded=%d claims, default_agent_id=%r, no MemorySaver)",
-        type(classifier).__name__,
-        f"LLMExtractor({_settings.anthropic_model})" if extractor else "shell-heuristics",
-        f"LLMResearcher({_settings.anthropic_model})" if researcher else "shell-heuristics",
+        "studio_graph: compiled ReAct ExecAssistant "
+        "(model=%s, seeded=%d claims, agent_id=%r, no MemorySaver)",
+        _settings.anthropic_model,
         _seed_count,
         _DEFAULT_AGENT_ID,
     )
-    return compiled, adapter, classifier
+    return compiled, adapter
 
 
 # ── Module-level compiled graph ───────────────────────────────────────────────
 
-# Build once at import time.  `langgraph dev` imports this module once and
-# serves all Studio turns from the same process — so the adapter persists
-# writes across turns automatically (seed in turn 0, recall in turn 1 works).
-graph, studio_adapter, studio_classifier = _build_studio_graph()
+# Built once at import time.  `langgraph dev` imports this module once and
+# serves all Studio turns from the same process.
+graph, studio_adapter = _build_studio_graph()

@@ -229,64 +229,65 @@ class TestOracleDenyPath:
 
 # ── TestGraphHITLRealOracle ───────────────────────────────────────────────────
 
+@pytest.mark.live
 class TestGraphHITLRealOracle:
-    """End-to-end graph HITL via real oracle: crew_a write → interrupt → submit → Resolved.
+    """End-to-end graph HITL via real oracle: LLM writes CTO → interrupt → resume → Resolved.
 
-    Proves the complete W7 chain:
-      crew_a write → QueuedForAdjudication → pending_contested set → graph routes to
-      hitl_node → LangGraph interrupt() fires → Command(resume='Affirm') → hitl_node
-      calls adapter.list_pending_adjudications + adapter.submit_adjudication → post-
-      resume recall_tool returns Resolved belief.
+    Wave B NOTE: The ReAct graph no longer has a deterministic supervisor_node that
+    routes to hitl_node after a contested write.  In the new design the HITL interrupt
+    is fired from inside the request_adjudication tool, which the LLM must choose to
+    call after observing is_contested=True from remember_fact.  These tests therefore
+    require a live LLM (ANTHROPIC_API_KEY) to drive the ReAct loop.
+
+    All tests in this class are marked @pytest.mark.live (skipped with -m "not live").
+
+    The oracle mechanics (queue, Affirm, Deny) are proven without a graph in
+    TestOracleAffirmPath / TestOracleDenyPath above.
     """
 
     @pytest.fixture()
     def graph_fixture(self, oracle_adapter: MempillAdapter):
-        """Oracle-backed adapter + graph (MockSupervisor, no API key)."""
+        """Oracle-backed adapter + graph."""
         tools = build_tools(oracle_adapter)
         app = build_graph(adapter=oracle_adapter, tools=tools)
         return oracle_adapter, tools, app
 
     def test_crew_a_conflict_pauses_at_hitl(self, graph_fixture) -> None:
-        """crew_a write of CTO (same valid_from as VP Eng) → graph pauses at hitl_node."""
+        """LLM write of CTO (same valid_from as VP Eng) → graph pauses at request_adjudication."""
+        from langchain_core.messages import HumanMessage
         adapter, _, app = graph_fixture
         _seed_vp(adapter)
 
         cfg = _cfg()
         result = app.invoke(
-            {"user_input": "Alice promoted to CTO since 2023-06 at Acme", "agent_id": AGENT_ID},
+            {"messages": [HumanMessage(content="Alice was promoted to CTO at Acme since 2023-06")]},
             cfg,
         )
         assert "__interrupt__" in result, (
-            "Graph must pause at hitl_node interrupt after QueuedForAdjudication write"
+            "Graph must pause at request_adjudication interrupt after contested write"
         )
         interrupts = result["__interrupt__"]
         assert len(interrupts) >= 1
         payload = interrupts[0].value
-        assert "subject" in payload or "question" in payload, (
+        assert "subject" in payload or "question" in payload or "incumbent" in payload, (
             f"Interrupt payload must describe the conflict, got {payload!r}"
         )
 
     def test_affirm_via_command_resolves_belief(self, graph_fixture) -> None:
-        """Command(resume='Affirm') → hitl_node submits oracle → Resolved (challenger)."""
+        """Command(resume='Affirm') → request_adjudication resolves → CTO wins."""
+        from langchain_core.messages import HumanMessage
         adapter, _, app = graph_fixture
         _seed_vp(adapter)
 
         cfg = _cfg()
         result1 = app.invoke(
-            {"user_input": "Alice promoted to CTO since 2023-06 at Acme", "agent_id": AGENT_ID},
+            {"messages": [HumanMessage(content="Alice was promoted to CTO at Acme since 2023-06")]},
             cfg,
         )
         assert "__interrupt__" in result1, "Graph must pause before resume test"
 
-        # Resume with Affirm
+        # Resume with Affirm — the tool resolves and the agent continues to END
         result2 = app.invoke(Command(resume="Affirm"), cfg)
-
-        assert result2.get("hitl_verdict") == "Affirm", (
-            f"hitl_verdict must be 'Affirm', got {result2.get('hitl_verdict')!r}"
-        )
-        assert not result2.get("pending_contested"), (
-            "pending_contested must be cleared after resolution"
-        )
 
         # Post-resume recall via adapter must be Resolved (challenger = CTO wins)
         belief = adapter.recall(AGENT_ID, "alice-chen", "employer")
@@ -298,23 +299,20 @@ class TestGraphHITLRealOracle:
         )
 
     def test_deny_via_command_keeps_incumbent(self, graph_fixture) -> None:
-        """Command(resume='Deny') → hitl_node submits oracle Deny → Resolved (incumbent)."""
+        """Command(resume='Deny') → request_adjudication resolves → VP Engineering wins."""
+        from langchain_core.messages import HumanMessage
         adapter, _, app = graph_fixture
         _seed_vp(adapter)
 
         cfg = _cfg()
         result1 = app.invoke(
-            {"user_input": "Alice promoted to CTO since 2023-06 at Acme", "agent_id": AGENT_ID},
+            {"messages": [HumanMessage(content="Alice was promoted to CTO at Acme since 2023-06")]},
             cfg,
         )
         assert "__interrupt__" in result1, "Graph must pause before resume test"
 
-        # Resume with Deny
-        result2 = app.invoke(Command(resume="Deny"), cfg)
-
-        assert result2.get("hitl_verdict") == "Deny", (
-            f"hitl_verdict must be 'Deny', got {result2.get('hitl_verdict')!r}"
-        )
+        # Resume with Deny — incumbent survives
+        app.invoke(Command(resume="Deny"), cfg)
 
         # VP Engineering (incumbent) must survive
         belief = adapter.recall(AGENT_ID, "alice-chen", "employer")
@@ -325,39 +323,15 @@ class TestGraphHITLRealOracle:
             f"VP Engineering (incumbent) must win after Deny, got {belief.value!r}"
         )
 
-    def test_hitl_resolved_belief_in_state(self, graph_fixture) -> None:
-        """After Affirm, hitl_resolved_belief in result state reflects Resolved JSON."""
-        adapter, _, app = graph_fixture
-        _seed_vp(adapter)
-
-        cfg = _cfg()
-        app.invoke(
-            {"user_input": "Alice promoted to CTO since 2023-06 at Acme", "agent_id": AGENT_ID},
-            cfg,
-        )
-        result2 = app.invoke(Command(resume="Affirm"), cfg)
-
-        resolved_json = result2.get("hitl_resolved_belief")
-        assert resolved_json is not None, (
-            "hitl_resolved_belief must be set in state after Affirm"
-        )
-        resolved = json.loads(resolved_json)
-        assert resolved.get("status") == "Resolved", (
-            f"hitl_resolved_belief must have status=Resolved, got {resolved.get('status')!r}"
-        )
-        assert resolved.get("value") == "Acme Corp / CTO", (
-            f"hitl_resolved_belief must show CTO (challenger) after Affirm, "
-            f"got {resolved.get('value')!r}"
-        )
-
     def test_oracle_queue_empty_after_graph_resolution(self, graph_fixture) -> None:
         """After graph HITL resolution, the oracle queue is empty for this agent."""
+        from langchain_core.messages import HumanMessage
         adapter, _, app = graph_fixture
         _seed_vp(adapter)
 
         cfg = _cfg()
         app.invoke(
-            {"user_input": "Alice promoted to CTO since 2023-06 at Acme", "agent_id": AGENT_ID},
+            {"messages": [HumanMessage(content="Alice was promoted to CTO at Acme since 2023-06")]},
             cfg,
         )
         app.invoke(Command(resume="Affirm"), cfg)

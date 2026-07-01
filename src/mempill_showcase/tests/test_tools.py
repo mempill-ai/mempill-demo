@@ -19,10 +19,9 @@ Covers:
   T4. MempillAuditTool — returns audit entries after writes.
 
   T5. Canonical key enforcement — MempillRememberTool raises ValueError on off-key writes.
+      (Wave B NOTE: stub_tools deleted; T7 CalendarTool/EmailDraftTool tests removed.)
 
   T6. RAGWriteTool + RAGReadTool — write bulk text, keyword-search retrieves it.
-
-  T7. CalendarTool + EmailDraftTool — stub tools return structured JSON.
 """
 from __future__ import annotations
 
@@ -38,7 +37,6 @@ from mempill_showcase.tools.mempill_recall_tool import MempillRecallTool
 from mempill_showcase.tools.mempill_remember_tool import MempillRememberTool
 from mempill_showcase.tools.rag_read_tool import RAGReadTool
 from mempill_showcase.tools.rag_write_tool import InMemoryRAGStore, RAGWriteTool
-from mempill_showcase.tools.stub_tools import CalendarTool, EmailDraftTool
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -82,16 +80,6 @@ def rag_read_tool(rag_store):
 @pytest.fixture()
 def date_parser():
     return DateParserTool()
-
-
-@pytest.fixture()
-def calendar_tool():
-    return CalendarTool()
-
-
-@pytest.fixture()
-def email_tool():
-    return EmailDraftTool()
 
 
 # ── T1: Succession encapsulation via MempillRememberTool ─────────────────────
@@ -431,32 +419,55 @@ class TestAuditTool:
             )
 
 
-# ── T5: Canonical key enforcement ────────────────────────────────────────────
+# ── T5: Soft normalisation (replaces canonical key enforcement) ───────────────
 
-class TestCanonicalKeyEnforcement:
-    """T5 — MempillRememberTool raises ValueError for off-key writes."""
+class TestRememberFactSoftNormalisation:
+    """T5 — MempillRememberTool uses soft normalisation (Wave B: no closed vocabulary).
 
-    def test_unknown_subject_raises(self, remember_tool):
-        """Non-canonical subject key raises ValueError."""
-        with pytest.raises((ValueError, Exception)) as exc_info:
-            remember_tool.invoke({
-                "agent_id": AGENT_ID,
-                "subject": "Alice Chen",  # not a canonical key
-                "predicate": "city",
-                "value": "Austin TX",
-            })
-        assert "alice-chen" in str(exc_info.value).lower() or "unknown entity" in str(exc_info.value).lower() or "Alice Chen" in str(exc_info.value)
+    The canonical_keys guard was removed in Wave B. The tool now accepts any
+    subject/predicate and soft-normalises (lowercase + separator).
+    """
 
-    def test_unknown_predicate_raises(self, remember_tool):
-        """Non-canonical predicate key raises ValueError."""
-        with pytest.raises((ValueError, Exception)) as exc_info:
-            remember_tool.invoke({
-                "agent_id": AGENT_ID,
-                "subject": "alice-chen",
-                "predicate": "home_address",  # not a canonical predicate
-                "value": "123 Main St",
-            })
-        assert "home_address" in str(exc_info.value) or "unknown predicate" in str(exc_info.value).lower()
+    def test_free_form_subject_normalised(self, remember_tool, adapter):
+        """Free-form subject 'Alice Chen' is normalised to 'alice-chen' and stored.
+
+        After the write, directly querying the adapter for the normalised key
+        'alice-chen' must return the stored value — proving the fact was written
+        under the soft-normalised key, not the original mixed-case input.
+        """
+        raw = remember_tool.invoke({
+            "agent_id": AGENT_ID,
+            "subject": "Alice Chen",  # free-form — soft-normalised to 'alice-chen'
+            "predicate": "city",
+            "value": "Austin TX",
+            "valid_from": "2024",  # supply valid_from so recall returns Resolved
+        })
+        result = json.loads(raw)
+        assert result["disposition"] in ("CommittedCheap", "Contested", "QueuedForAdjudication"), (
+            f"Free-form subject should write without error, got {result['disposition']!r}"
+        )
+
+        # Verify the value was stored under the normalised key 'alice-chen', not 'Alice Chen'
+        belief = adapter.recall(AGENT_ID, "alice-chen", "city")
+        assert belief.status in ("Resolved", "Contested"), (
+            f"Expected recall for normalised key 'alice-chen' to find a belief, got status={belief.status!r}"
+        )
+        assert belief.value == "Austin TX", (
+            f"Expected value 'Austin TX' stored under 'alice-chen', got {belief.value!r}"
+        )
+
+    def test_free_form_predicate_accepted(self, remember_tool):
+        """Free-form predicate 'home address' is normalised to 'home_address' and stored."""
+        raw = remember_tool.invoke({
+            "agent_id": AGENT_ID,
+            "subject": "alice-chen",
+            "predicate": "home address",  # free-form — no longer raises
+            "value": "123 Main St",
+        })
+        result = json.loads(raw)
+        assert result["disposition"] in ("CommittedCheap", "Contested", "QueuedForAdjudication"), (
+            f"Free-form predicate should write without error, got {result['disposition']!r}"
+        )
 
     def test_canonical_keys_pass(self, remember_tool):
         """Canonical subject + predicate writes without error."""
@@ -533,67 +544,4 @@ class TestRAGTools:
         assert rag_store.total_documents() == initial + 2
 
 
-# ── T7: CalendarTool + EmailDraftTool ────────────────────────────────────────
-
-class TestStubTools:
-    """T7 — stub tools return structured JSON with required fields."""
-
-    def test_calendar_tool_returns_event_id(self, calendar_tool):
-        """CalendarTool returns stub_created status with event_id."""
-        raw = calendar_tool.invoke({
-            "title": "Lunch with Alice Chen",
-            "attendees": ["alice-chen"],
-            "date": "2025-01-21",
-            "location": "Austin TX",
-            "duration_minutes": 90,
-        })
-        result = json.loads(raw)
-        assert result["status"] == "stub_created"
-        assert "event_id" in result
-        assert result["event_id"].startswith("stub-event-")
-        assert result["title"] == "Lunch with Alice Chen"
-        assert "warning" in result  # must disclose stub nature
-
-    def test_calendar_tool_all_fields(self, calendar_tool):
-        """CalendarTool echoes all input fields."""
-        raw = calendar_tool.invoke({
-            "title": "Board Meeting",
-            "attendees": ["alice-chen", "jordan-park"],
-            "date": "2025-03-10",
-            "location": "New York NY",
-            "duration_minutes": 120,
-            "notes": "Bring Q1 report",
-        })
-        result = json.loads(raw)
-        assert result["attendees"] == ["alice-chen", "jordan-park"]
-        assert result["location"] == "New York NY"
-        assert result["duration_minutes"] == 120
-        assert result["notes"] == "Bring Q1 report"
-
-    def test_email_draft_tool_returns_draft_id(self, email_tool):
-        """EmailDraftTool returns stub_drafted status with draft_id."""
-        raw = email_tool.invoke({
-            "to": ["alice.chen@acme.com"],
-            "subject": "Dinner tomorrow",
-            "body": "Hi Alice, looking forward to dinner tomorrow in NYC.",
-        })
-        result = json.loads(raw)
-        assert result["status"] == "stub_drafted"
-        assert "draft_id" in result
-        assert result["draft_id"].startswith("stub-draft-")
-        assert result["subject"] == "Dinner tomorrow"
-        assert "Alice" in result["body"]
-        assert "warning" in result  # must disclose stub nature
-
-    def test_email_draft_tool_cc_field(self, email_tool):
-        """EmailDraftTool handles cc correctly."""
-        raw = email_tool.invoke({
-            "to": ["alice@acme.com"],
-            "subject": "Follow-up",
-            "body": "Please review.",
-            "cc": ["jordan@company.com"],
-            "priority": "high",
-        })
-        result = json.loads(raw)
-        assert result["cc"] == ["jordan@company.com"]
-        assert result["priority"] == "high"
+# T7 (CalendarTool / EmailDraftTool) removed — stub_tools.py deleted in Wave B.
