@@ -1,1 +1,1 @@
-"""mempill_showcase — clean multi-agent showcase package."""
+"""mempill_showcase — multi-agent showcase package."""

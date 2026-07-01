@@ -1,7 +1,7 @@
 # mempill-demo
 
 A runnable demonstration of mempill's bi-temporal memory engine inside a multi-agent system.
-The primary deliverable is `mempill_showcase` — a production-style reference app showing
+The primary deliverable is `mempill_showcase` — a reference app showing
 a single free-form ReAct agent (`create_react_agent`) with 7 memory tools + a thin LangGraph
 shell for durable HITL `interrupt()`, backed by mempill bi-temporal memory, with a naive
 last-write-wins adapter (`NaiveAdapter`) for contrast and a full compliance audit replay.

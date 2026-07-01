@@ -19,7 +19,7 @@ The agent makes real calls to the Anthropic API using the model configured in
 settings (default: claude-haiku-4-5).
 
 Assertions are semantic (substring, case-insensitive), not exact string matches,
-so they remain robust across model phrasing variations.
+using case-insensitive substring matching to tolerate minor model phrasing variation.
 """
 from __future__ import annotations
 
