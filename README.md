@@ -10,13 +10,13 @@ last-write-wins adapter (`NaiveAdapter`) for contrast and a full compliance audi
 
 ## Quickstart — mempill_showcase
 
-**Python 3.12 required.** mempill is installed from a local prerelease wheel (0.2.1, built
-from source — not on PyPI). `scripts/setup.sh` handles this.
+**Python 3.12 required.** mempill 0.3.0 is published on PyPI and installs as a normal
+dependency. `scripts/setup.sh` handles the rest of the environment setup.
 
 ```bash
 git clone <this-repo> mempill-demo
 cd mempill-demo
-bash scripts/setup.sh        # creates .venv, installs prerelease mempill wheel + all extras
+bash scripts/setup.sh        # creates .venv, installs mempill (from PyPI) + all extras
 ```
 
 Run the 6-beat executive-assistant scenario (B-01..B-06) via the free-form ReAct agent:
@@ -143,13 +143,13 @@ mempill-demo/
 
 ---
 
-## Prerelease wheel note
+## mempill dependency
 
-mempill is installed from the **local source-built wheel** (version 0.2.1, prerelease — not on
-PyPI) — includes `valid_at` + granularity + oracle HITL features. `scripts/setup.sh` installs
-it automatically from the sibling repo.
+mempill 0.3.0 is published on PyPI (`valid_at` + granularity + oracle HITL features included)
+and resolves via the normal `mempill>=0.3.0,<0.4` pin in `pyproject.toml`. `scripts/setup.sh`
+installs it like any other dependency — no local build step required.
 
-To rebuild the wheel manually:
-```bash
-cd ../mempill/mempill-python && ./.venv/bin/maturin build --release
-```
+**Developing against unreleased mempill engine changes:** `scripts/setup.sh --local-engine`
+builds and installs mempill from the sibling `../mempill` repo instead of PyPI — useful when
+testing new engine features (e.g. a new query method) before they're published. The default
+`scripts/setup.sh` (no flag) always installs from PyPI and is what regular contributors should use.
