@@ -2,19 +2,17 @@
 
 ## Requirements
 
-- **Python 3.12** (required — the prerelease mempill wheel is an abi3 build targeting 3.12+)
+- **Python 3.12** (required — mempill ships an abi3 wheel targeting 3.12+)
 - The `.venv` virtualenv at the repo root (set up by `uv` from `pyproject.toml`)
 - **ANTHROPIC_API_KEY** required for the ReAct agent (scenario + Studio) — place in `.env`
 
-### Prerelease wheel note
+### mempill dependency
 
-The version in `.venv` is a **locally built prerelease wheel (0.2.1)** installed from the
-sibling `mempill/` repo — not on PyPI. Do NOT run `uv sync` or `pip install mempill` — that
-would pull an older release from PyPI which lacks `query_at` / `as_of_tx_time` /
-`valid_from_display` support.
+mempill 0.3.0 is published on PyPI and installs normally via the `mempill>=0.3.0,<0.4` pin
+in `pyproject.toml` (includes `query_at` / `as_of_tx_time` / `valid_from_display` support).
 
 If you ever need to rebuild the venv from scratch, follow the project `README.md`
-setup instructions (which path-install the prerelease wheel first).
+setup instructions.
 
 ---
 

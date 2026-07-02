@@ -3,8 +3,7 @@ name = "mempill-demo"
 version = "0.1.0"
 description = "Runnable demonstration of mempill temporal-validity + console agent"
 requires-python = ">=3.12"
-# mempill 0.3.0 wheel is built locally (not yet on PyPI); setup.sh force-installs
-# the local wheel. The pin below reflects the local 0.3.0 build (query_subject/valid_at/granularity).
+# mempill 0.3.0 is published on PyPI and resolves normally as a dependency.
 # mempill-mcp is NOT on PyPI (pure Python, unpublished); setup.sh path-installs it
 # from the sibling repo ../mempill/mempill-mcp/ for the optional MCP demo.
 dependencies = [
