@@ -14,6 +14,10 @@ in `pyproject.toml` (includes `query_at` / `as_of_tx_time` / `valid_from_display
 If you ever need to rebuild the venv from scratch, follow the project `README.md`
 setup instructions.
 
+To develop or test unreleased mempill engine changes, run `scripts/setup.sh --local-engine`
+instead of the default — it builds and installs mempill from the sibling `../mempill` repo
+rather than PyPI.
+
 ---
 
 ## Architecture Overview

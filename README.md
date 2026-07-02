@@ -148,3 +148,8 @@ mempill-demo/
 mempill 0.3.0 is published on PyPI (`valid_at` + granularity + oracle HITL features included)
 and resolves via the normal `mempill>=0.3.0,<0.4` pin in `pyproject.toml`. `scripts/setup.sh`
 installs it like any other dependency — no local build step required.
+
+**Developing against unreleased mempill engine changes:** `scripts/setup.sh --local-engine`
+builds and installs mempill from the sibling `../mempill` repo instead of PyPI — useful when
+testing new engine features (e.g. a new query method) before they're published. The default
+`scripts/setup.sh` (no flag) always installs from PyPI and is what regular contributors should use.
