@@ -8,15 +8,15 @@
 
 ### mempill dependency
 
-mempill 0.3.0 is published on PyPI and installs normally via the `mempill>=0.3.0,<0.4` pin
-in `pyproject.toml` (includes `query_at` / `as_of_tx_time` / `valid_from_display` support).
+mempill 0.4.0 (per-agent file storage: `open_for_agent` / `open_oracle_for_agent`) is
+**not yet published on PyPI** — the `mempill>=0.4.0,<0.5` pin in `pyproject.toml` will fail to
+resolve via the default `scripts/setup.sh` until it is published.
+
+Until then, run `scripts/setup.sh --local-engine` — it builds and installs mempill from the
+sibling `../mempill` repo instead of PyPI.
 
 If you ever need to rebuild the venv from scratch, follow the project `README.md`
 setup instructions.
-
-To develop or test unreleased mempill engine changes, run `scripts/setup.sh --local-engine`
-instead of the default — it builds and installs mempill from the sibling `../mempill` repo
-rather than PyPI.
 
 ---
 

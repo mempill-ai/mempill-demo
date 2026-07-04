@@ -10,13 +10,14 @@ last-write-wins adapter (`NaiveAdapter`) for contrast and a full compliance audi
 
 ## Quickstart — mempill_showcase
 
-**Python 3.12 required.** mempill 0.3.0 is published on PyPI and installs as a normal
-dependency. `scripts/setup.sh` handles the rest of the environment setup.
+**Python 3.12 required.** mempill 0.4.0 is not yet published on PyPI, so setup requires
+`--local-engine` (builds mempill from a sibling `../mempill` checkout) — see
+[mempill dependency](#mempill-dependency) below for details.
 
 ```bash
 git clone <this-repo> mempill-demo
 cd mempill-demo
-bash scripts/setup.sh        # creates .venv, installs mempill (from PyPI) + all extras
+bash scripts/setup.sh --local-engine   # creates .venv, builds + installs mempill from ../mempill + all extras
 ```
 
 Run the 6-beat executive-assistant scenario (B-01..B-06) via the free-form ReAct agent:
@@ -56,7 +57,14 @@ amplification firewall) without any multi-agent framework:
 .venv/bin/python -m mempill_demo --scenario    # auto-play 3-act story then REPL
 .venv/bin/python -m mempill_demo --selftest    # deterministic assertion suite (13 checks)
 .venv/bin/mempill-console                      # interactive REPL
+.venv/bin/python -m mempill_demo --db-dir .mempill --agent my-agent  # custom per-agent DB dir
 ```
+
+> **Migration note (mempill 0.4.0):** the console agent's `--db` flag (a single file path) was
+> replaced by `--db-dir` (a base directory). The actual database file is now derived
+> automatically as `<db-dir>/agent_<agent_id>.db`, one file per agent. Pre-0.4.0 database files
+> are **not** auto-migrated — to keep existing data, move/rename the old shared-file database to
+> `<db-dir>/agent_<agent_id>.db` before first use with 0.4.0.
 
 ---
 
@@ -65,6 +73,8 @@ amplification firewall) without any multi-agent framework:
 | Variable | Default | Effect |
 |---|---|---|
 | `NAIVE_MODE` | `false` | `true` → use NaiveAdapter (last-write-wins, no bi-temporal) |
+| `MEMPILL_AGENT_ID` | `jordan-park-001` | Agent/session owner ID used for all mempill memory operations |
+| `MEMPILL_DB_DIR` | — (in-memory) | Base directory for a persistent SQLite engine; file derived as `MEMPILL_DB_DIR/agent_{MEMPILL_AGENT_ID}.db` |
 | `ANTHROPIC_API_KEY` | — | Required for the free-form ReAct agent LLM (tool-calling) |
 | `ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` | Anthropic model for the ReAct agent |
 | `LANGSMITH_API_KEY` | — | Enables LangSmith tracing; absent → no-op |
@@ -145,11 +155,9 @@ mempill-demo/
 
 ## mempill dependency
 
-mempill 0.3.0 is published on PyPI (`valid_at` + granularity + oracle HITL features included)
-and resolves via the normal `mempill>=0.3.0,<0.4` pin in `pyproject.toml`. `scripts/setup.sh`
-installs it like any other dependency — no local build step required.
-
-**Developing against unreleased mempill engine changes:** `scripts/setup.sh --local-engine`
-builds and installs mempill from the sibling `../mempill` repo instead of PyPI — useful when
-testing new engine features (e.g. a new query method) before they're published. The default
-`scripts/setup.sh` (no flag) always installs from PyPI and is what regular contributors should use.
+mempill 0.4.0 (per-agent file storage via `open_for_agent` / `open_oracle_for_agent`) is
+**not yet published on PyPI** — it is deliberately unpublished until this migration is fully
+verified. Until it is published, `scripts/setup.sh --local-engine` is **required**: it builds
+and installs mempill from the sibling `../mempill` repo instead of PyPI. The default
+`scripts/setup.sh` (no flag) resolves the `mempill>=0.4.0,<0.5` pin in `pyproject.toml` against
+PyPI and will fail until 0.4.0 is published — do not use it yet.

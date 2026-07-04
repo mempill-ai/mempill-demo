@@ -13,7 +13,9 @@ Verified end-to-end with real LLM (`claude-haiku-4-5-20251001`).
 # Do NOT run uv sync or reinstall mempill — use .venv/bin/python
 
 # Optional: reset the persistent DB to start fresh
-rm -f .mempill/showcase.db
+# (file is derived as <MEMPILL_DB_DIR>/agent_<MEMPILL_AGENT_ID>.db; default agent_id
+# is jordan-park-001)
+rm -f .mempill/agent_jordan-park-001.db
 ```
 
 **2. Start LangGraph Studio**
@@ -265,7 +267,7 @@ The agent reports that the decision is deferred.
 To run the demo again from scratch:
 ```bash
 # Stop langgraph dev (Ctrl+C)
-rm -f .mempill/showcase.db
+rm -f .mempill/agent_jordan-park-001.db
 .venv/bin/langgraph dev
 # Day-0 facts re-seeded at graph module-import time on next start
 ```

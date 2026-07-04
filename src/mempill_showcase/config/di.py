@@ -5,7 +5,7 @@ Builds the engine + chosen adapter (mempill or naive) based on settings.
 All mempill imports are deferred to this module and the mempill_adapter.
 
 Public API:
-  build_mempill_adapter(in_memory, oracle_backed, db_path)
+  build_mempill_adapter(in_memory, oracle_backed, db_dir, agent_id)
     Build a MempillAdapter wrapping a real mempill engine.
 
   build_naive_adapter()
@@ -35,7 +35,8 @@ Environment variables:
   LANGSMITH_API_KEY  — enables LangSmith tracing (optional; absent = no-op).
   LANGSMITH_TRACING  — set to "true" to force-enable tracing.
   LANGSMITH_PROJECT  — LangSmith project name (default: "mempill-showcase").
-  MEMPILL_DB_PATH    — optional persistent SQLite engine path.
+  MEMPILL_DB_DIR     — optional persistent SQLite engine base directory
+                        (file derived as MEMPILL_DB_DIR/agent_{MEMPILL_AGENT_ID}.db).
 """
 from __future__ import annotations
 
@@ -51,14 +52,15 @@ _SENTINEL = object()
 
 
 def _adapter_from_settings(settings=None):
-    """Return a MempillAdapter configured from settings (db_path, oracle_backed)."""
+    """Return a MempillAdapter configured from settings (db_dir, agent_id, oracle_backed)."""
     if settings is None:
         from mempill_showcase.config.settings import get_settings
         settings = get_settings()
     return build_mempill_adapter(
         in_memory=True,
         oracle_backed=True,
-        db_path=settings.mempill_db_path or None,
+        db_dir=settings.mempill_db_dir or None,
+        agent_id=settings.mempill_agent_id,
     )
 
 
@@ -70,31 +72,35 @@ class AdapterMode(str, Enum):
 def build_mempill_adapter(
     in_memory: bool = True,
     oracle_backed: bool = True,
-    db_path: Optional[str] = None,
+    db_dir: Optional[str] = None,
+    agent_id: str = "jordan-park-001",
 ):
     """Build a MempillAdapter wrapping a real mempill engine.
 
     Args:
         in_memory:     True → ephemeral in-memory engine (tests and demos).
-                       Ignored when db_path is supplied.
+                       Ignored when db_dir is supplied.
         oracle_backed: True (default) → open_oracle_in_memory(HumanOracle()) so that
                        genuine conflicting Functional writes return QueuedForAdjudication
                        and queue for human adjudication via list_pending_adjudications /
                        submit_adjudication.
                        False → open_in_memory() (non-oracle).
-                       Always True when db_path is supplied.
-        db_path:       Optional filesystem path for a persistent SQLite-backed engine.
-                       When set, opens via mempill.open_oracle(path, HumanOracle()).
+                       Always True when db_dir is supplied.
+        db_dir:        Optional base directory for a persistent SQLite-backed engine.
+                       The actual file is derived as db_dir/agent_{agent_id}.db.
+                       When set, opens via mempill.open_oracle_for_agent(db_dir, agent_id, HumanOracle()).
+        agent_id:      Agent ID used to derive the per-agent DB file when db_dir is
+                       supplied. Defaults to the showcase's default agent identity.
     """
     import mempill
     from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
     from mempill_showcase.core.ports.oracle import HumanOracle
 
-    if db_path:
+    if db_dir:
         import pathlib
-        pathlib.Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path(db_dir).mkdir(parents=True, exist_ok=True)
         oracle = HumanOracle()
-        engine = mempill.open_oracle(str(db_path), oracle)
+        engine = mempill.open_oracle_for_agent(str(db_dir), agent_id, oracle)
         return MempillAdapter(engine)
 
     if oracle_backed:
