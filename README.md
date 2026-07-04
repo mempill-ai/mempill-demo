@@ -10,13 +10,14 @@ last-write-wins adapter (`NaiveAdapter`) for contrast and a full compliance audi
 
 ## Quickstart — mempill_showcase
 
-**Python 3.12 required.** mempill 0.3.0 is published on PyPI and installs as a normal
-dependency. `scripts/setup.sh` handles the rest of the environment setup.
+**Python 3.12 required.** mempill 0.4.0 is not yet published on PyPI, so setup requires
+`--local-engine` (builds mempill from a sibling `../mempill` checkout) — see
+[mempill dependency](#mempill-dependency) below for details.
 
 ```bash
 git clone <this-repo> mempill-demo
 cd mempill-demo
-bash scripts/setup.sh        # creates .venv, installs mempill (from PyPI) + all extras
+bash scripts/setup.sh --local-engine   # creates .venv, builds + installs mempill from ../mempill + all extras
 ```
 
 Run the 6-beat executive-assistant scenario (B-01..B-06) via the free-form ReAct agent:
