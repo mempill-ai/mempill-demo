@@ -28,11 +28,11 @@ Run the 6-beat executive-assistant scenario (B-01..B-06) via the free-form ReAct
 .venv/bin/mempill-showcase-audit    # compliance audit: tx-time replay + full provenance ledger
 ```
 
-Run the test suite (304 deterministic + 12 live tests):
+Run the test suite (370 deterministic + 22 live tests):
 
 ```bash
 .venv/bin/python -m pytest -m "not live" -q
-# Expected: 304 passed
+# Expected: 370 passed
 ```
 
 See [SHOWCASE.md](SHOWCASE.md) for the full architecture, 6-beat scenario walkthrough,
@@ -40,11 +40,17 @@ design decisions, and bi-temporal query examples.
 
 ---
 
-## Architecture (one line)
+## Architecture
 
-A single free-form ReAct agent (`create_react_agent`) with 7 memory tools + a thin LangGraph
+**Primary (mempill_showcase):** A single free-form ReAct agent (`create_react_agent`) with 7 memory tools + a thin LangGraph
 shell for durable HITL `interrupt()`, backed by mempill bi-temporal memory;
 naive-vs-mempill adapter toggle via `NAIVE_MODE=true`.
+
+**Dual-agent router (mempill_showcase Studio graphs):** A natural-language router entry point (`dual_agent_router`) that classifies incoming questions
+and dispatches to two isolated ReAct agents — `people_ops_agent` (handles person facts: Alice, Bob, Jordan's colleagues and roles)
+and `org_registry_agent` (handles organization facts: Acme Corp's leadership and structure). Each agent owns its own per-agent
+SQLite database file under `.mempill/`, making mempill 0.4.0's per-agent storage visible and auditable. Ambiguous queries
+default-route to `people_ops_agent`.
 
 ---
 
@@ -73,10 +79,10 @@ amplification firewall) without any multi-agent framework:
 | Variable | Default | Effect |
 |---|---|---|
 | `NAIVE_MODE` | `false` | `true` → use NaiveAdapter (last-write-wins, no bi-temporal) |
-| `MEMPILL_AGENT_ID` | `jordan-park-001` | Agent/session owner ID used for all mempill memory operations |
-| `MEMPILL_DB_DIR` | — (in-memory) | Base directory for a persistent SQLite engine; file derived as `MEMPILL_DB_DIR/agent_{MEMPILL_AGENT_ID}.db` |
+| `MEMPILL_AGENT_ID` | `jordan-park-001` | Agent/session owner ID for the single-agent exec_assistant. Ignored by dual-agent router graphs (which use per-graph agent IDs: `people-ops-001`, `org-registry-001`). |
+| `MEMPILL_DB_DIR` | — (in-memory) | Base directory for persistent SQLite engines; each agent's file is derived as `MEMPILL_DB_DIR/agent_{AGENT_ID}.db`. For dual-agent router, defaults to `./.mempill/` (not in-memory) to persist separate per-agent databases. |
 | `ANTHROPIC_API_KEY` | — | Required for the free-form ReAct agent LLM (tool-calling) |
-| `ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` | Anthropic model for the ReAct agent |
+| `ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` | Anthropic model for the ReAct agent and router classifier |
 | `LANGSMITH_API_KEY` | — | Enables LangSmith tracing; absent → no-op |
 | `LANGSMITH_TRACING` | — | `true` to force-enable tracing |
 | `LANGSMITH_PROJECT` | `mempill-showcase` | LangSmith project name |
