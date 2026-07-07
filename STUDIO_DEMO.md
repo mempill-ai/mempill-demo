@@ -18,18 +18,24 @@ Verified end-to-end with real LLM (`claude-haiku-4-5-20251001`).
 rm -f .mempill/agent_jordan-park-001.db
 ```
 
-**2. Start LangGraph Studio**
+**2. Install LangGraph Studio**
+```bash
+pip install 'langgraph-cli[inmem]'
+```
+
+**3. Start LangGraph Studio**
 ```bash
 .venv/bin/langgraph dev
 # Studio opens at http://127.0.0.1:2024
 ```
 
-**3. Open Studio**
+**4. Open Studio**
 - Navigate to `http://127.0.0.1:2024`
-- Select the `exec_assistant` graph from the graph picker
-- The graph is a single free-form ReAct agent (one node visible)
+- Select a graph from the graph picker:
+  - `exec_assistant` — legacy single-agent entry point
+  - `dual_agent_router` — new dual-agent entry point with classification routing
 
-**4. Configuration**
+**5. Configuration**
 - In the **Input** panel, fill the `messages` field with a natural-language question
 - Day-0 facts are seeded automatically at graph module-import time (when `langgraph dev` starts):
   - alice-chen / employer = Acme Corp / VP Engineering (since 2023-06)
@@ -229,6 +235,102 @@ Affirm
 - Post-resolution recall shows `status=Resolved, value="Joan", valid_until="2025-11"`
 
 **What to verify:** Interrupts panel clears; answer confirms Joan's appointment is valid through November 2025.
+
+---
+
+## Dual-Agent Router Demo (mempill 0.4.0 per-agent storage)
+
+Start a **new thread** in Studio and select the **dual_agent_router** graph from the graph picker.
+
+### Router Scenario 1 — Query routed to people_ops_agent
+
+**User Input:**
+```
+What city was Bob living in?
+```
+
+**Expected behaviour:**
+1. Router classifier determines the query is about a PERSON (Bob Liu)
+2. Dispatches to **people_ops_agent** (agent_id = "people-ops-001")
+3. Agent recalls Bob's facts → no city predicate found
+4. Answer: "I don't have information about Bob Liu's city in my records."
+
+**What to verify:**
+- Answer relates to Bob (a person in the people_ops domain)
+- No interrupt
+
+### Router Scenario 2 — Query routed to org_registry_agent
+
+**User Input:**
+```
+Where is Acme's headquarters?
+```
+
+**Expected behaviour:**
+1. Router classifier determines the query is about an ORGANISATION (Acme)
+2. Dispatches to **org_registry_agent** (agent_id = "org-registry-001")
+3. Agent recalls acme-corp/hq_location → "Austin, TX"
+4. Answer: "Acme's headquarters is located in Austin, TX."
+
+**What to verify:**
+- Answer contains Acme's location
+- Agent used org_registry_agent, not people_ops_agent
+
+### Router Scenario 3 — Ambiguous query (default to people_ops)
+
+**User Input:**
+```
+Tell me about Jordan
+```
+
+**Expected behaviour:**
+1. Router classifier finds the query ambiguous (could be Jordan the person or orgs Jordan works with)
+2. Defaults to **people_ops_agent** per design (ARCHITECTURE.md §2)
+3. Agent recalls jordan-park facts → preferred_hotel = "Marriott Bonvoy Gold"
+4. Answer describes Jordan's attributes
+
+**What to verify:**
+- Answer mentions Jordan's person-domain attributes (hotel preference)
+- Demonstrates default-route-to-people_ops behavior
+
+### Verify per-agent SQLite files (post-router-run)
+
+After running the router scenarios above, inspect the per-agent databases on disk:
+
+```bash
+# Stop langgraph dev (Ctrl+C) or leave it running in another terminal
+ls -la .mempill/
+# Expected output:
+#   agent_people-ops-001.db
+#   agent_org-registry-001.db
+#   (if running single-agent exec_assistant: also agent_jordan-park-001.db)
+
+# Inspect people_ops_agent's database (6 seeded facts + any writes from queries):
+sqlite3 .mempill/agent_people-ops-001.db "select subject, predicate, value from claims;"
+# Expected seed (6 rows):
+#   alice-chen|employer|Acme Corp / VP Engineering
+#   alice-chen|city|Austin TX
+#   alice-chen|dietary_restriction|vegetarian
+#   bob-liu|employer|Meridian Ventures / Partner
+#   bob-liu|travel_preference|window seat, no checked bags
+#   jordan-park|preferred_hotel|Marriott Bonvoy Gold
+
+# Inspect org_registry_agent's database (2 seeded facts + any writes from queries):
+sqlite3 .mempill/agent_org-registry-001.db "select subject, predicate, value from claims;"
+# Expected seed (2 rows):
+#   acme-corp|ceo|Diane Foster
+#   acme-corp|hq_location|Austin, TX
+
+# Verify agent_id isolation (each file only contains its own agent's claims):
+sqlite3 .mempill/agent_people-ops-001.db "select distinct agent_id from claims;"
+# Output: people-ops-001
+
+sqlite3 .mempill/agent_org-registry-001.db "select distinct agent_id from claims;"
+# Output: org-registry-001
+```
+
+**What to verify:** Two separate database files exist and are never cross-contaminated — this is mempill 0.4.0's
+per-agent storage in action.
 
 ---
 
