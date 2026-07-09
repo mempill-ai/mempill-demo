@@ -39,7 +39,10 @@ from mempill_showcase.frameworks.langgraph.agents_config import (
     ORG_REGISTRY_SPEC,
     PEOPLE_OPS_SPEC,
 )
-from mempill_showcase.frameworks.langgraph.router_state import RouterState
+from mempill_showcase.frameworks.langgraph.router_state import (
+    RouterInputState,
+    RouterState,
+)
 
 log = logging.getLogger(__name__)
 
@@ -179,8 +182,14 @@ def build_router_graph(
 
     Returns:
         A compiled StateGraph (CompiledGraph).
+
+    input_schema=RouterInputState (TASK-31-W5): restricts the graph's declared
+    INPUT contract to {messages} so LangGraph Studio's input form renders the
+    friendly "+ Message" widget instead of raw-array input over the full
+    internal state (agent_id/route/route_rationale). Internal state flow is
+    unaffected — route_query still reads/writes the full RouterState.
     """
-    graph = StateGraph(RouterState)
+    graph = StateGraph(RouterState, input_schema=RouterInputState)
 
     graph.add_node("route_query", make_route_query_node(model_name=model_name))
     graph.add_node("people_ops_subgraph", people_ops_subgraph)
