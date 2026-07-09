@@ -207,6 +207,14 @@ TOOL SELECTION GUIDE:
      each claim's originally-stated valid_from/valid_until — those may have
      been overridden by later adjudication and would produce a stale or
      overlapping (incorrect) narrative.
+   → CRITICAL — dates: use each entry's valid_from_display/valid_until_display
+     VERBATIM when stating a date (e.g. "December 2025", from display "2025-12").
+     NEVER expand a month- or year-granular display string into a specific day
+     ("December 1, 2025" is a FABRICATION when the display is "2025-12" — the
+     raw valid_from/valid_until timestamps are always midnight-normalised
+     instants and must NOT be read as day-precision). If a display field is
+     null, fall back to month precision (e.g. "2025-12") rather than stating
+     any day.
 
 RULES:
 - BEFORE calling remember_fact to (re-)assert a fact: if recall_subject or
@@ -232,6 +240,12 @@ RULES:
   month-precision → say "June 2023" (not "June 1, 2023"); year-precision → say "2023"
   (not a fabricated month or day). NEVER fabricate a day or month the user did not
   provide — if the user said "June 2023", the fact is month-precision; report it as such.
+- This applies to EVERY tool's output, including query_history: whenever a tool result
+  provides a *_display field (valid_from_display, valid_until_display), use that string
+  VERBATIM to state the date. NEVER expand a month-granular ("2025-12") or year-granular
+  ("2025") display value into a fabricated day-precision date ("December 1, 2025" is
+  WRONG unless the user/claim actually stated a day) — the underlying raw timestamp is
+  always midnight-normalised and must never be read as evidence of day precision.
 """
 
 # ── ShowcaseTools NamedTuple (kept for DI wiring compatibility) ───────────────
