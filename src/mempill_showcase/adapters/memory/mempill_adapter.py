@@ -15,28 +15,17 @@ Write path:
 Read path:
   - recall(): uses raw query_memory (no valid_at) → current belief.
   - query_at(): raw query_memory with valid_at and/or as_of_tx_time → bi-temporal.
-  - Both extract valid_from_display/valid_until_display from the raw response
-    (pre-rendered by the engine at the recorded granularity precision).
-  - query_history(): the engine's HistoryEntry DTO does NOT carry granularity or
-    display fields (confirmed against mempill 0.4.0 — query_memory/query_subject
-    are enriched via display.rs, query_history is not, and the core HistoryEntry
-    struct has no start_granularity/end_granularity field at all — a genuine
-    engine-side gap, not a bindings gap). query_memory(valid_at=<historical
-    instant>) also does NOT do a true as-of-valid-time lookup on this engine
-    version — it still returns the CURRENT live claim regardless of valid_at, so
-    it cannot be used to backfill a superseded entry's display string either.
-    To avoid fabricating day-precision, this adapter maintains an in-process
-    claim_ref -> start_granularity/end_granularity cache (_granularity_cache),
-    populated at write_claim() time (BEFORE RFC3339 expansion, so the original
-    caller precision is known). query_history() looks up each returned entry's
-    claim_ref in this cache and renders valid_from_display/valid_until_display
-    locally using the SAME rendering rule as the engine's own
-    format_valid_time_endpoint (year -> "YYYY", month -> "YYYY-MM", day/instant/
-    unknown -> "YYYY-MM-DD"). Entries whose claim_ref is not in the cache (e.g.
-    written by a prior process against a persistent SQLite engine, before this
-    adapter instance existed) fall back to omitting the display fields — the
-    tool/prompt layer is instructed to fall back to month-level ("YYYY-MM")
-    reporting in that case rather than guessing day precision.
+  - query_history(): as of mempill 0.4.0 (engine PR #67) the HistoryEntry DTO
+    natively carries valid_from_display/valid_until_display and
+    valid_from_granularity/valid_until_granularity, pre-rendered by the engine
+    at the recorded precision (year -> "YYYY", month -> "YYYY-MM", day/instant
+    -> "YYYY-MM-DD"), including correct truncation of a superseded entry's
+    valid_until_display against its successor's granularity. This adapter
+    passes those fields through unchanged — no local rendering or caching
+    needed. (Prior to PR #67 this adapter worked around the gap with an
+    in-process claim_ref -> granularity cache; removed now that the engine
+    fields are always present and strictly more complete, since they also
+    cover claims written by a prior process against a persistent engine.)
 
 Oracle path (W7):
   - list_pending_adjudications(): wraps engine.list_pending_adjudications(agent_id=...)
@@ -94,25 +83,6 @@ def _infer_granularity(date_str: Optional[str]) -> Optional[str]:
     if m.group(2):
         return "month"
     return "year"
-
-
-def _render_display(iso: Optional[str], granularity: Optional[str]) -> Optional[str]:
-    """Render an RFC3339 instant as a display string at the given granularity.
-
-    Mirrors mempill's own `format_valid_time_endpoint` rendering rule exactly:
-      "year"  -> "YYYY"
-      "month" -> "YYYY-MM"
-      "day" | "instant" | None -> "YYYY-MM-DD"
-    Returns None if iso is falsy (absent/open endpoint).
-    """
-    if not iso:
-        return None
-    date_part = iso.split("T", 1)[0]  # "YYYY-MM-DD"
-    if granularity == "year":
-        return date_part[:4]
-    if granularity == "month":
-        return date_part[:7]
-    return date_part
 
 
 # ── Response → domain type helpers ────────────────────────────────────────────
@@ -217,11 +187,6 @@ class MempillAdapter:
 
     def __init__(self, engine: mempill.Engine) -> None:
         self._engine = engine
-        # claim_ref (str) -> (start_granularity, end_granularity), populated at
-        # write_claim() time. See module docstring "query_history()" note: this
-        # is an in-process cache working around a genuine engine-side gap (the
-        # HistoryEntry DTO returned by query_history carries no granularity).
-        self._granularity_cache: dict[str, tuple[Optional[str], Optional[str]]] = {}
 
     # ── Write path ────────────────────────────────────────────────────────────
 
@@ -294,12 +259,6 @@ class MempillAdapter:
         ref = resp["claim_ref"]
         contested = resp.get("contested_with") or []
         log.debug("ingest result disposition=%s claim_ref=%s", disp, ref)
-
-        # Cache this claim's own granularity (inferred pre-RFC3339-expansion,
-        # above) keyed by claim_ref, so query_history() can later render an
-        # honest display string for this specific claim without fabricating
-        # day precision. See module docstring for why this cache exists.
-        self._granularity_cache[str(ref)] = (start_gran, end_gran)
 
         return WriteReceipt(
             claim_ref=ref,
@@ -445,26 +404,20 @@ class MempillAdapter:
         from audit_trail/recall_subject; this fold IS the authoritative answer to
         "history over time" questions.
 
-        Each entry is additionally enriched (best-effort) with
-        valid_from_display/valid_until_display, rendered from this adapter's
-        in-process claim_ref -> granularity cache (populated at write_claim()
-        time). See module docstring for why this is needed instead of reading
-        display fields straight off the engine response: query_history's
-        HistoryEntry DTO carries no granularity at all in mempill 0.4.0.
-
-        IMPORTANT caveat: valid_until_display is rendered from the entry's
-        EFFECTIVE (possibly truncated-by-a-later-claim) valid_until timestamp,
-        using the ORIGINATING claim's OWN end_granularity (or, if the claim had
-        no stated end — i.e. was truncated by a successor — the successor
-        claim's start_granularity, since the truncation point IS the successor's
-        start). Entries whose claim_ref was never seen by this adapter instance
-        (e.g. pre-existing data in a persistent engine from a prior process)
-        get valid_from_display/valid_until_display = None; callers must not
-        fabricate day precision in that case either.
+        Each entry natively carries valid_from_display/valid_until_display (plus
+        valid_from_granularity/valid_until_granularity) from the engine itself
+        (mempill 0.4.0, engine PR #67) — honest, granularity-aware renders (e.g.
+        "2025-12" for a month-granular fact, never a fabricated day), already
+        correctly truncated against a successor's granularity where applicable.
+        The engine OMITS *_until_display/*_until_granularity entirely (rather
+        than setting them to None) when valid_until is open-ended; this adapter
+        normalises that to an explicit None so callers/tests can rely on the
+        keys always being present.
 
         Returns a list of dicts, each containing:
           claim_ref, value, valid_from, valid_until, status ("Current"/"Superseded"),
-          provenance, value_confidence, valid_from_display, valid_until_display.
+          provenance, value_confidence, valid_from_display, valid_until_display,
+          valid_from_granularity, valid_until_granularity.
         """
         log.debug(
             "query_history agent=%s subject=%s predicate=%s", agent_id, subject, predicate
@@ -474,34 +427,12 @@ class MempillAdapter:
             "subject": subject,
             "predicate": predicate,
         })
-        raw_entries: list[dict] = list(raw.get("entries") or [])
-
         entries: list[dict] = []
-        for i, e in enumerate(raw_entries):
+        for e in raw.get("entries") or []:
             entry = dict(e)
-            claim_ref = str(e.get("claim_ref") or "")
-            start_gran, end_gran = self._granularity_cache.get(claim_ref, (None, None))
-
-            entry["valid_from_display"] = _render_display(e.get("valid_from"), start_gran)
-
-            valid_until = e.get("valid_until")
-            if valid_until is None:
-                entry["valid_until_display"] = None
-            elif end_gran is not None:
-                # Claim's own stated end (not truncated by a successor).
-                entry["valid_until_display"] = _render_display(valid_until, end_gran)
-            else:
-                # No own end_granularity cached => this entry's valid_until is
-                # the EFFECTIVE window closed by the next entry's start. Reuse
-                # the successor's start_granularity so a month-granular
-                # successor doesn't manifest as a fabricated day-precision end.
-                successor = raw_entries[i + 1] if i + 1 < len(raw_entries) else None
-                succ_ref = str((successor or {}).get("claim_ref") or "")
-                succ_start_gran, _ = self._granularity_cache.get(succ_ref, (None, None))
-                entry["valid_until_display"] = _render_display(valid_until, succ_start_gran)
-
+            entry.setdefault("valid_until_display", None)
+            entry.setdefault("valid_until_granularity", None)
             entries.append(entry)
-
         log.debug(
             "query_history returned %d entries for %s/%s", len(entries), subject, predicate
         )
