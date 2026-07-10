@@ -17,18 +17,27 @@ Covers:
   H4. ResolveAdjudicationTool: resubmitting an already-resolved (stale/orphaned)
       handle_id returns status="already_resolved" (informational), not a raw
       NotFoundError propagating to the caller.
+  H5. (TASK-31-W5) honest granularity display: a month-granular fact ("Sam
+      became CEO in December 2025") must surface valid_from_display=="2025-12"
+      in BOTH adapter.query_history and QueryHistoryTool._run's JSON payload,
+      alongside the raw valid_from timestamp (both present, display is
+      additive). Also covers a truncated Superseded entry's valid_until_display
+      reflecting the SUCCESSOR's granularity at the truncation point.
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import re
+import uuid
 
 import pytest
 
 from mempill import ProvenanceLabel
 from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
-from mempill_showcase.config.di import build_mempill_adapter
+from mempill_showcase.config.di import build_mempill_adapter, build_tools
 from mempill_showcase.core.domain.models import ClaimInput
+from mempill_showcase.frameworks.langgraph.graph import build_graph
 from mempill_showcase.tools.query_history_tool import QueryHistoryTool
 from mempill_showcase.tools.resolve_adjudication_tool import ResolveAdjudicationTool
 
@@ -255,3 +264,116 @@ class TestResolveAdjudicationStaleHandleGuard:
             "verdict": "Affirm",
         }))
         assert result["status"] == "not_found"
+
+
+# ── H5: honest granularity display (TASK-31-W5 fix) ──────────────────────────
+
+class TestQueryHistoryHonestDisplay:
+    """Regression test for the fabricated-day-precision bug: a month-granular
+    fact ("Sam became CEO in December 2025") must never be reported with a
+    specific day. Covers both the adapter and the tool's JSON payload."""
+
+    def test_month_granular_fact_surfaces_display_alongside_raw(
+        self, oracle_adapter: MempillAdapter
+    ) -> None:
+        disposition = _write_ceo(oracle_adapter, "Sam", "2025-12")
+        assert disposition == "CommittedCheap"
+
+        entries = oracle_adapter.query_history(AGENT_ID, "acme-corp", "ceo")
+        assert len(entries) == 1
+        entry = entries[0]
+
+        # Raw timestamp is KEPT (needed for ordering/precision elsewhere).
+        assert entry["valid_from"].startswith("2025-12-01")
+        # Honest display is ADDITIVE, at month precision — no fabricated day.
+        assert entry["valid_from_display"] == "2025-12"
+        assert entry["valid_until"] is None
+        assert entry["valid_until_display"] is None
+
+    def test_tool_json_payload_includes_honest_display(
+        self, oracle_adapter: MempillAdapter
+    ) -> None:
+        assert _write_ceo(oracle_adapter, "Sam", "2025-12") == "CommittedCheap"
+        tool = QueryHistoryTool(adapter=oracle_adapter)
+
+        raw = tool.invoke({"agent_id": AGENT_ID, "subject": "acme-corp", "predicate": "ceo"})
+        result = json.loads(raw)
+        entry = result["entries"][0]
+
+        assert entry["valid_from"].startswith("2025-12-01")
+        assert entry["valid_from_display"] == "2025-12"
+        assert "December 1" not in raw
+        assert "2025-12-01" not in raw.replace(entry["valid_from"], "")  # only the raw field carries day form
+
+    def test_truncated_superseded_entry_display_uses_successor_granularity(
+        self, oracle_adapter: MempillAdapter
+    ) -> None:
+        """Joan's stated end (2025-11, month) is truncated to John's start
+        (2025-01, month) by the fold. valid_until_display must reflect the
+        TRUNCATION point at the successor's (John's) granularity, not a
+        fabricated day and not Joan's originally-stated end."""
+        _seed_diane_joan_john(oracle_adapter)
+        entries = oracle_adapter.query_history(AGENT_ID, "acme-corp", "ceo")
+        diane, joan, john = entries
+
+        assert diane["valid_from_display"] == "2021-04"
+        assert diane["valid_until_display"] == "2024-09"  # Joan's start, truncation point
+
+        assert joan["valid_from_display"] == "2024-09"
+        assert joan["valid_until_display"] == "2025-01"  # John's start, NOT Joan's stated 2025-11
+        assert joan["valid_until_display"] != "2025-11"
+
+        assert john["valid_from_display"] == "2025-01"
+        assert john["valid_until_display"] is None
+
+
+# ── H6: live end-to-end — LLM must not fabricate day precision ──────────────
+
+def _cfg(thread_id: str | None = None) -> dict:
+    return {"configurable": {"thread_id": thread_id or str(uuid.uuid4())}}
+
+
+@pytest.mark.live
+class TestQueryHistoryLiveHonestDates:
+    """End-to-end (real ANTHROPIC_API_KEY) regression for the fabricated-day-
+    precision bug: "Sam became CEO in December 2025" (month granularity) must
+    be reported back as month-precision, never "December 1, 2025"."""
+
+    def test_agent_does_not_fabricate_day_for_month_granular_history(
+        self, oracle_adapter: MempillAdapter
+    ) -> None:
+        from langchain_core.messages import HumanMessage
+
+        tools = build_tools(oracle_adapter)
+        app = build_graph(adapter=oracle_adapter, tools=tools)
+        cfg = _cfg()
+
+        write_result = app.invoke(
+            {"messages": [HumanMessage(
+                content="Sam became Acme Corp's CEO in December 2025."
+            )]},
+            cfg,
+        )
+        assert "__interrupt__" not in write_result, (
+            f"First CEO write for acme-corp must not contest, got {write_result}"
+        )
+
+        history_result = app.invoke(
+            {"messages": [HumanMessage(
+                content="What is the history of Acme Corp's CEOs over time?"
+            )]},
+            cfg,
+        )
+        reply = history_result["messages"][-1].content
+        if isinstance(reply, list):
+            reply = " ".join(
+                block.get("text", "") if isinstance(block, dict) else str(block)
+                for block in reply
+            )
+
+        assert not re.search(r"December\s+1,?\s+2025", reply), (
+            f"Agent fabricated day precision for a month-granular fact. Reply: {reply!r}"
+        )
+        assert ("December 2025" in reply) or ("2025-12" in reply), (
+            f"Agent must still report the correct month/year. Reply: {reply!r}"
+        )

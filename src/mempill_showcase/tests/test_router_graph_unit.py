@@ -208,6 +208,20 @@ class TestBuildRouterGraph:
         checkpointer = getattr(compiled, "checkpointer", None)
         assert not isinstance(checkpointer, MemorySaver)
 
+    def test_compiled_graph_input_schema_exposes_only_messages(self):
+        """TASK-31-W5: Studio's input form must show only Messages — not the
+        full internal RouterState (agent_id/route/route_rationale). A prior
+        Studio input error occurred because the raw-array input form coerced
+        a comma-separated value into an int, crashing message coercion."""
+        sub1 = self._dummy_subgraph()
+        sub2 = self._dummy_subgraph()
+        compiled = build_router_graph(sub1, sub2)
+
+        schema = compiled.get_input_jsonschema()
+        assert list(schema.get("properties", {}).keys()) == ["messages"], (
+            f"router graph input schema must expose ONLY 'messages', got {schema}"
+        )
+
 
 class TestBuildAgentInstance:
     """di.build_agent_instance() composes adapter + tools + prompt + graph."""

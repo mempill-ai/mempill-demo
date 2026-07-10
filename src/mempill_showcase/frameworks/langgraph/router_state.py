@@ -20,6 +20,18 @@ Fields:
                       next node.
   route_rationale  — free-text rationale from the classifier, logged/surfaced
                       for demo transparency (not used for control flow).
+
+RouterInputState (TASK-31-W5): a narrower TypedDict exposing ONLY `messages`,
+passed as StateGraph(..., input_schema=RouterInputState) in router_graph.py.
+Without this, LangGraph Studio's input form for the compiled graph reflects
+the FULL RouterState (messages + agent_id + route + route_rationale) as raw
+JSON-array-of-fields input, rather than the friendly "+ Message" widget Studio
+renders for a schema whose only field is `messages`. This caused a real user
+error: Studio's raw-array input coerced a comma-separated value into an int
+("2025") which then crashed LangChain message coercion. Restricting the
+graph's declared input_schema to {messages} fixes the Studio UI without
+touching internal state flow (agent_id/route/route_rationale are still set by
+route_query as before; they are simply not part of the graph's INPUT contract).
 """
 from __future__ import annotations
 
@@ -32,3 +44,9 @@ class RouterState(TypedDict, total=False):
     agent_id: str
     route: Literal["people_ops", "org_registry"]
     route_rationale: str
+
+
+class RouterInputState(TypedDict, total=False):
+    """Narrow input schema for the router graph — Studio input form shows
+    only Messages (see module docstring)."""
+    messages: list[Any]
