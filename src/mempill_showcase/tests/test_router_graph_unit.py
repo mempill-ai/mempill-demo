@@ -188,6 +188,23 @@ class TestNormalizeMessages:
         assert normalized == []
         assert dropped == [{"no": "content"}]
 
+    def test_dict_with_content_but_no_role_dropped(self):
+        """Copilot review (PR #57): a dict with usable content but no "role"
+        key must be dropped, not kept — LangChain message-dict coercion
+        requires role+content, so accepting content-only dicts here would let
+        routing/classification see text that later silently disappears (or
+        raises) once the SAME dict reaches the subgraph."""
+        d = {"content": "hello but no role"}
+        normalized, dropped = _normalize_messages([d])
+        assert normalized == []
+        assert dropped == [d]
+
+    def test_dict_with_role_and_content_kept(self):
+        d = {"role": "user", "content": "hello with role"}
+        normalized, dropped = _normalize_messages([d])
+        assert normalized == [d]
+        assert dropped == []
+
     def test_mixed_valid_and_junk_survives_valid_parts(self):
         valid_msg = _FakeHumanMessage("hello")
         normalized, dropped = _normalize_messages(
@@ -217,6 +234,27 @@ class TestNormalizeMessages:
         assert len(normalized) == 1
         assert isinstance(normalized[0], HumanMessage)
         assert normalized[0].content == "What is Alice's role?"
+
+    def test_dropped_item_warning_never_logs_raw_content(self, caplog, monkeypatch):
+        """Copilot review (PR #57): route_query's dropped-item warning must
+        log only counts/types, never the raw item repr (dropped items may
+        carry user-provided content / PII)."""
+        import logging
+        import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
+
+        decision = RouteDecision(agent="people_ops", rationale="test")
+        fake = _FakeStructuredClassifier(decision=decision)
+        monkeypatch.setattr(rg_mod, "_build_classifier", lambda model_name=None: fake)
+
+        sensitive_dict = {"secret": "super-sensitive-pii-value-12345"}
+        route_query = rg_mod.make_route_query_node()
+
+        with caplog.at_level(logging.WARNING):
+            route_query({"messages": ["a real question", 2025, sensitive_dict]})
+
+        log_text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "super-sensitive-pii-value-12345" not in log_text
+        assert "secret" not in log_text
 
 
 class TestRouteQueryNodeMessageHardening:

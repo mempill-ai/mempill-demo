@@ -106,6 +106,34 @@ class TestSafeAddMessagesReducer:
         assert len(merged) == 1
         assert merged[0].content == "turn1"
 
+    def test_junk_in_existing_left_history_does_not_block_resume(self):
+        """Copilot review (PR #57): a pre-existing checkpoint (e.g. written
+        before this reducer existed, or corrupted by any other path) could
+        already carry non-coercible junk in `left`. The reducer must filter
+        BOTH sides, not just `right` — otherwise add_messages(left, ...)
+        raises on the same junk forever, permanently blocking that thread."""
+        junky_left = [HumanMessage(content="old turn"), 2025, None]
+        merged = _safe_add_messages(junky_left, [HumanMessage(content="new turn")])
+        contents = [m.content for m in merged]
+        assert contents == ["old turn", "new turn"], (
+            f"Expected junk in existing history to be filtered and resume to "
+            f"succeed, got {contents!r}"
+        )
+
+    def test_dropped_item_warning_never_logs_raw_content(self, caplog):
+        """Copilot review (PR #57): dropped items may carry user-provided
+        content (e.g. a malformed dict) and must never be repr()'d into logs —
+        only counts/types."""
+        import logging
+
+        sensitive_dict = {"secret": "super-sensitive-pii-value-12345"}
+        with caplog.at_level(logging.WARNING):
+            _safe_add_messages([], [2025, sensitive_dict])
+
+        log_text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "super-sensitive-pii-value-12345" not in log_text
+        assert "secret" not in log_text
+
 
 class TestRouterGraphAccumulation:
     """Deterministic, full-graph (dummy subgraph, monkeypatched classifier)
