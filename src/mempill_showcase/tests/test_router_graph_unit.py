@@ -22,6 +22,7 @@ from mempill_showcase.frameworks.langgraph.agents_config import (
 )
 from mempill_showcase.frameworks.langgraph.router_graph import (
     RouteDecision,
+    _normalize_messages,
     _select_route,
     build_router_graph,
     make_route_query_node,
@@ -154,6 +155,181 @@ class TestSelectRouteConditionalEdge:
 
     def test_select_route_missing_defaults_to_people_ops(self):
         assert _select_route({}) == "people_ops"
+
+
+class TestNormalizeMessages:
+    """_normalize_messages: router input hardening (TASK-33).
+
+    Regression: LangGraph Studio's raw-array input form for {messages}-only
+    schemas can coerce a scalar into a primitive (e.g. int) list entry. A
+    real Studio session crashed with NotImplementedError inside LangChain
+    message coercion, deep inside a subgraph, after route_query had already
+    committed to a route — normalizing at route_query's entry point means
+    subgraphs never see junk.
+    """
+
+    def test_int_entry_dropped_not_raised(self):
+        normalized, dropped = _normalize_messages([2025])
+        assert normalized == []
+        assert dropped == [2025]
+
+    def test_empty_list_normalizes_to_empty(self):
+        normalized, dropped = _normalize_messages([])
+        assert normalized == []
+        assert dropped == []
+
+    def test_empty_string_entry_dropped(self):
+        normalized, dropped = _normalize_messages([""])
+        assert normalized == []
+        assert dropped == [""]
+
+    def test_contentless_dict_dropped(self):
+        normalized, dropped = _normalize_messages([{"no": "content"}])
+        assert normalized == []
+        assert dropped == [{"no": "content"}]
+
+    def test_mixed_valid_and_junk_survives_valid_parts(self):
+        valid_msg = _FakeHumanMessage("hello")
+        normalized, dropped = _normalize_messages(
+            ["a real question", 2025, None, True, {"no": "content"}, valid_msg]
+        )
+        assert len(normalized) == 2
+        assert normalized[0].content == "a real question"
+        assert normalized[1] is valid_msg
+        assert dropped == [2025, None, True, {"no": "content"}]
+
+    def test_valid_dict_message_kept_as_is(self):
+        d = {"role": "user", "content": "hi there"}
+        normalized, dropped = _normalize_messages([d])
+        assert normalized == [d]
+        assert dropped == []
+
+    def test_non_string_primitives_all_dropped(self):
+        normalized, dropped = _normalize_messages([2025, 1.5, None, False, True])
+        assert normalized == []
+        assert dropped == [2025, 1.5, None, False, True]
+
+    def test_happy_path_string_coerced_to_human_message(self):
+        from langchain_core.messages import HumanMessage
+
+        normalized, dropped = _normalize_messages(["What is Alice's role?"])
+        assert dropped == []
+        assert len(normalized) == 1
+        assert isinstance(normalized[0], HumanMessage)
+        assert normalized[0].content == "What is Alice's role?"
+
+
+class TestRouteQueryNodeMessageHardening:
+    """route_query's entry-point normalization: the THE regression + friendly
+    ambiguous-default fallback when nothing usable survives."""
+
+    def test_int_message_does_not_raise_and_does_not_reach_subgraph(self, monkeypatch):
+        """{"messages": [2025]} — must not raise, and the returned state's
+        `messages` must NOT contain the raw int (so a downstream subgraph never
+        sees it)."""
+        import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
+
+        fake = _FakeStructuredClassifier(raises=AssertionError("classifier should not be reached"))
+        monkeypatch.setattr(rg_mod, "_build_classifier", lambda model_name=None: fake)
+
+        route_query = rg_mod.make_route_query_node()
+        state: RouterState = {"messages": [2025]}
+        result = route_query(state)  # must not raise
+
+        assert result["route"] == "people_ops"
+        assert result["agent_id"] == PEOPLE_OPS_SPEC.agent_id
+        assert 2025 not in result["messages"]
+        assert all(not isinstance(m, int) for m in result["messages"])
+
+    def test_empty_messages_list_defaults_ambiguous_with_friendly_message(self, monkeypatch):
+        import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
+
+        fake = _FakeStructuredClassifier(raises=AssertionError("classifier should not be reached"))
+        monkeypatch.setattr(rg_mod, "_build_classifier", lambda model_name=None: fake)
+
+        route_query = rg_mod.make_route_query_node()
+        result = route_query({"messages": []})
+
+        assert result["route"] == "people_ops"
+        assert result["agent_id"] == PEOPLE_OPS_SPEC.agent_id
+        assert len(result["messages"]) == 1
+        assert result["messages"][0].content  # friendly, non-empty text
+        assert fake.last_prompt is None  # classifier never invoked
+
+    def test_blank_string_message_defaults_ambiguous(self, monkeypatch):
+        import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
+
+        fake = _FakeStructuredClassifier(raises=AssertionError("classifier should not be reached"))
+        monkeypatch.setattr(rg_mod, "_build_classifier", lambda model_name=None: fake)
+
+        route_query = rg_mod.make_route_query_node()
+        result = route_query({"messages": [""]})
+
+        assert result["route"] == "people_ops"
+        assert fake.last_prompt is None
+
+    def test_contentless_dict_message_defaults_ambiguous(self, monkeypatch):
+        import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
+
+        fake = _FakeStructuredClassifier(raises=AssertionError("classifier should not be reached"))
+        monkeypatch.setattr(rg_mod, "_build_classifier", lambda model_name=None: fake)
+
+        route_query = rg_mod.make_route_query_node()
+        result = route_query({"messages": [{"no": "content"}]})
+
+        assert result["route"] == "people_ops"
+        assert fake.last_prompt is None
+
+    def test_mixed_valid_and_junk_routes_using_only_valid_parts(self, monkeypatch):
+        """Junk entries are dropped; the valid entry still drives routing."""
+        import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
+
+        decision = RouteDecision(agent="org_registry", rationale="mentions Acme's CEO")
+        fake = _FakeStructuredClassifier(decision=decision)
+        monkeypatch.setattr(rg_mod, "_build_classifier", lambda model_name=None: fake)
+
+        route_query = rg_mod.make_route_query_node()
+        result = route_query({"messages": [2025, None, "Who is Acme's CEO?"]})
+
+        assert result["route"] == "org_registry"
+        assert result["agent_id"] == ORG_REGISTRY_SPEC.agent_id
+        assert "Who is Acme's CEO?" in fake.last_prompt
+        assert len(result["messages"]) == 1
+        assert result["messages"][0].content == "Who is Acme's CEO?"
+
+    def test_happy_path_single_valid_message_unchanged_behavior(self, monkeypatch):
+        """Existing happy-path behavior (single valid HumanMessage) is unaffected."""
+        import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
+
+        decision = RouteDecision(agent="people_ops", rationale="mentions Bob")
+        fake = _FakeStructuredClassifier(decision=decision)
+        monkeypatch.setattr(rg_mod, "_build_classifier", lambda model_name=None: fake)
+
+        route_query = rg_mod.make_route_query_node()
+        result = route_query({"messages": [_FakeHumanMessage("What is Bob's travel preference?")]})
+
+        assert result["route"] == "people_ops"
+        assert result["agent_id"] == "people-ops-001"
+        assert result["route_rationale"] == "mentions Bob"
+        assert len(result["messages"]) == 1
+        assert result["messages"][0].content == "What is Bob's travel preference?"
+
+    def test_full_router_graph_survives_int_input_end_to_end(self, monkeypatch):
+        """Full build_router_graph().invoke({"messages": [2025]}) — the literal
+        Studio regression scenario — must not raise, using a dummy subgraph."""
+        import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
+
+        fake = _FakeStructuredClassifier(raises=AssertionError("classifier should not be reached"))
+        monkeypatch.setattr(rg_mod, "_build_classifier", lambda model_name=None: fake)
+
+        sub1 = TestBuildRouterGraph._dummy_subgraph()
+        sub2 = TestBuildRouterGraph._dummy_subgraph()
+        compiled = build_router_graph(sub1, sub2)
+
+        result = compiled.invoke({"messages": [2025]})  # must not raise
+
+        assert result["route"] == "people_ops"
+        assert all(not isinstance(m, int) for m in result["messages"])
 
 
 class TestAgentSpecConstants:
