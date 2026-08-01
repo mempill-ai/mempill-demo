@@ -158,7 +158,14 @@ def main() -> None:
     from mempill_demo.adapters.human_oracle import HumanOracle
 
     db_dir.mkdir(parents=True, exist_ok=True)
-    engine = mempill.open_oracle_for_agent(str(db_dir), args.agent, HumanOracle())
+    try:
+        engine = mempill.open_oracle_for_agent(str(db_dir), args.agent, HumanOracle())
+    except mempill.MempillError as exc:
+        # e.g. an invalid --agent id (characters outside [A-Za-z0-9_-]) raises
+        # mempill.StorageError deep inside the engine — surface it as a clean,
+        # single-line error rather than a raw traceback.
+        print(f"ERROR: could not open agent {args.agent!r}: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     # ── Build adapters ────────────────────────────────────────────────────────
     from mempill_demo.adapters.memory_mempill import MempillMemoryStore

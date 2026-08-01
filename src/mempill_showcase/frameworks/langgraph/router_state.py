@@ -32,15 +32,80 @@ error: Studio's raw-array input coerced a comma-separated value into an int
 graph's declared input_schema to {messages} fixes the Studio UI without
 touching internal state flow (agent_id/route/route_rationale are still set by
 route_query as before; they are simply not part of the graph's INPUT contract).
+
+Multi-turn `messages` reducer (TASK-33 item 3): `messages` carries
+`Annotated[list, _safe_add_messages]` — a hardened wrapper around LangGraph's
+built-in `add_messages` reducer.
+
+  WHY a reducer at all: without one, a plain `list[Any]` channel is
+  last-write-wins — every `app.invoke(..., config={"thread_id": X})` call on
+  an EXISTING thread fully OVERWRITES the checkpointed `messages` value with
+  just the new call's input, discarding all prior turns before route_query
+  (or any node) ever runs. Empirically this broke real multi-turn follow-ups
+  end-to-end (e.g. "What about her city?" after "What is Alice Chen's dietary
+  restriction?" — the agent lost the referent and asked the user to
+  clarify who "her" was, instead of answering from turn 1's context).
+
+  WHY NOT the plain `add_messages` reducer: `add_messages` raises
+  `NotImplementedError`/`ValueError` on items it cannot coerce to a
+  BaseMessage (e.g. a raw int, float, bool, None, or a dict missing
+  role/content) — and that coercion runs at the CHANNEL-MERGE step, when the
+  graph's raw `invoke()` input is applied, BEFORE route_query's own
+  `_normalize_messages` hardening (TASK-33 item 1) ever gets a chance to run.
+  Using the bare `add_messages` reducer here would therefore REINTRODUCE the
+  exact Studio int-crash regression item 1 fixes — just one step earlier.
+
+  `_safe_add_messages` closes that gap: it first tries the real
+  `add_messages`; on failure it re-attempts item-by-item, silently dropping
+  (with a warning) whichever items don't coerce, and merges the rest. This
+  keeps genuine cross-turn history (route_query's `_normalize_messages` then
+  applies its own stricter "usable content" business rule on top, e.g.
+  dropping a coercible-but-blank `""`) while remaining immune to the same
+  primitive-junk crash class as the router's input hardening.
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+import logging
+from typing import Annotated, Any, Literal
 from typing_extensions import TypedDict
+
+from langgraph.graph.message import add_messages
+
+log = logging.getLogger(__name__)
+
+
+def _safe_add_messages(left: list[Any], right: Any) -> list[Any]:
+    """Hardened wrapper around `langgraph.graph.message.add_messages`.
+
+    Delegates to the real `add_messages` reducer (dedup/merge-by-id,
+    chronological accumulation across turns). On a coercion failure (a raw
+    primitive or malformed dict that `add_messages` cannot turn into a
+    BaseMessage), filters the offending item(s) out of *right* — logging a
+    warning — and retries, so a single bad item degrades gracefully instead
+    of crashing the channel merge for the whole thread.
+    """
+    try:
+        return add_messages(left, right)
+    except Exception as exc:
+        right_list = right if isinstance(right, list) else [right]
+        safe_right: list[Any] = []
+        dropped: list[Any] = []
+        for item in right_list:
+            try:
+                add_messages([], [item])  # probe: does this item coerce alone?
+                safe_right.append(item)
+            except Exception:
+                dropped.append(item)
+        log.warning(
+            "_safe_add_messages: channel-merge coercion failed (%s) — "
+            "dropped %d non-coercible item(s): %r",
+            exc, len(dropped), dropped,
+        )
+        return add_messages(left, safe_right)
 
 
 class RouterState(TypedDict, total=False):
-    messages: list[Any]
+    messages: Annotated[list[Any], _safe_add_messages]
     agent_id: str
     route: Literal["people_ops", "org_registry"]
     route_rationale: str
@@ -48,5 +113,8 @@ class RouterState(TypedDict, total=False):
 
 class RouterInputState(TypedDict, total=False):
     """Narrow input schema for the router graph — Studio input form shows
-    only Messages (see module docstring)."""
+    only Messages (see module docstring). The reducer that actually governs
+    channel-merge behavior lives on `RouterState.messages` (the graph's
+    `state_schema`); LangGraph matches this input schema to that channel by
+    key name, so no separate reducer annotation is needed here."""
     messages: list[Any]
