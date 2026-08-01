@@ -113,12 +113,19 @@ def _normalize_messages(messages: list[Any]) -> tuple[list[Any], list[Any]]:
 
     Rules (first match wins per item):
       - non-empty str → coerced to HumanMessage(content=item).
-      - dict with usable "content" key → kept as-is (dict message form).
+      - dict with BOTH a "role" key AND usable "content" → kept as-is (dict
+        message form). A dict with content but no "role" is dropped: LangChain
+        message-dict coercion (used later by the subgraph / any add_messages
+        reducer) requires role+content — accepting content-only dicts here
+        would let routing/classification see text that then silently
+        disappears (or raises) once the SAME dict reaches the subgraph,
+        desyncing what was classified from what was actually answered.
       - any other object exposing a `.content` attribute (BaseMessage
         subclasses HumanMessage/AIMessage/..., and duck-typed equivalents)
         with usable content → kept as-is.
       - everything else (int/float/bool/None, empty str, message/dict with no
-        usable content, unrecognized types with no `.content`) → dropped.
+        usable content or missing "role", unrecognized types with no
+        `.content`) → dropped.
 
     Note: message-like objects are accepted via duck-typing (`.content`
     attribute), matching `_last_human_text`'s existing duck-typed convention,
@@ -142,7 +149,7 @@ def _normalize_messages(messages: list[Any]) -> tuple[list[Any], list[Any]]:
             continue
 
         if isinstance(item, dict):
-            if _has_usable_content(item.get("content")):
+            if item.get("role") and _has_usable_content(item.get("content")):
                 normalized.append(item)
             else:
                 dropped.append(item)
@@ -202,11 +209,13 @@ def make_route_query_node(model_name: Optional[str] = None):
         messages, dropped = _normalize_messages(raw_messages)
 
         if dropped:
+            # Log counts/types only — dropped items (e.g. malformed dicts) may
+            # carry raw user-provided content and must never be repr()'d into
+            # logs.
             log.warning(
-                "route_query: dropped %d invalid message item(s) (types=%s): %r",
+                "route_query: dropped %d invalid message item(s) (types=%s)",
                 len(dropped),
                 [type(d).__name__ for d in dropped],
-                dropped,
             )
 
         # ── Empty-after-normalization guard ──────────────────────────────────

@@ -80,28 +80,49 @@ def _safe_add_messages(left: list[Any], right: Any) -> list[Any]:
     Delegates to the real `add_messages` reducer (dedup/merge-by-id,
     chronological accumulation across turns). On a coercion failure (a raw
     primitive or malformed dict that `add_messages` cannot turn into a
-    BaseMessage), filters the offending item(s) out of *right* — logging a
-    warning — and retries, so a single bad item degrades gracefully instead
-    of crashing the channel merge for the whole thread.
+    BaseMessage), filters the offending item(s) out — logging a warning with
+    ONLY counts/types, never raw item values (they may carry user content /
+    PII) — and retries, so a single bad item degrades gracefully instead of
+    crashing the channel merge for the whole thread.
+
+    Filters BOTH *left* (the existing accumulated history) and *right* (this
+    update), not just *right*: a checkpoint written before this reducer
+    existed — or corrupted by any other path — could already carry
+    non-coercible junk in *left*. Filtering only *right* would leave
+    `add_messages(left, safe_right)` raising on that pre-existing junk forever,
+    permanently blocking resume of that thread.
     """
     try:
         return add_messages(left, right)
     except Exception as exc:
-        right_list = right if isinstance(right, list) else [right]
-        safe_right: list[Any] = []
-        dropped: list[Any] = []
-        for item in right_list:
-            try:
-                add_messages([], [item])  # probe: does this item coerce alone?
-                safe_right.append(item)
-            except Exception:
-                dropped.append(item)
+        safe_left, dropped_left = _filter_coercible(left)
+        safe_right, dropped_right = _filter_coercible(right)
         log.warning(
             "_safe_add_messages: channel-merge coercion failed (%s) — "
-            "dropped %d non-coercible item(s): %r",
-            exc, len(dropped), dropped,
+            "dropped %d non-coercible item(s) (%d from existing history "
+            "types=%s, %d from this update types=%s)",
+            exc,
+            len(dropped_left) + len(dropped_right),
+            len(dropped_left), [type(d).__name__ for d in dropped_left],
+            len(dropped_right), [type(d).__name__ for d in dropped_right],
         )
-        return add_messages(left, safe_right)
+        return add_messages(safe_left, safe_right)
+
+
+def _filter_coercible(items: Any) -> tuple[list[Any], list[Any]]:
+    """Split *items* into (coercible, non_coercible) by probing each item
+    through `add_messages` individually. Used by `_safe_add_messages` to
+    recover from a whole-batch coercion failure on either side of the merge."""
+    items_list = items if isinstance(items, list) else ([items] if items else [])
+    safe: list[Any] = []
+    dropped: list[Any] = []
+    for item in items_list:
+        try:
+            add_messages([], [item])  # probe: does this item coerce alone?
+            safe.append(item)
+        except Exception:
+            dropped.append(item)
+    return safe, dropped
 
 
 class RouterState(TypedDict, total=False):
