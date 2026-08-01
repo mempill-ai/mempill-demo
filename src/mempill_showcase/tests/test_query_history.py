@@ -23,6 +23,13 @@ Covers:
       alongside the raw valid_from timestamp (both present, display is
       additive). Also covers a truncated Superseded entry's valid_until_display
       reflecting the SUCCESSOR's granularity at the truncation point.
+  H7. (TASK-32-FOLLOWUP) restart survival: display fields must survive a
+      process restart against a persistent (file-backed) engine — i.e. they
+      come from the engine's own query_history response, not an in-process
+      cache tied to the adapter instance that wrote the claim. Regression
+      guard for the removed granularity-cache workaround (PR #55), which
+      degraded this exact case (a fresh adapter instance querying claims
+      written by a prior, now-disposed adapter instance).
 """
 from __future__ import annotations
 
@@ -325,6 +332,48 @@ class TestQueryHistoryHonestDisplay:
 
         assert john["valid_from_display"] == "2025-01"
         assert john["valid_until_display"] is None
+
+
+# ── H7: display fields survive a process restart (persistent engine) ───────
+
+class TestQueryHistoryDisplaySurvivesRestart:
+    """Regression guard for the removed granularity-cache workaround (PR #55):
+    a month-granular fact written by one adapter instance against a persistent
+    (file-backed) engine must still render valid_from_display correctly when
+    queried by a BRAND NEW adapter instance (simulating a Studio/process
+    restart) pointed at the same db_dir + agent_id. This was impossible with
+    the old in-process cache (scoped to the adapter instance that wrote the
+    claim) and works now because the display fields come from the engine's
+    own query_history response (mempill 0.4.0, engine PR #67)."""
+
+    def test_fresh_adapter_after_restart_still_renders_month_display(
+        self, tmp_path
+    ) -> None:
+        from mempill_showcase.config.di import build_mempill_adapter
+
+        db_dir = str(tmp_path / "restart_db")
+
+        # First adapter instance: write a month-granular fact, then simulate
+        # process exit by simply dropping the reference (no explicit close
+        # API on MempillAdapter/engine).
+        first_adapter = build_mempill_adapter(db_dir=db_dir, agent_id=AGENT_ID)
+        disposition = _write_ceo(first_adapter, "Sam", "2025-12")
+        assert disposition == "CommittedCheap"
+        del first_adapter
+
+        # Fresh adapter instance, same db_dir + agent_id — simulates a
+        # Studio/process restart with NO in-process cache carried over.
+        second_adapter = build_mempill_adapter(db_dir=db_dir, agent_id=AGENT_ID)
+        entries = second_adapter.query_history(AGENT_ID, "acme-corp", "ceo")
+        assert len(entries) == 1
+        entry = entries[0]
+
+        assert entry["valid_from"].startswith("2025-12-01")
+        assert entry["valid_from_display"] == "2025-12", (
+            "display field must survive a restart (engine-native, not an "
+            f"in-process cache scoped to the writer adapter). Got {entry!r}"
+        )
+        assert entry["valid_until_display"] is None
 
 
 # ── H6: live end-to-end — LLM must not fabricate day precision ──────────────

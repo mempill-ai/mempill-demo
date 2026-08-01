@@ -17,13 +17,12 @@ Returns a JSON dict with:
   subject, predicate, entries: [{claim_ref, value, valid_from, valid_until,
   valid_from_display, valid_until_display, status, provenance, value_confidence}]
 
-valid_from_display/valid_until_display are the adapter's honest, granularity-aware
+valid_from_display/valid_until_display are the engine's own honest, granularity-aware
 render of valid_from/valid_until (e.g. "2025-12" for a month-granular fact, never a
-fabricated day). Raw valid_from/valid_until are KEPT alongside the display strings
-(needed for ordering/precision when granularity=instant) — the display fields are
-additions, not replacements. See mempill_adapter.query_history's docstring for why
-this enrichment happens in the adapter rather than being read off the raw engine
-response (the engine's history DTO carries no granularity in mempill 0.4.0).
+fabricated day) — natively returned by mempill 0.4.0's query_history (engine PR #67).
+Raw valid_from/valid_until are KEPT alongside the display strings (needed for
+ordering/precision when granularity=instant) — the display fields are additions, not
+replacements.
 """
 from __future__ import annotations
 
