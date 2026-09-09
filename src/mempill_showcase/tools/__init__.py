@@ -1,7 +1,7 @@
 """
 mempill_showcase.tools — LangChain BaseTool wrappers over the W1 memory core.
 
-7 agent tools used by the ReAct ExecAssistant:
+10 agent tools used by the ReAct ExecAssistant:
   RecallSubjectTool         — return ALL stored facts for a subject (cornerstone tool)
   RecallAtTool              — point-in-time valid-time recall
   RecallAsOfTool            — transaction-time as-of recall
@@ -11,6 +11,9 @@ mempill_showcase.tools — LangChain BaseTool wrappers over the W1 memory core.
   GetContestedTool          — surface competing beliefs for a contested predicate
   RequestAdjudicationTool   — HITL: interrupt the graph, get human verdict, resolve
   AuditTrailTool            — chronological audit ledger
+  ListPendingAdjudicationsTool — list all facts queued for human adjudication
+  ResolveAdjudicationTool   — record human verdict and resolve contested facts
+  QueryHistoryTool          — search the history of changes to a fact
 
 Legacy tools (kept for existing tests and adapter layer — not in the agent's tool list):
   MempillRememberTool — write path with soft normalisation (lowercase + separator);

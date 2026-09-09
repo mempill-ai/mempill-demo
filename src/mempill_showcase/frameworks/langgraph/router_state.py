@@ -101,7 +101,7 @@ def _safe_add_messages(left: list[Any], right: Any) -> list[Any]:
             "_safe_add_messages: channel-merge coercion failed (%s) — "
             "dropped %d non-coercible item(s) (%d from existing history "
             "types=%s, %d from this update types=%s)",
-            exc,
+            type(exc).__name__,
             len(dropped_left) + len(dropped_right),
             len(dropped_left), [type(d).__name__ for d in dropped_left],
             len(dropped_right), [type(d).__name__ for d in dropped_right],

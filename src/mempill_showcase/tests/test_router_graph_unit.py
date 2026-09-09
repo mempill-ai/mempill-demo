@@ -262,9 +262,9 @@ class TestRouteQueryNodeMessageHardening:
     ambiguous-default fallback when nothing usable survives."""
 
     def test_int_message_does_not_raise_and_does_not_reach_subgraph(self, monkeypatch):
-        """{"messages": [2025]} — must not raise, and the returned state's
-        `messages` must NOT contain the raw int (so a downstream subgraph never
-        sees it)."""
+        """{"messages": [2025]} — must not raise. The graph short-circuits to
+        END (route="_no_route") with a friendly message instead of dispatching
+        to a subgraph (PR #58 comment 1 fix)."""
         import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
 
         fake = _FakeStructuredClassifier(raises=AssertionError("classifier should not be reached"))
@@ -274,12 +274,14 @@ class TestRouteQueryNodeMessageHardening:
         state: RouterState = {"messages": [2025]}
         result = route_query(state)  # must not raise
 
-        assert result["route"] == "people_ops"
-        assert result["agent_id"] == PEOPLE_OPS_SPEC.agent_id
+        assert result["route"] == "_no_route"
+        assert result["agent_id"] is None
         assert 2025 not in result["messages"]
         assert all(not isinstance(m, int) for m in result["messages"])
 
     def test_empty_messages_list_defaults_ambiguous_with_friendly_message(self, monkeypatch):
+        """Empty messages list short-circuits to END (route="_no_route") with
+        a friendly message (PR #58 comment 1 fix)."""
         import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
 
         fake = _FakeStructuredClassifier(raises=AssertionError("classifier should not be reached"))
@@ -288,13 +290,15 @@ class TestRouteQueryNodeMessageHardening:
         route_query = rg_mod.make_route_query_node()
         result = route_query({"messages": []})
 
-        assert result["route"] == "people_ops"
-        assert result["agent_id"] == PEOPLE_OPS_SPEC.agent_id
+        assert result["route"] == "_no_route"
+        assert result["agent_id"] is None
         assert len(result["messages"]) == 1
         assert result["messages"][0].content  # friendly, non-empty text
         assert fake.last_prompt is None  # classifier never invoked
 
     def test_blank_string_message_defaults_ambiguous(self, monkeypatch):
+        """Blank string short-circuits to END (route="_no_route") instead of
+        defaulting to people_ops (PR #58 comment 1 fix)."""
         import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
 
         fake = _FakeStructuredClassifier(raises=AssertionError("classifier should not be reached"))
@@ -303,10 +307,12 @@ class TestRouteQueryNodeMessageHardening:
         route_query = rg_mod.make_route_query_node()
         result = route_query({"messages": [""]})
 
-        assert result["route"] == "people_ops"
+        assert result["route"] == "_no_route"
         assert fake.last_prompt is None
 
     def test_contentless_dict_message_defaults_ambiguous(self, monkeypatch):
+        """Contentless dict short-circuits to END (route="_no_route") instead of
+        defaulting to people_ops (PR #58 comment 1 fix)."""
         import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
 
         fake = _FakeStructuredClassifier(raises=AssertionError("classifier should not be reached"))
@@ -315,7 +321,7 @@ class TestRouteQueryNodeMessageHardening:
         route_query = rg_mod.make_route_query_node()
         result = route_query({"messages": [{"no": "content"}]})
 
-        assert result["route"] == "people_ops"
+        assert result["route"] == "_no_route"
         assert fake.last_prompt is None
 
     def test_mixed_valid_and_junk_routes_using_only_valid_parts(self, monkeypatch):
@@ -354,7 +360,8 @@ class TestRouteQueryNodeMessageHardening:
 
     def test_full_router_graph_survives_int_input_end_to_end(self, monkeypatch):
         """Full build_router_graph().invoke({"messages": [2025]}) — the literal
-        Studio regression scenario — must not raise, using a dummy subgraph."""
+        Studio regression scenario — must not raise. Routes to "_no_route" (END)
+        with a friendly message (PR #58 comment 1 fix)."""
         import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
 
         fake = _FakeStructuredClassifier(raises=AssertionError("classifier should not be reached"))
@@ -366,7 +373,7 @@ class TestRouteQueryNodeMessageHardening:
 
         result = compiled.invoke({"messages": [2025]})  # must not raise
 
-        assert result["route"] == "people_ops"
+        assert result["route"] == "_no_route"
         assert all(not isinstance(m, int) for m in result["messages"])
 
 

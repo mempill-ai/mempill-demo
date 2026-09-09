@@ -2,7 +2,7 @@
 
 A runnable demonstration of mempill's bi-temporal memory engine inside a multi-agent system.
 The primary deliverable is `mempill_showcase` — a reference app showing
-a single free-form ReAct agent (`create_react_agent`) with 7 memory tools + a thin LangGraph
+a single free-form ReAct agent (`create_react_agent`) with 10 memory tools + a thin LangGraph
 shell for durable HITL `interrupt()`, backed by mempill bi-temporal memory, with a naive
 last-write-wins adapter (`NaiveAdapter`) for contrast and a full compliance audit replay.
 
@@ -17,7 +17,7 @@ last-write-wins adapter (`NaiveAdapter`) for contrast and a full compliance audi
 ```bash
 git clone <this-repo> mempill-demo
 cd mempill-demo
-bash scripts/setup.sh --local-engine   # creates .venv, builds + installs mempill from ../mempill + all extras
+bash scripts/setup.sh --local-engine   # creates .venv, builds + installs mempill from ../mempill + LangGraph/pytest
 ```
 
 Run the 6-beat executive-assistant scenario (B-01..B-06) via the free-form ReAct agent:
@@ -28,11 +28,11 @@ Run the 6-beat executive-assistant scenario (B-01..B-06) via the free-form ReAct
 .venv/bin/mempill-showcase-audit    # compliance audit: tx-time replay + full provenance ledger
 ```
 
-Run the test suite (370 deterministic + 22 live tests):
+Run the test suite (407 deterministic + 26 live tests):
 
 ```bash
 .venv/bin/python -m pytest -m "not live" -q
-# Expected: 370 passed
+# Expected: 407 passed
 ```
 
 See [SHOWCASE.md](SHOWCASE.md) for the full architecture, 6-beat scenario walkthrough,
@@ -42,7 +42,7 @@ design decisions, and bi-temporal query examples.
 
 ## Architecture
 
-**Primary (mempill_showcase):** A single free-form ReAct agent (`create_react_agent`) with 7 memory tools + a thin LangGraph
+**Primary (mempill_showcase):** A single free-form ReAct agent (`create_react_agent`) with 10 memory tools (7 core + 3 adjudication/history tools) + a thin LangGraph
 shell for durable HITL `interrupt()`, backed by mempill bi-temporal memory;
 naive-vs-mempill adapter toggle via `NAIVE_MODE=true`.
 
@@ -50,7 +50,8 @@ naive-vs-mempill adapter toggle via `NAIVE_MODE=true`.
 and dispatches to two isolated ReAct agents — `people_ops_agent` (handles person facts: Alice, Bob, Jordan's colleagues and roles)
 and `org_registry_agent` (handles organization facts: Acme Corp's leadership and structure). Each agent owns its own per-agent
 SQLite database file under `.mempill/`, making mempill 0.4.0's per-agent storage visible and auditable. Ambiguous queries
-default-route to `people_ops_agent`.
+default-route to `people_ops_agent`. Router input hardening (PR #57) coerces junk message entries before routing, multi-turn
+state accumulates across turns safely, and invalid agent IDs exit with a clean error.
 
 ---
 
@@ -71,6 +72,10 @@ amplification firewall) without any multi-agent framework:
 > automatically as `<db-dir>/agent_<agent_id>.db`, one file per agent. Pre-0.4.0 database files
 > are **not** auto-migrated — to keep existing data, move/rename the old shared-file database to
 > `<db-dir>/agent_<agent_id>.db` before first use with 0.4.0.
+
+### Date Granularity + Honest Display (0.4.0 read-path)
+
+The `query_history` tool surfaces facts with their original date granularity. A fact ingested as "September 2024" is never fabricated as "September 1, 2024". See [STUDIO_DEMO.md](STUDIO_DEMO.md#date-granularity--honest-display-on-history-04-headline-read-path-feature) for a walkthrough (fresh thread, 3-step CEO succession scenario).
 
 ---
 

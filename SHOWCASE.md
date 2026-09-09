@@ -24,7 +24,7 @@ setup instructions.
 
 ### Primary: Single free-form ReAct agent
 
-The exec_assistant (legacy) uses a single `create_react_agent` (LangGraph) with 7 memory tools
+The exec_assistant (legacy) uses a single `create_react_agent` (LangGraph) with 10 memory tools
 and a mempill bi-temporal memory backend. There is no multi-agent topology —
 one ReAct agent handles all question types directly via tool selection.
 
@@ -43,6 +43,9 @@ User question (free-form natural language)
  │    get_contested    — inspect conflicting facts │
  │    request_adjudication — HITL interrupt gate   │
  │    audit_trail      — compliance audit log      │
+ │    list_pending_adjudications — view conflicts  │
+ │    resolve_adjudication — human verdict gate    │
+ │    query_history    — search fact history       │
  │                                                 │
  │  Capabilities:                                  │
  │    • Bounded valid-time intervals (valid_from  │
@@ -284,13 +287,13 @@ See `STUDIO_DEMO.md` for the full turn-by-turn script with exact inputs.
 .venv/bin/python -m pytest -m "not live" -q
 ```
 
-Runs all non-live tests (no API key required). Expected result: **370 passed** (up from 304 in legacy single-agent, +66 dual-agent router tests).
+Runs all non-live tests (no API key required). Expected result: **407 passed** (includes console + showcase + router tests).
 
 ```bash
 .venv/bin/python -m pytest -m live -q
 ```
 
-Runs live semantic E2E tests (requires `ANTHROPIC_API_KEY`). Expected: **22 passed** (up from 12 in legacy).
+Runs live semantic E2E tests (requires `ANTHROPIC_API_KEY`). Expected: **26 passed**.
 
 Live tests covered:
 

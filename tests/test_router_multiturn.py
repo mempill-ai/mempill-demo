@@ -204,6 +204,54 @@ class TestRouterGraphAccumulation:
         assert r2["messages"][0].content == "turn1"
 
 
+class TestEmptyMessagesTerminalRoute:
+    """Copilot review (PR #58 comment 1): empty/junk-only input should
+    short-circuit to END (terminal route "_no_route") instead of dispatching
+    to a subgraph. This avoids unnecessary downstream work and correctly
+    reflects the intent: a friendly message, not a subgraph response."""
+
+    @staticmethod
+    def _dummy_subgraph():
+        def _echo(state):
+            return {"messages": [AIMessage(content=f"ack (saw {len(state.get('messages', []))} msgs)")]}
+
+        g = StateGraph(RouterState)
+        g.add_node("n", _echo)
+        g.set_entry_point("n")
+        g.add_edge("n", END)
+        return g.compile()
+
+    def test_empty_messages_terminal_route_no_subgraph_call(self, monkeypatch):
+        """Junk-only input (e.g. [2025]) should set route='_no_route' and
+        terminate with a friendly message, not dispatch to a subgraph."""
+        import mempill_showcase.frameworks.langgraph.router_graph as rg_mod
+
+        class _FakeClassifier:
+            def invoke(self, prompt):
+                from mempill_showcase.frameworks.langgraph.router_graph import RouteDecision
+                return RouteDecision(agent="people_ops", rationale="test")
+
+        monkeypatch.setattr(rg_mod, "_build_classifier", lambda model_name=None: _FakeClassifier())
+
+        sub1 = self._dummy_subgraph()
+        sub2 = self._dummy_subgraph()
+        app = build_router_graph(sub1, sub2, checkpointer=MemorySaver())
+
+        cfg = _cfg("empty-messages-thread")
+        result = app.invoke({"messages": [2025]}, cfg)  # junk-only input
+
+        # Route must be set to terminal marker, not a real route.
+        assert result.get("route") == "_no_route", (
+            f"Expected route='_no_route' for junk-only input, got {result.get('route')!r}"
+        )
+
+        # The friendly message must be present (the terminal message,
+        # not an agent's subgraph response).
+        msgs = result.get("messages", [])
+        assert len(msgs) == 1
+        assert "didn't receive a usable message" in msgs[0].content.lower()
+
+
 @pytest.mark.live
 class TestMultiTurnFollowupLive:
     """Live end-to-end reproduction: a pronoun follow-up on the SAME thread_id
