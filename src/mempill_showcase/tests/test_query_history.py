@@ -50,22 +50,29 @@ from mempill_showcase.tools.resolve_adjudication_tool import ResolveAdjudication
 
 AGENT_ID = "jordan-park-001"
 
-# TASK-33-W4-DEMO: known ENGINE-SIDE bug, PRE-EXISTING and unrelated to the D1
-# end_fact migration (submit_adjudication.rs::bound_claim, unchanged by mempill
-# PR #75). Affirming a pending adjudication bounds the LOSING (incumbent) claim's
-# ValidityAssertion at TRANSACTION time (`bound_at: tx_time`, i.e. "now" when the
-# human/oracle resolves it) rather than at the winning challenger's world-time
-# valid_from. query_history's compute_history_windows now honors that Bound (PR
-# #75 fix) for truncation, so a scripted Affirm-resolved succession's superseded
-# entry shows valid_until = the wall-clock resolution instant instead of the
-# challenger's stated start. Reproduced via the raw mempill engine (open_oracle_
-# in_memory + ingest_claim + submit_adjudication) with no demo code involved —
-# not fixable in the demo (AdjudicationResponse has no caller-supplied `at`).
+# TASK-33-W5-DEMO: re-verified against mempill PR #76 (sse__valid-at-bounds,
+# fixes A/B/C, built locally — wheel not yet published). The ORIGINAL diagnosis
+# below (TASK-33-W4-DEMO: incumbent bound at transaction/"now" time) no longer
+# reproduces under #76 — that symptom is gone. A DIFFERENT, still ENGINE-SIDE
+# symptom remains for the Diane -> Joan -> John (two sequential Affirms) fold:
+# after the second Affirm (John over Joan), adapter.query_history returns
+#   Diane: status=Superseded, valid_until=2025-01-01T00:00:00Z (John's valid_from)
+#   Joan:  status=Contested   (expected Superseded, valid_until truncated to 2025-01)
+#   John:  status=Contested   (expected Current, valid_until=None)
+# i.e. Diane's Superseded window is truncated straight through to the FINAL
+# successor's (John's) valid_from, skipping the immediate successor (Joan)
+# entirely, and both Joan and John are left Contested instead of Joan being
+# folded to Superseded and John to Current. Reproduced via the raw mempill
+# engine (open_oracle_in_memory + write_claim + submit_adjudication) with no
+# demo code involved — not fixable in the demo.
 _XFAIL_AFFIRM_BOUND_AT_TXTIME = (
-    "ENGINE-SIDE (TASK-33-W4-DEMO, mempill read-only, pre-existing): "
-    "submit_adjudication's Affirm path bounds the incumbent at transaction time "
-    "(now), not the challenger's valid_from — query_history truncation (PR #75) "
-    "now surfaces that as valid_until=now() instead of the challenger's start."
+    "ENGINE-SIDE (TASK-33-W5-DEMO, mempill read-only, verified against PR #76 "
+    "sse__valid-at-bounds): after a second sequential Affirm (John over Joan), "
+    "query_history leaves Joan and John both status=Contested (expected "
+    "Superseded/Current) and truncates Diane's valid_until straight to John's "
+    "valid_from (2025-01-01T00:00:00Z), skipping Joan's (2024-09) as the "
+    "immediate successor. Original TASK-33-W4-DEMO tx-time-bound symptom is "
+    "fixed by #76; this is a distinct fold/adjudication-chaining regression."
 )
 
 

@@ -62,26 +62,6 @@ from mempill_showcase.tools.recall_at_tool import RecallAtTool
 from mempill_showcase.tools.recall_subject_tool import RecallSubjectTool
 from mempill_showcase.tools.remember_fact_tool import RememberFactInput, RememberFactTool
 
-# TASK-33-W4-DEMO: known ENGINE-SIDE gap (engine repo is read-only from the demo).
-# query_memory()/query_subject() valid_at candidate selection skips window-membership
-# filtering entirely once disposition-based narrowing leaves exactly one CommittedCheap
-# ("live") claim on the line — it returns that sole candidate unconditionally, without
-# checking whether valid_at actually falls inside its own valid_time window. Reproduced
-# via the raw mempill engine alone (no demo code) once end_fact()/assert_validity(Bound)
-# demotes the incumbent to Superseded, leaving only the successor as the sole live
-# candidate for ANY valid_at (including dates before the successor's own start).
-# query_history()'s compute_history_windows was fixed (mempill PR #75, sse__assert-
-# validity) to honor an active Bound; the point-in-time query_memory/query_subject
-# valid_at path was not. Not fixable in the demo (I8 single source of truth — the
-# demo must not re-derive window filtering client-side).
-_XFAIL_VALID_AT_BOUND_GAP = (
-    "ENGINE-SIDE (TASK-33-W4-DEMO, mempill read-only): query_memory/query_subject "
-    "valid_at skips window filtering when disposition narrowing leaves exactly one "
-    "live claim (post end_fact Bound) — returns it unconditionally regardless of "
-    "valid_at. compute_history_windows honors Bound (PR #75); this path does not."
-)
-
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
@@ -162,9 +142,9 @@ class TestAdapterQuerySubject:
         )
         assert len(result) == 3, f"Expected 3 facts, got {len(result)}"
 
-    @pytest.mark.xfail(reason=_XFAIL_VALID_AT_BOUND_GAP, strict=False)
     def test_query_subject_valid_at_narrows(self, adapter: MempillAdapter) -> None:
         """query_subject valid_at returns facts valid at that date.
+        Fixed in mempill #76 (valid_at window filtering after end_fact Bound).
 
         Uses RememberFactTool (via adapter) to write with proper succession,
         then queries at a date before the move to verify the old value returns.
@@ -292,7 +272,6 @@ class TestRecallSubjectTool:
 class TestRecallAtTool:
     """A3 — RecallAtTool: valid-time point-in-time queries."""
 
-    @pytest.mark.xfail(reason=_XFAIL_VALID_AT_BOUND_GAP, strict=False)
     def test_recall_at_returns_historical_value(
         self,
         recall_at_tool: RecallAtTool,
@@ -302,6 +281,7 @@ class TestRecallAtTool:
 
         Uses RememberFactTool for writes so the succession close-step is applied
         (same pattern as TestRememberToolSuccession in test_tools.py).
+        Fixed in mempill #76 (valid_at window filtering after end_fact Bound).
         """
         remember_fact_tool_for_at.invoke({
             "agent_id": AGENT_ID,
@@ -579,13 +559,13 @@ class TestRememberFactTool:
         )
         assert city_facts[0]["status"] == "Resolved"
 
-    @pytest.mark.xfail(reason=_XFAIL_VALID_AT_BOUND_GAP, strict=False)
     def test_succession_bitemoral_correctness(
         self,
         remember_fact_tool: RememberFactTool,
         recall_at_tool: RecallAtTool,
     ) -> None:
-        """After succession, valid_at in Austin window returns Austin TX."""
+        """After succession, valid_at in Austin window returns Austin TX.
+        Fixed in mempill #76 (valid_at window filtering after end_fact Bound)."""
         remember_fact_tool.invoke({
             "agent_id": AGENT_ID,
             "subject": "alice-chen",
