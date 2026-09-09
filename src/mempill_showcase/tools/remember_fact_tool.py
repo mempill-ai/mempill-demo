@@ -68,14 +68,26 @@ class RememberFactInput(BaseModel):
     value: str = Field(description="Claim value (string or JSON-serialisable)")
     valid_from: Optional[str] = Field(
         default=None,
-        description="World-time start (YYYY / YYYY-MM / YYYY-MM-DD / RFC3339). None = unknown.",
+        description=(
+            "World-time start (YYYY / YYYY-MM / YYYY-MM-DD / RFC3339). None = unknown. "
+            "MUST be the EXACT date/month/year the user or source stated — never "
+            "computed, inferred, or extrapolated (e.g. never add/subtract years or "
+            "assume a term length). Use only the precision actually given: a bare "
+            "year ('2025') stays 'YYYY'; do not pad it into a month or day."
+        ),
     )
     valid_until: Optional[str] = Field(
         default=None,
         description=(
             "World-time end (YYYY / YYYY-MM / YYYY-MM-DD / RFC3339); "
             "None = open-ended. Supply this for a bounded interval, e.g. a "
-            "fixed-term appointment or a known end date."
+            "fixed-term appointment or a known end date. MUST be the EXACT end "
+            "date/month/year the user or source stated — the SAME rule as "
+            "valid_from applies: never compute, infer, or extrapolate this date "
+            "(e.g. never guess a year by adding an assumed term length, and never "
+            "copy/shift a year from a different fact in context). If the user did "
+            "not explicitly state an end, leave this None (open-ended) rather than "
+            "guessing one."
         ),
     )
     provenance: Optional[str] = Field(
@@ -117,6 +129,11 @@ class RememberFactTool(BaseTool):
         "Supply agent_id, subject, predicate, value, optional valid_from date, "
         "optionally valid_until for a bounded interval, e.g. a fixed-term appointment "
         "(None = open-ended), optional provenance channel, and optional confidence. "
+        "CRITICAL — valid_from/valid_until must be the EXACT date the user/source "
+        "stated, at the EXACT precision stated (YYYY / YYYY-MM / YYYY-MM-DD). NEVER "
+        "compute, infer, or extrapolate either date (e.g. never guess an end year "
+        "by adding an assumed term length, and never reuse a year from a different "
+        "fact in context) — if an end date was not explicitly stated, pass None. "
         "Handles succession automatically: if an earlier open claim exists for the "
         "same (subject, predicate), the tool closes the prior window before writing the "
         "new claim. Returns JSON with claim_ref, disposition, and is_contested."

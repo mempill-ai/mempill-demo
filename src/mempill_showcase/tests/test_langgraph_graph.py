@@ -380,6 +380,13 @@ TOOL SELECTION GUIDE:
      the user didn't give. "June 2023" → valid_from="2023-06" (month). A bare year → "YYYY"
      (year). A full date ("June 15, 2023") → "2023-06-15" (day). NEVER pad a month or year
      into a fabricated day-precision date.
+   → For valid_until (bounded/fixed-term facts): the SAME fidelity rule applies — use
+     the EXACT end date/month/year the user stated, at their stated precision. NEVER
+     compute, infer, or extrapolate an end date (e.g. never derive it by adding an
+     assumed term length to valid_from, and never copy a year from an unrelated fact
+     elsewhere in context/memory). "John is CEO from January 2025 until December 2025"
+     → valid_from="2025-01", valid_until="2025-12" — NOT a different year. If no end
+     was explicitly stated, pass valid_until=None (open-ended) rather than guessing one.
    → You do NOT need to match the incumbent's exact stored date for the write to be
      recognised as a correction. The engine flags the conflict because the two claims are
      BOTH open-ended (no valid_until) — any two open-ended intervals overlap regardless of
@@ -454,15 +461,19 @@ TOOL SELECTION GUIDE:
     a specific (subject, predicate) — e.g. "what is the history of Acme's CEOs
     over time?", "who held the CTO role before Alice?":
    → call query_history(agent_id, subject, predicate).
-   → This returns the ALREADY-CORRECT chronological, non-overlapping
-     (adjudicated) timeline — each entry's valid_from/valid_until/status is
-     authoritative and may be TRUNCATED relative to what that claim originally
-     stated (a later adjudication can shorten an earlier entry's end date).
+   → This returns the engine's own chronological fold — each entry's
+     valid_until reflects the engine's EFFECTIVE window for that claim (its
+     own stated end, or an adjacent entry's start where that comes first).
+     This is NOT evidence that "a later adjudication shortened" the claim,
+     and overlapping windows on the same line are a genuine, possibly
+     unresolved conflict rather than an already-settled succession — consult
+     recall_subject/recall_at for the current Contested status before
+     asserting which claim "won".
    → Report the entries exactly as returned, in order. Do NOT reconstruct
      history by hand from audit_trail or recall_subject, and do NOT narrate
-     each claim's originally-stated valid_from/valid_until — those may have
-     been overridden by later adjudication and would produce a stale or
-     overlapping (incorrect) narrative.
+     each claim's originally-stated valid_from/valid_until as if it were the
+     current effective window — this tool's fold is the source of truth for
+     the chronology.
    → CRITICAL — dates: use each entry's valid_from_display/valid_until_display
      VERBATIM when stating a date (e.g. "December 2025", from display "2025-12").
      NEVER expand a month- or year-granular display string into a specific day
@@ -509,6 +520,22 @@ RULES:
     # to fix a fabricated-day-precision bug (month-granular facts like "December 2025"
     # were verbalised as "December 1, 2025"). This snapshot was updated deliberately as
     # part of that fix, not organic drift.
+    #
+    # NOTE (intended, reviewed change — TASK-33-W3-DEMO): rule 11's main paragraph was
+    # rewritten to drop the false "a later adjudication can shorten an earlier entry's
+    # end date" narrative — query_history's valid_until reflects the engine's effective
+    # window, not proof of an adjudication outcome, and overlapping entries may be an
+    # UNRESOLVED conflict. See mempill-demo/src/mempill_showcase/tools/query_history_tool.py
+    # docstring for the matching fix.
+    #
+    # NOTE (intended, reviewed change — TASK-33-W3-DEMO): rule 4 gained a "For
+    # valid_until (bounded/fixed-term facts)" bullet mirroring the pre-existing
+    # valid_from fidelity bullet — added while investigating a live anomaly where a
+    # CEO's fixed-term end date was stored a year later than stated (2026-12 instead
+    # of 2025-12). Root cause could not be conclusively proven (no raw user-turn text
+    # is persisted anywhere queryable); this bullet + the matching RememberFactTool
+    # schema/description hardening are the harm-reduction fix for the LLM-tool-arg
+    # hallucination hypothesis.
 
     def test_defaults_byte_identical_to_legacy_constant(self):
         """build_system_prompt() with all-default args == the historical constant."""
