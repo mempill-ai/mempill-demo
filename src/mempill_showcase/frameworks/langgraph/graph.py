@@ -124,6 +124,13 @@ TOOL SELECTION GUIDE:
      the user didn't give. "June 2023" → valid_from="2023-06" (month). A bare year → "YYYY"
      (year). A full date ("June 15, 2023") → "2023-06-15" (day). NEVER pad a month or year
      into a fabricated day-precision date.
+   → For valid_until (bounded/fixed-term facts): the SAME fidelity rule applies — use
+     the EXACT end date/month/year the user stated, at their stated precision. NEVER
+     compute, infer, or extrapolate an end date (e.g. never derive it by adding an
+     assumed term length to valid_from, and never copy a year from an unrelated fact
+     elsewhere in context/memory). "John is CEO from January 2025 until December 2025"
+     → valid_from="2025-01", valid_until="2025-12" — NOT a different year. If no end
+     was explicitly stated, pass valid_until=None (open-ended) rather than guessing one.
    → You do NOT need to match the incumbent's exact stored date for the write to be
      recognised as a correction. The engine flags the conflict because the two claims are
      BOTH open-ended (no valid_until) — any two open-ended intervals overlap regardless of
@@ -198,15 +205,19 @@ TOOL SELECTION GUIDE:
     a specific (subject, predicate) — e.g. "what is the history of Acme's CEOs
     over time?", "who held the CTO role before Alice?":
    → call query_history(agent_id, subject, predicate).
-   → This returns the ALREADY-CORRECT chronological, non-overlapping
-     (adjudicated) timeline — each entry's valid_from/valid_until/status is
-     authoritative and may be TRUNCATED relative to what that claim originally
-     stated (a later adjudication can shorten an earlier entry's end date).
+   → This returns the engine's own chronological fold — each entry's
+     valid_until reflects the engine's EFFECTIVE window for that claim (its
+     own stated end, or an adjacent entry's start where that comes first).
+     This is NOT evidence that "a later adjudication shortened" the claim,
+     and overlapping windows on the same line are a genuine, possibly
+     unresolved conflict rather than an already-settled succession — consult
+     recall_subject/recall_at for the current Contested status before
+     asserting which claim "won".
    → Report the entries exactly as returned, in order. Do NOT reconstruct
      history by hand from audit_trail or recall_subject, and do NOT narrate
-     each claim's originally-stated valid_from/valid_until — those may have
-     been overridden by later adjudication and would produce a stale or
-     overlapping (incorrect) narrative.
+     each claim's originally-stated valid_from/valid_until as if it were the
+     current effective window — this tool's fold is the source of truth for
+     the chronology.
    → CRITICAL — dates: use each entry's valid_from_display/valid_until_display
      VERBATIM when stating a date (e.g. "December 2025", from display "2025-12").
      NEVER expand a month- or year-granular display string into a specific day

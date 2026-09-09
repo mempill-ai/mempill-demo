@@ -6,12 +6,16 @@ LangChain BaseTool wrapping MempillAdapter.query_history.
 "What is the history of Acme's CEOs over time?" / "who held X before?" /
 "succession of <role>" questions must be answered from THIS tool, not by
 narrating raw audit_trail/recall_subject claim data. The engine's own fold is
-already chronologically ordered, truncated, and non-overlapping — a later
-adjudication may have shortened an earlier entry's valid_until below what that
-claim originally stated (e.g. Joan's stated end of 2025-11 truncated to 2025-01
-because John was later Affirmed over the overlapping tail). Reconstructing the
-timeline by hand from individually-stated claim dates reproduces the truncated-
-away overlap and yields a stale/incoherent narrative.
+chronologically ordered; each entry's valid_until reflects the engine's
+effective window for that claim (its own stated end, or the start of the next
+entry in the fold if that comes first) — it is NOT evidence that "a later
+adjudication shortened" the claim. Overlapping claims are a genuine conflict,
+not a resolved succession: consult query_memory (recall_subject/recall_at) for
+the current conflict/Contested status of a (subject, predicate) line before
+asserting which claim "won". Reconstructing the timeline by hand from
+individually-stated claim dates instead of this tool's fold can still yield a
+stale/incoherent narrative, since it ignores the engine's chronological
+ordering and truncation.
 
 Returns a JSON dict with:
   subject, predicate, entries: [{claim_ref, value, valid_from, valid_until,
@@ -53,13 +57,17 @@ class QueryHistoryTool(BaseTool):
     question about a specific (subject, predicate) pair — e.g. "what is the
     history of Acme's CEOs over time?", "who held the CTO role before Alice?".
 
-    The returned entries are ALREADY the correct, non-overlapping chronology:
-    each entry's valid_from/valid_until/status reflects the engine's canonical
-    fold, which may TRUNCATE an entry's originally-stated end date when a later
-    adjudication resolved an overlap in favor of a successor. Report the
-    entries' dates and status AS RETURNED — do NOT reconstruct the timeline
-    from audit_trail or recall_subject's originally-stated claim dates, and do
-    NOT re-derive valid_until from what a claim first said.
+    The returned entries follow the engine's own chronological fold: each
+    entry's valid_until reflects the engine's effective window for that claim
+    (its own stated end, or an adjacent entry's start where that comes first)
+    — this is NOT evidence that a later adjudication shortened the claim, and
+    overlapping windows on the same line are a genuine, possibly-unresolved
+    conflict rather than an already-settled succession. For the current
+    conflict/Contested status of a (subject, predicate) line, consult
+    recall_subject/recall_at (query_memory), not this tool's status field
+    alone. Report the entries' dates AS RETURNED — do NOT reconstruct the
+    timeline from audit_trail or recall_subject's originally-stated claim
+    dates, and do NOT re-derive valid_until from what a claim first said.
 
     Returns JSON with subject, predicate, and an entries list; each entry
     contains claim_ref, value, valid_from, valid_until, valid_from_display,
@@ -82,11 +90,14 @@ class QueryHistoryTool(BaseTool):
         "timeline for a (subject, predicate) pair — e.g. 'history of Acme's CEOs "
         "over time', 'who held the CTO role before Alice?', succession questions. "
         "Supply agent_id, subject, predicate. The result is the engine's own "
-        "adjudicated fold: each entry's valid_from/valid_until/status is "
-        "authoritative and may already be truncated relative to what a claim "
-        "originally stated. Report the entries exactly as returned — do NOT "
-        "reconstruct history by hand from audit_trail or recall_subject, and do "
-        "NOT narrate each claim's originally-stated dates. Returns JSON with "
+        "chronological fold: each entry's valid_until reflects the engine's "
+        "effective window for that claim, not necessarily what the claim "
+        "originally stated — this does NOT mean a later adjudication 'shortened' "
+        "it. Overlapping entries are a genuine conflict; consult "
+        "recall_subject/recall_at for current Contested status. Report the "
+        "entries exactly as returned — do NOT reconstruct history by hand from "
+        "audit_trail or recall_subject, and do NOT narrate each claim's "
+        "originally-stated dates. Returns JSON with "
         "subject, predicate, and an entries list (claim_ref, value, valid_from, "
         "valid_until, valid_from_display, valid_until_display, status, "
         "provenance, value_confidence). ALWAYS report dates using the "

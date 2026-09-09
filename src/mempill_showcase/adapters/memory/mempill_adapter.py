@@ -398,11 +398,14 @@ class MempillAdapter:
         """Return the engine's canonical, chronologically-folded history timeline.
 
         Delegates to engine.query_history({agent_id, subject, predicate}). Entries
-        are ordered oldest→newest and ALREADY truncated/non-overlapping — later
-        adjudications may have shortened an earlier entry's valid_until below what
-        that claim originally stated. Do not reinterpret or re-derive the timeline
-        from audit_trail/recall_subject; this fold IS the authoritative answer to
-        "history over time" questions.
+        are ordered oldest→newest; each entry's valid_until reflects the engine's
+        EFFECTIVE window for that claim (its own stated end, or an adjacent
+        entry's start where that comes first) — this is NOT proof that a later
+        adjudication shortened the claim, and overlapping entries may reflect an
+        unresolved conflict rather than a settled succession (consult
+        recall/recall_at for current Contested status). Do not reinterpret or
+        re-derive the timeline from audit_trail/recall_subject; this fold IS the
+        authoritative answer to "history over time" questions.
 
         Each entry natively carries valid_from_display/valid_until_display (plus
         valid_from_granularity/valid_until_granularity) from the engine itself

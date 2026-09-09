@@ -45,6 +45,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -59,7 +60,7 @@ from mempill_showcase.tools.get_contested_tool import GetContestedTool
 from mempill_showcase.tools.recall_as_of_tool import RecallAsOfTool
 from mempill_showcase.tools.recall_at_tool import RecallAtTool
 from mempill_showcase.tools.recall_subject_tool import RecallSubjectTool
-from mempill_showcase.tools.remember_fact_tool import RememberFactTool
+from mempill_showcase.tools.remember_fact_tool import RememberFactInput, RememberFactTool
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -690,6 +691,102 @@ class TestRememberFactTool:
             f"Expected a bounded challenger vs. open incumbent to contest, got {result}"
         )
 
+    def test_bounded_challenger_overlapping_incumbent_reconciled_not_silently_committed(
+        self,
+        adapter: MempillAdapter,
+    ) -> None:
+        """TASK-33 investigation of DIAG_joan_history.md's remember_fact_tool.py:172
+        finding: a BOUNDED challenger overlapping an open incumbent must surface as
+        a REAL, actionable Contested/queued state — is_contested=True from the raw
+        write (mandatory HITL escalation, system prompt rule 5) — and must NOT be
+        silently force-resolved.
+
+        The diagnosis's suggested remedy ("call adapter.reconcile() unconditionally,
+        same as the open-ended path") was investigated and found UNSAFE: empirically,
+        adapter.reconcile() on a genuine two-claim SameLineConflict overlap resolves
+        it outright ({'outcomes': [(claim_id, 'CommittedCheap')], 'oracle_escalations':
+        0}) — i.e. it silently PICKS a winner without oracle escalation, which would
+        bypass the MANDATORY CONTESTED ESCALATION contract. This test locks in the
+        current, SAFE behavior: remember_fact must NOT call adapter.reconcile() for
+        a genuinely-contested bounded challenger, and must keep reporting
+        is_contested=True from the raw write alone. See ENGINE_RECONCILE_FINDING in
+        this task's output for the follow-up recommendation (escalate reconcile()'s
+        silent-resolution behavior as its own mempill engine finding).
+        """
+        tool = RememberFactTool(adapter=adapter)
+        tool.invoke({
+            "agent_id": AGENT_ID,
+            "subject": "acme-corp",
+            "predicate": "president",
+            "value": "Diane Foster",
+            "valid_from": "2021-04",
+        })
+
+        real_reconcile = adapter.reconcile
+        adapter.reconcile = MagicMock(wraps=real_reconcile)
+
+        raw = tool.invoke({
+            "agent_id": AGENT_ID,
+            "subject": "acme-corp",
+            "predicate": "president",
+            "value": "Joan",
+            "valid_from": "2024-09",
+            "valid_until": "2025-11",
+        })
+        result = json.loads(raw)
+        assert result["is_contested"] is True, (
+            f"Expected the bounded overlap to remain Contested, got {result}"
+        )
+        assert result["disposition"] != "CommittedCheap", (
+            f"A genuinely-contested bounded challenger must never be silently "
+            f"committed: {result}"
+        )
+        adapter.reconcile.assert_not_called()
+
+    def test_bounded_challenger_non_overlapping_commits_cheaply(
+        self,
+        remember_fact_tool: RememberFactTool,
+        recall_at_tool: RecallAtTool,
+    ) -> None:
+        """A BOUNDED challenger that does NOT overlap an existing (already-closed)
+        claim already commits cheaply today: write_claim's own overlap check finds
+        no conflict (contested_with == []), so `should_reconcile` is already True
+        via the `not initial_contested` branch — independent of the valid_until
+        gating this task investigated. This test locks in that existing-correct
+        behavior as a named regression test."""
+        remember_fact_tool.invoke({
+            "agent_id": AGENT_ID,
+            "subject": "acme-corp",
+            "predicate": "treasurer",
+            "value": "Diane Foster",
+            "valid_from": "2021-04",
+            "valid_until": "2023-01",
+        })
+        raw = remember_fact_tool.invoke({
+            "agent_id": AGENT_ID,
+            "subject": "acme-corp",
+            "predicate": "treasurer",
+            "value": "Linda",
+            "valid_from": "2023-01",
+            "valid_until": "2025-01",
+        })
+        result = json.loads(raw)
+        assert result["disposition"] == "CommittedCheap", (
+            f"Expected a non-overlapping bounded succession to commit cheaply, got {result}"
+        )
+        assert result["is_contested"] is False
+
+        raw_at = recall_at_tool.invoke({
+            "agent_id": AGENT_ID,
+            "subject": "acme-corp",
+            "predicate": "treasurer",
+            "valid_at": "2024-06-01T00:00:00Z",
+        })
+        at_result = json.loads(raw_at)
+        assert at_result["value"] == "Linda", (
+            f"Expected 'Linda' at valid_at=2024-06 post-succession: {at_result}"
+        )
+
 
 # ── A6: GetContestedTool ─────────────────────────────────────────────────────
 
@@ -949,6 +1046,32 @@ class TestAuditTrailTool:
         })
         past_entries = json.loads(raw_past)["entries"]
         assert len(past_entries) == len(all_entries)
+
+
+# ── D1: RememberFactInput date-fidelity schema hardening ──────────────────────
+
+class TestRememberFactDateFidelityDescriptions:
+    """D1 — TASK-33: valid_until must carry the SAME never-extrapolate fidelity
+    warning as valid_from, in both the per-field schema description and the
+    tool-level description shown to the LLM. Regression guard against the
+    warning being silently dropped/weakened."""
+
+    def test_valid_until_field_warns_against_extrapolation(self) -> None:
+        field = RememberFactInput.model_fields["valid_until"]
+        desc = field.description or ""
+        assert "EXACT" in desc
+        assert "extrapolate" in desc or "compute" in desc
+
+    def test_valid_from_field_warns_against_extrapolation(self) -> None:
+        field = RememberFactInput.model_fields["valid_from"]
+        desc = field.description or ""
+        assert "EXACT" in desc
+        assert "extrapolate" in desc or "compute" in desc
+
+    def test_tool_description_warns_against_extrapolation(self) -> None:
+        tool = RememberFactTool(adapter=build_mempill_adapter(in_memory=True, oracle_backed=True))
+        assert "EXACT" in tool.description
+        assert "extrapolate" in tool.description or "compute" in tool.description
 
 
 # ── N1: normalise_key unit tests ──────────────────────────────────────────────
