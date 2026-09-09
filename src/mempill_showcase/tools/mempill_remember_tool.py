@@ -3,27 +3,27 @@ mempill_showcase.tools.mempill_remember_tool — MempillRememberTool
 
 LangChain BaseTool wrapping the MempillAdapter write path.
 
-SUCCESSION ENCAPSULATION (the recall-then-close pattern):
+SUCCESSION ENCAPSULATION (the end_fact idiom, TASK-33-W4-DEMO):
   When a new value + valid_from is supplied for a FUNCTIONAL (subject, predicate):
 
-  1. We first recall the current belief.
-  2. If an OPEN-ENDED incumbent exists (vt_end == "open", status == "Resolved") AND
-     the new claim's valid_from is strictly AFTER the incumbent's valid_from:
-     a. Write a BOUNDED version of the incumbent (same value, same valid_from,
-        valid_until = new valid_from). This tells the engine the old value's
-        valid window closed at the new claim's start.
+  1. We resolve the live claim(s) on the line via adapter.resolve_live_claim_for_line()
+     — the same canonical fold recall()/query_history() use (never a heuristic).
+  2. 1 live claim (the common case): if it is OPEN-ENDED (vt_end == "open",
+     status == "Resolved") AND the new claim's valid_from is strictly AFTER the
+     incumbent's valid_from:
+     a. adapter.end_fact() bounds the ACTUAL incumbent claim in place (via
+        engine.assert_validity(Bound) — the row itself is never touched, only a
+        validity assertion is appended; no duplicate row is ever written).
      b. Write the new challenger claim (valid_from = new valid_from, no valid_until).
-     c. Call engine.reconcile() to fold non-overlapping windows into CommittedCheap.
-        The engine now sees: incumbent-bounded (no overlap with challenger) →
-        CommittedCheap; challenger → CommittedCheap (clean succession).
-        bi-temporal queries for dates within the incumbent's window return the old
-        value correctly. Current recall returns the new value.
-  3. If the incumbent's valid_from is EQUAL TO or AFTER the new valid_from,
-     the windows genuinely overlap → the tool lets the write proceed without
-     forcing resolution and the engine returns Contested. HITL waves (W7) handle
-     genuine conflicts. The tool does NOT force-resolve ambiguous conflicts.
-  4. If there is no incumbent (NoBelief) or status is already Contested, we
-     write the new claim normally without the close-step.
+        Because the incumbent is no longer live, the write folds directly to
+        CommittedCheap — a clean succession, no reconcile() needed to paper over it.
+     c. bi-temporal queries for dates within the incumbent's (now-bounded) window
+        return the old value correctly. Current recall returns the new value.
+  3. 0 live claims: nothing to close — write the new claim normally.
+  4. >1 live claims (the line is ALREADY Contested/ambiguous): we never guess which
+     claim to close. The new claim is written as another candidate on the line and
+     the engine's own Contested/HITL gate surfaces the ambiguity, same as today —
+     the tool does NOT force-resolve genuine conflicts.
 
 NOTE (Wave B): The canonical_keys guard (subject/predicate must be in a closed
 vocabulary) has been removed. The new open-world design applies soft normalisation
@@ -82,11 +82,12 @@ def _build_provenance(channel: str) -> dict:
 class MempillRememberTool(BaseTool):
     """Write a claim to mempill with automatic succession encapsulation.
 
-    Succession rule (recall-then-close pattern):
-      If an open-ended incumbent exists for the same (subject, predicate) and the
-      new claim's valid_from is AFTER the incumbent's, mempill's engine handles
-      succession automatically — returning CommittedCheap and end-bounding the
-      prior claim. No manual valid_until is required from the caller.
+    Succession rule (end_fact idiom, TASK-33-W4-DEMO):
+      If exactly one open-ended incumbent exists for the same (subject, predicate)
+      and the new claim's valid_from is AFTER the incumbent's, the tool bounds the
+      incumbent in place via adapter.end_fact() (engine.assert_validity(Bound))
+      before writing the challenger — returning CommittedCheap. No manual
+      valid_until is required from the caller.
 
       If the windows genuinely overlap (ambiguous dates, same valid_from, or
       unclear ordering), the engine returns Contested. HITL waves resolve this;
@@ -150,60 +151,71 @@ class MempillRememberTool(BaseTool):
             agent_id, subject, predicate, value, valid_from, provenance_channel,
         )
 
-        # ── Succession encapsulation (recall-then-close) ──────────────────────
+        # ── Succession encapsulation (end_fact idiom, TASK-33-W4-DEMO) ─────────
         # Only attempt when we have a valid_from (needed to determine temporal order).
-        # Track whether a close-step was performed: if yes, the engine's contested_with
-        # on the NEW write is an expected artifact of the succession fold (the old open
-        # claim still exists until reconcile supersedes it), NOT a genuine conflict.
+        # Track whether a close-step was performed: if yes, the challenger write
+        # below folds directly to CommittedCheap (the incumbent is no longer live).
         close_step_performed = False
+        ambiguous_incumbent_note: Optional[str] = None
 
         if valid_from and cardinality == "Functional":
-            incumbent = self.adapter.recall(agent_id, subject, predicate)
-            if (
-                incumbent.status == "Resolved"
-                and incumbent.vt_end == "open"
-                and incumbent.vt_start  # has a known start
-                and incumbent.claim_ref  # is a real claim
-            ):
-                # Compare incumbent start (RFC3339) vs new valid_from (partial date).
-                # The adapter's _to_rfc3339 converts partial dates; we use the
-                # incumbent's vt_start_display for precision-safe comparison.
-                inc_display = incumbent.vt_start_display or ""
-                if inc_display and inc_display < valid_from and incumbent.value != value:
-                    # Clean succession: incumbent started before new claim.
-                    # Write a bounded version of the incumbent to close its window.
-                    log.debug(
-                        "MempillRememberTool: closing open incumbent %s valid_from=%s at %s",
-                        incumbent.claim_ref, inc_display, valid_from,
-                    )
-                    close_claim = ClaimInput(
-                        subject=subject,
-                        predicate=predicate,
-                        value=incumbent.value,
-                        valid_from=inc_display,
-                        valid_until=valid_from,  # close at the new claim's start
-                        confidence=confidence,
-                        provenance=ProvenanceLabel.external_user_asserted(),
-                        cardinality=cardinality,
-                        criticality=criticality,
-                    )
-                    self.adapter.write_claim(agent_id, close_claim)
-                    close_step_performed = True
+            resolution = self.adapter.resolve_live_claim_for_line(agent_id, subject, predicate)
+            live_status = resolution.get("status")
+
+            if live_status == "single":
+                incumbent = self.adapter.recall(agent_id, subject, predicate)
+                if (
+                    incumbent.status == "Resolved"
+                    and incumbent.vt_end == "open"
+                    and incumbent.vt_start  # has a known start
+                    and incumbent.claim_ref  # is a real claim
+                ):
+                    # Compare incumbent start (RFC3339) vs new valid_from (partial date).
+                    # The adapter's _to_rfc3339 converts partial dates; we use the
+                    # incumbent's vt_start_display for precision-safe comparison.
+                    inc_display = incumbent.vt_start_display or ""
+                    if inc_display and inc_display < valid_from and incumbent.value != value:
+                        # Clean succession: incumbent started before new claim.
+                        # Bound the ACTUAL incumbent claim in place — never a duplicate row.
+                        log.debug(
+                            "MempillRememberTool: end_fact closing incumbent %s valid_from=%s at %s",
+                            incumbent.claim_ref, inc_display, valid_from,
+                        )
+                        try:
+                            self.adapter.end_fact(
+                                agent_id, subject, predicate, at=valid_from,
+                                provenance=ProvenanceLabel.external_user_asserted(),
+                                confidence=confidence,
+                            )
+                            close_step_performed = True
+                        except Exception as exc:
+                            log.debug("MempillRememberTool: end_fact close-step skipped: %s", exc)
+            elif live_status == "ambiguous":
+                # The line is ALREADY Contested (>1 live claim) — never guess which
+                # claim to close. Write the challenger as another candidate and let
+                # the engine's Contested/HITL gate surface the ambiguity, as today.
+                ambiguous_incumbent_note = (
+                    f"{resolution.get('live_count')} live claims already exist for "
+                    f"{subject}/{predicate}; not auto-closing — write proceeds as a "
+                    "new candidate and the line remains Contested pending HITL."
+                )
+                log.debug("MempillRememberTool: %s", ambiguous_incumbent_note)
+            # live_status == "empty": nothing to close; fall through to normal write.
 
         receipt: WriteReceipt = self.adapter.write_claim(agent_id, claim)
 
         # Trigger engine succession fold after writing the challenger.
         #
-        # When to reconcile:
-        #   (a) Clean write (no contested_with) — always reconcile.
-        #   (b) close_step_performed — the contested_with refs are the old open
-        #       incumbent, which the close-step bounded. Reconcile will supersede
-        #       the open incumbent and promote bounded+challenger to CommittedCheap.
+        # With the end_fact idiom the incumbent is already bounded (no longer live)
+        # BEFORE the challenger write, so a clean succession folds directly to
+        # CommittedCheap with no contested_with — reconcile() here is defensive
+        # (harmless no-op in the common case; still useful when close_step_performed
+        # is False but the write is otherwise clean, e.g. no prior incumbent).
         #
         # When NOT to reconcile:
-        #   (c) contested_with non-empty AND no close-step — this is a genuine
-        #       overlapping conflict requiring HITL. Auto-resolving it via reconcile
-        #       would silently pick a winner without human confirmation.
+        #   contested_with non-empty AND no close-step — this is a genuine
+        #   overlapping conflict requiring HITL. Auto-resolving it via reconcile
+        #   would silently pick a winner without human confirmation.
         initial_contested = bool(receipt.contested_with)
         should_reconcile = (
             valid_from
@@ -250,6 +262,8 @@ class MempillRememberTool(BaseTool):
             "contested_with": receipt.contested_with,
             "is_contested": is_contested_final,
         }
+        if ambiguous_incumbent_note:
+            result["ambiguous_incumbent_note"] = ambiguous_incumbent_note
         log.debug("MempillRememberTool result: %s", result)
 
         # ── LangSmith: emit dedicated mempill.contested span ─────────────────

@@ -12,6 +12,12 @@ Write path:
   - Never re-ingests duplicates (de-dup is caller responsibility via ClaimInput tracking).
   - Never defaults valid_from to now.
 
+Succession (TASK-33-W4-DEMO):
+  - end_fact() / resolve_live_claim_for_line(): bound an incumbent's open-ended
+    window in place via engine.assert_validity(Bound), wrapped by mempill.end_fact().
+    Replaces the old "write a bounded duplicate copy" close step — see
+    DIAG_close_incumbent.md.
+
 Read path:
   - recall(): uses raw query_memory (no valid_at) → current belief.
   - query_at(): raw query_memory with valid_at and/or as_of_tx_time → bi-temporal.
@@ -54,6 +60,7 @@ from mempill_showcase.core.domain.models import (
     AuditEntry,
     BeliefView,
     ClaimInput,
+    EndFactResult,
     WriteReceipt,
     _prov_abbr,
 )
@@ -264,6 +271,91 @@ class MempillAdapter:
             claim_ref=ref,
             disposition=disp,
             contested_with=contested,
+        )
+
+    # ── Succession — end_fact (TASK-33-W4-DEMO) ────────────────────────────────
+    #
+    # Replaces the old "write a bounded copy of the incumbent" close step (which
+    # wrote a NEW duplicate claim row with the same value and a valid_until — see
+    # DIAG_close_incumbent.md). That duplicate poisoned the line (two live claims
+    # with overlapping open/near-open windows) and only converged to a clean
+    # succession because the old engine's reconcile() had an implicit supersession
+    # side effect that has since been removed as an A6/I7 violation.
+    #
+    # The corrected idiom bounds the ACTUAL incumbent claim in place via
+    # engine.assert_validity() (never a duplicate row), through the
+    # mempill.end_fact() ergonomic wrapper. Once bounded, the incumbent is no
+    # longer "live", so a subsequent non-overlapping challenger write folds to a
+    # clean CommittedCheap succession with no reconcile() needed to paper over it.
+
+    def resolve_live_claim_for_line(self, agent_id: str, subject: str, predicate: str) -> dict:
+        """Resolve (subject, predicate) to the live claim(s) on that line — the SAME
+        canonical fold recall()/query_history() use (I8 single source of truth;
+        never a heuristic re-derivation). Backs end_fact(); callers that need to
+        know 0/1/>1 live claims BEFORE deciding whether to close an incumbent
+        (e.g. a succession-encapsulation write tool) should call this directly.
+
+        Returns a dict: {"status": "empty"|"single"|"ambiguous",
+        "claim_ref": str|None, "live_count": int|None}. "live_count" is populated
+        only for "ambiguous" (an already-Contested line — never guess which claim
+        to close in that case).
+        """
+        return self._engine.resolve_live_claim_for_line(agent_id, subject, predicate)
+
+    def end_fact(
+        self,
+        agent_id: str,
+        subject: str,
+        predicate: str,
+        at: str,
+        provenance: Optional[dict] = None,
+        confidence: float = 1.0,
+    ) -> EndFactResult:
+        """Bound the incumbent claim on (subject, predicate) at `at` — the corrected
+        succession idiom (TASK-33 D1): ends the ACTUAL incumbent claim in place via
+        engine.assert_validity(Bound); never writes a duplicate "closed copy" row.
+
+        Resolution never guesses which claim to close — delegates to
+        mempill.end_fact(), backed by engine.resolve_live_claim_for_line() (the
+        SAME canonical fold recall()/query_history() use):
+          0 live claims  -> mempill.NotFoundError (nothing to close)
+          1 live claim   -> bounded at `at`; returns EndFactResult
+          >1 live claims -> mempill.ValidationError (never guesses — caller should
+                             check resolve_live_claim_for_line() first and skip the
+                             close-step on an already-Contested/ambiguous line)
+
+        Args:
+            agent_id, subject, predicate: subject-line identity.
+            at: lenient date string (YYYY / YYYY-MM / YYYY-MM-DD / RFC3339) — the
+                instant the fact stops being true.
+            provenance: raw provenance dict for the bound (defaults to
+                External/UserAsserted — the same channel a user-asserted close
+                uses; must be External(*), any other channel raises
+                mempill.ValidationError).
+            confidence: confidence in this validity assertion (0.0-1.0).
+
+        Raises:
+            mempill.NotFoundError: no live claim on the line.
+            mempill.ValidationError: more than one live claim, or non-External
+                provenance.
+            mempill.UnparsableDateError: `at` cannot be normalised.
+        """
+        prov = provenance if provenance is not None else ProvenanceLabel.external_user_asserted()
+        receipt = mempill.end_fact(
+            self._engine, agent_id, subject, predicate, at,
+            provenance=prov, confidence=confidence,
+        )
+        log.debug(
+            "end_fact agent=%s subject=%s predicate=%s at=%s -> claim_ref=%s "
+            "disposition=%s no_op=%s",
+            agent_id, subject, predicate, at,
+            receipt.claim_ref, receipt.disposition, receipt.no_op,
+        )
+        return EndFactResult(
+            claim_ref=receipt.claim_ref,
+            disposition=receipt.disposition,
+            effective_at=receipt.effective_at,
+            no_op=receipt.no_op,
         )
 
     # ── Read path — current belief ────────────────────────────────────────────
