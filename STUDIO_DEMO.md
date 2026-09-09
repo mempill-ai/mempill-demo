@@ -364,6 +364,40 @@ The agent reports that the decision is deferred.
 
 ---
 
+## Date Granularity + Honest Display on History (0.4.0 headline read-path feature)
+
+Start a **new thread** in Studio (or use `exec_assistant` fresh if preferred). The seed has `acme-corp/ceo = Diane Foster` (start-of-time).
+
+### Step 1: CEO Succession Chain
+
+```
+Joan was appointed as Acme's CEO since Sep 2024 until Nov 2025
+```
+→ Interrupt (overlaps Diane). Resume: `Affirm`.
+
+```
+John was appointed as Acme's CEO since Jan 2025 until Dec 2026
+```
+→ Interrupt (overlaps Joan). Resume: `Affirm`.
+
+### Step 2: Query the History
+
+```
+What is the history of Acme's CEOs over time?
+```
+
+**Expected:** Agent calls `query_history` tool; answer lists all three CEOs in chronological order:
+- Diane Foster (original, no end date shown)
+- Joan (Sep 2024 to Jan 2025; the Jan 2025 end is **not** fabricated as a day)
+- John (Jan 2025 onwards; open-ended)
+
+**Dates stay month-granular:** "September 2024", never "September 1, 2024" or "-01" day suffix.
+The `valid_from_display` and `valid_until_display` fields (0.4.0 read-path feature) are month-precision as ingested, never invented.
+
+See `tests/test_react_agent_live_history.py:92-140` and `test_query_history.py:335-360` for the guards.
+
+---
+
 ## Reset
 
 To run the demo again from scratch:
@@ -381,7 +415,7 @@ rm -f .mempill/agent_jordan-park-001.db
 **ReAct topology:** A single `create_react_agent(model, tools, checkpointer=MemorySaver())`.
 The agent selects tools freely based on the question. No routing rules, no crew nodes.
 
-**7 memory tools:**
+**10 memory tools:**
 - `recall_subject` — retrieve all predicates for an entity (ask-anything)
 - `recall_at` — bi-temporal point-in-time query (world-history axis)
 - `recall_as_of` — bi-temporal transaction-time query (what-did-we-know axis)
@@ -389,6 +423,9 @@ The agent selects tools freely based on the question. No routing rules, no crew 
 - `get_contested` — inspect conflicting values for a Contested predicate
 - `request_adjudication` — HITL interrupt gate (pauses graph for human verdict)
 - `audit_trail` — full compliance audit log
+- `list_pending_adjudications` — list all unresolved Contested claims awaiting oracle verdict
+- `resolve_adjudication` — manually submit a verdict (Affirm/Deny/Abstain) for a Contested claim
+- `query_history` — retrieve the full timeline for (subject, predicate) with honest date display
 
 **HITL via tool interrupt:** `request_adjudication` calls `LangGraph interrupt(payload)` inside
 `_run()`. The graph pauses mid-tool-call. `Command(resume=verdict)` resumes the tool at the
@@ -402,3 +439,7 @@ message and keep the claim Contested — never falsely report "resolved".
 **Bi-temporal engine:** mempill stores valid-time AND transaction-time for every claim.
 Turn 2 proves this: asking about March 2024 after a 2025-02 succession correctly returns
 the Austin TX value from before the move — without overwriting history.
+
+**Router input hardening (PR #57):** The `dual_agent_router` coerces junk message entries before LLM routing,
+accumulates multi-turn conversation state safely across turns (preserving continuity),
+and exits with a clean one-line error for invalid agent IDs (no traceback, no orphaned DB file).

@@ -284,13 +284,13 @@ See `STUDIO_DEMO.md` for the full turn-by-turn script with exact inputs.
 .venv/bin/python -m pytest -m "not live" -q
 ```
 
-Runs all non-live tests (no API key required). Expected result: **370 passed** (up from 304 in legacy single-agent, +66 dual-agent router tests).
+Runs all non-live tests (no API key required). Expected result: **407 passed** (includes console + showcase + router tests).
 
 ```bash
 .venv/bin/python -m pytest -m live -q
 ```
 
-Runs live semantic E2E tests (requires `ANTHROPIC_API_KEY`). Expected: **22 passed** (up from 12 in legacy).
+Runs live semantic E2E tests (requires `ANTHROPIC_API_KEY`). Expected: **26 passed**.
 
 Live tests covered:
 
