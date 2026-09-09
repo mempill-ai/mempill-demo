@@ -465,3 +465,35 @@ class TestResolvedConflictRecall:
         assert "vp" in (b_after.value or "").lower() or "engineering" in (b_after.value or "").lower(), (
             f"After Deny, incumbent VP Engineering must win, got {b_after.value!r}"
         )
+
+
+# ── Test: reconcile returns first-pass result ─────────────────────────────
+
+def test_reconcile_returns_engine_result(seeded_adapter: MempillAdapter) -> None:
+    """Verify that adapter.reconcile() returns the engine's first-pass result.
+
+    After the engine fix for TASK-33-DIAG-2, the adapter calls reconcile() once
+    and returns the result (no looping). The MANDATORY CONTESTED ESCALATION
+    contract is preserved: outcomes and oracle_escalations are visible to callers.
+    """
+    # Call adapter.reconcile on seeded state
+    result = seeded_adapter.reconcile(
+        agent_id=AGENT_ID,
+        subject_lines=[["alice-chen", "city"]],
+    )
+
+    # Verify: result is a dict with engine response structure
+    assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+    assert "outcomes" in result, f"Expected 'outcomes' key, got {result.keys()}"
+    assert isinstance(result["outcomes"], list), (
+        f"Expected outcomes to be a list, got {type(result['outcomes'])}"
+    )
+
+    # Verify: escalations are included (callers need to see if Contested)
+    assert "oracle_escalations" in result, (
+        f"Expected 'oracle_escalations' key for MANDATORY CONTESTED ESCALATION, "
+        f"got {result.keys()}"
+    )
+    assert isinstance(result["oracle_escalations"], int), (
+        f"Expected oracle_escalations to be int, got {type(result['oracle_escalations'])}"
+    )

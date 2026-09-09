@@ -314,10 +314,17 @@ class MempillAdapter:
         subject_lines: list[list[str]],
         max_passes: int = 3,
     ) -> dict:
-        """Run the engine's reconcile loop for (subject, predicate) pairs.
+        """Run the engine's reconcile for (subject, predicate) pairs.
 
         Folds non-overlapping claim windows into CommittedCheap without oracle
-        involvement. Returns the raw engine response from the last pass.
+        involvement. Returns the raw engine response from the FIRST pass.
+
+        Engine reconcile is now idempotent: repeated passes are unnecessary and
+        would silently hide earlier Contested escalations. Single pass ensures
+        MANDATORY CONTESTED ESCALATION contract is visible to callers.
+
+        Note: max_passes param is deprecated (kept for backward compatibility).
+        Callers may wrap in their own loop if needed (e.g., hitl_node).
 
         Exposed so nodes and tools do NOT need to reach into adapter._engine.
         """
@@ -325,16 +332,12 @@ class MempillAdapter:
             "agent_id": agent_id,
             "subject_lines": subject_lines,
         }
-        last_resp: dict = {}
-        for _pass in range(max_passes):
-            last_resp = self._engine.reconcile(req)
-            if last_resp.get("oracle_escalations", 0) == 0:
-                break
+        resp = self._engine.reconcile(req)
         log.debug(
-            "reconcile agent=%s subject_lines=%s passes=%d result=%s",
-            agent_id, subject_lines, _pass + 1, last_resp,
+            "reconcile agent=%s subject_lines=%s result=%s",
+            agent_id, subject_lines, resp,
         )
-        return last_resp
+        return resp
 
     # ── Oracle / HITL methods (W7) ────────────────────────────────────────────
 
