@@ -52,7 +52,7 @@ def _build_studio_graph():
       1. Call bootstrap() to load .env.
       2. Build oracle-backed in-memory MempillAdapter.
       3. Seed Day-0 claims.
-      4. Build 7 agent tools.
+      4. Build 10 agent tools.
       5. Compile the graph without MemorySaver (Studio manages persistence).
 
     Returns (compiled_graph, adapter).
