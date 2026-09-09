@@ -7,7 +7,7 @@ Usage:
   python -m mempill_demo --scenario          auto-play 3-act story then REPL
   python -m mempill_demo --selftest          run assertion suite (no API key) then exit
   python -m mempill_demo --reset             delete the persistent DB and exit
-  python -m mempill_demo --db <path>         custom DB path
+  python -m mempill_demo --db-dir <dir>      custom DB base directory
   python -m mempill_demo --agent <agent_id>  custom agent_id
 """
 from __future__ import annotations
@@ -29,10 +29,13 @@ def _build_parser() -> argparse.ArgumentParser:
         description="mempill Interactive Console Agent",
     )
     p.add_argument(
-        "--db",
-        default=".mempill/console.db",
-        metavar="PATH",
-        help="File-backed DB path (default: .mempill/console.db)",
+        "--db-dir",
+        default=".mempill",
+        metavar="DIR",
+        help=(
+            "Base directory for the per-agent file-backed DB "
+            "(default: .mempill; actual file is <dir>/agent_<agent_id>.db)"
+        ),
     )
     p.add_argument(
         "--agent",
@@ -58,7 +61,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--reset",
         action="store_true",
-        help="Delete the persistent DB file and exit",
+        help="Delete the persistent per-agent DB file and exit",
     )
     p.add_argument(
         "--verbose",
@@ -122,8 +125,11 @@ def main() -> None:
         from mempill_demo.adapters.inference_llm import guard
         guard()  # exits with code 1 if key missing
 
-    # ── Resolve DB path and optional --reset ──────────────────────────────────
-    db_path = pathlib.Path(args.db)
+    # ── Resolve DB dir + agent_id, then derive the per-agent DB path ──────────
+    # agent_id must be resolved before the engine is opened, since it is now
+    # part of the derived file path (base_dir/agent_{agent_id}.db).
+    db_dir = pathlib.Path(args.db_dir)
+    db_path = db_dir / f"agent_{args.agent}.db"
 
     def _remove_db(path: pathlib.Path) -> list[str]:
         """Delete a SQLite DB plus its -wal/-shm sidecars. Leftover WAL/SHM
@@ -151,8 +157,15 @@ def main() -> None:
     import mempill
     from mempill_demo.adapters.human_oracle import HumanOracle
 
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    engine = mempill.open_oracle(str(db_path), HumanOracle())
+    db_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        engine = mempill.open_oracle_for_agent(str(db_dir), args.agent, HumanOracle())
+    except mempill.MempillError as exc:
+        # e.g. an invalid --agent id (characters outside [A-Za-z0-9_-]) raises
+        # mempill.StorageError deep inside the engine — surface it as a clean,
+        # single-line error rather than a raw traceback.
+        print(f"ERROR: could not open agent {args.agent!r}: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     # ── Build adapters ────────────────────────────────────────────────────────
     from mempill_demo.adapters.memory_mempill import MempillMemoryStore

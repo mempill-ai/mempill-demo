@@ -53,13 +53,56 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # ── System prompt ─────────────────────────────────────────────────────────────
+#
+# build_system_prompt() is the parameterized template (TASK-31 T31-2). Extracted
+# from the formerly-hardcoded _SYSTEM_PROMPT constant so multiple agent instances
+# (dual-agent router's people_ops / org_registry subgraphs) can each get their own
+# responsibility preamble, agent_id default, and KNOWN ENTITIES line, while the
+# single-agent exec_assistant path keeps calling build_system_prompt() with no
+# arguments and getting BYTE-IDENTICAL output to the old constant (see
+# tests/test_langgraph_graph.py::test_build_system_prompt_defaults_byte_identical).
 
-_SYSTEM_PROMPT = """\
-You are a bi-temporal memory assistant backed by the mempill engine.
+_DEFAULT_AGENT_ID = "jordan-park-001"
+_DEFAULT_KNOWN_ENTITIES = "alice-chen, bob-liu, acme-corp, jordan-park"
+
+
+def build_system_prompt(
+    agent_id: Optional[str] = None,
+    responsibility: Optional[str] = None,
+    known_entities: Optional[str] = None,
+) -> str:
+    """Build the ReAct agent's system prompt.
+
+    With all-default arguments, the output is BYTE-IDENTICAL to the historical
+    hardcoded _SYSTEM_PROMPT constant (backward-compat guarantee for the
+    single-agent exec_assistant path — see build_graph()/build_app()).
+
+    Args:
+        agent_id:       Defaults to "jordan-park-001" (today's hardcoded value).
+                        Used in the "agent_id is always X unless the user
+                        specifies otherwise" rule.
+        responsibility: Optional leading paragraph describing this agent
+                         instance's domain responsibility (dual-agent router
+                         use case). Defaults to "" (no leading paragraph,
+                         matching today's prompt exactly).
+        known_entities: Defaults to "alice-chen, bob-liu, acme-corp, jordan-park"
+                         (today's hardcoded KNOWN ENTITIES line contents).
+    """
+    if agent_id is None:
+        agent_id = _DEFAULT_AGENT_ID
+    if responsibility is None:
+        responsibility = ""
+    if known_entities is None:
+        known_entities = _DEFAULT_KNOWN_ENTITIES
+
+    responsibility_block = f"{responsibility}\n\n" if responsibility else ""
+
+    return f"""\
+{responsibility_block}You are a bi-temporal memory assistant backed by the mempill engine.
 You answer ANY natural-language question by consulting memory tools — never invent facts.
 
 KNOWN ENTITIES (always normalise: lowercase, spaces→hyphens):
-  alice-chen, bob-liu, acme-corp, jordan-park
+  {known_entities}
 
 TOOL SELECTION GUIDE:
 1. For questions about an entity ("what role does Alice hold?", "tell me about Bob"):
@@ -164,6 +207,14 @@ TOOL SELECTION GUIDE:
      each claim's originally-stated valid_from/valid_until — those may have
      been overridden by later adjudication and would produce a stale or
      overlapping (incorrect) narrative.
+   → CRITICAL — dates: use each entry's valid_from_display/valid_until_display
+     VERBATIM when stating a date (e.g. "December 2025", from display "2025-12").
+     NEVER expand a month- or year-granular display string into a specific day
+     ("December 1, 2025" is a FABRICATION when the display is "2025-12" — the
+     raw valid_from/valid_until timestamps are always midnight-normalised
+     instants and must NOT be read as day-precision). If a display field is
+     null, fall back to month precision (e.g. "2025-12") rather than stating
+     any day.
 
 RULES:
 - BEFORE calling remember_fact to (re-)assert a fact: if recall_subject or
@@ -174,7 +225,7 @@ RULES:
   already-current fact needlessly re-litigates it and can create duplicate
   claims or spurious contested writes.
 - Always consult memory before answering; never invent facts.
-- agent_id is always "jordan-park-001" unless the user specifies otherwise.
+- agent_id is always "{agent_id}" unless the user specifies otherwise.
 - When recall returns NoBelief, say so honestly — do not guess.
 - When recall returns Contested, call get_contested and surface both values;
   do NOT use a contested value in an action (write, briefing) without adjudication.
@@ -189,6 +240,12 @@ RULES:
   month-precision → say "June 2023" (not "June 1, 2023"); year-precision → say "2023"
   (not a fabricated month or day). NEVER fabricate a day or month the user did not
   provide — if the user said "June 2023", the fact is month-precision; report it as such.
+- This applies to EVERY tool's output, including query_history: whenever a tool result
+  provides a *_display field (valid_from_display, valid_until_display), use that string
+  VERBATIM to state the date. NEVER expand a month-granular ("2025-12") or year-granular
+  ("2025") display value into a fabricated day-precision date ("December 1, 2025" is
+  WRONG unless the user/claim actually stated a day) — the underlying raw timestamp is
+  always midnight-normalised and must never be read as evidence of day precision.
 """
 
 # ── ShowcaseTools NamedTuple (kept for DI wiring compatibility) ───────────────
@@ -220,6 +277,9 @@ def build_graph(
     tools: ShowcaseTools,
     checkpointer: Any = _SENTINEL,
     model_name: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    responsibility: Optional[str] = None,
+    known_entities: Optional[str] = None,
 ) -> Any:
     """Build and compile the ReAct ExecAssistant agent.
 
@@ -230,11 +290,20 @@ def build_graph(
     Pass checkpointer=None to compile without a checkpointer (LangGraph Studio path).
 
     Args:
-        adapter:      MempillAdapter — the single mempill boundary.
-        tools:        ShowcaseTools NamedTuple with all 7 agent tool instances.
-        checkpointer: Checkpointer instance, None, or _SENTINEL (default=MemorySaver).
-        model_name:   Anthropic model string. Defaults to ANTHROPIC_MODEL env var
-                      or "claude-haiku-4-5".
+        adapter:        MempillAdapter — the single mempill boundary.
+        tools:          ShowcaseTools NamedTuple with all 7 agent tool instances.
+        checkpointer:   Checkpointer instance, None, or _SENTINEL (default=MemorySaver).
+        model_name:     Anthropic model string. Defaults to ANTHROPIC_MODEL env var
+                        or "claude-haiku-4-5".
+        agent_id:       Optional agent_id override for the system prompt's
+                        "agent_id is always X" rule (TASK-31 dual-agent router).
+                        Defaults to "jordan-park-001" (today's behavior).
+        responsibility: Optional per-instance responsibility preamble (TASK-31
+                        dual-agent router). Defaults to "" (today's behavior:
+                        no leading paragraph).
+        known_entities: Optional per-instance KNOWN ENTITIES line (TASK-31
+                        dual-agent router). Defaults to the full legacy list
+                        (today's behavior).
     """
     if model_name is None:
         model_name = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
@@ -246,11 +315,17 @@ def build_graph(
     if checkpointer is _SENTINEL:
         checkpointer = MemorySaver()
 
+    system_prompt = build_system_prompt(
+        agent_id=agent_id,
+        responsibility=responsibility,
+        known_entities=known_entities,
+    )
+
     app = create_react_agent(
         model=model,
         tools=tool_list,
         checkpointer=checkpointer,
-        prompt=_SYSTEM_PROMPT,
+        prompt=system_prompt,
     )
 
     log.info(

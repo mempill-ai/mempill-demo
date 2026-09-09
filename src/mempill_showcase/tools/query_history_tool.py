@@ -15,7 +15,14 @@ away overlap and yields a stale/incoherent narrative.
 
 Returns a JSON dict with:
   subject, predicate, entries: [{claim_ref, value, valid_from, valid_until,
-  status, provenance, value_confidence}]
+  valid_from_display, valid_until_display, status, provenance, value_confidence}]
+
+valid_from_display/valid_until_display are the engine's own honest, granularity-aware
+render of valid_from/valid_until (e.g. "2025-12" for a month-granular fact, never a
+fabricated day) — natively returned by mempill 0.4.0's query_history (engine PR #67).
+Raw valid_from/valid_until are KEPT alongside the display strings (needed for
+ordering/precision when granularity=instant) — the display fields are additions, not
+replacements.
 """
 from __future__ import annotations
 
@@ -55,8 +62,18 @@ class QueryHistoryTool(BaseTool):
     NOT re-derive valid_until from what a claim first said.
 
     Returns JSON with subject, predicate, and an entries list; each entry
-    contains claim_ref, value, valid_from, valid_until, status
-    ("Current"/"Superseded"), provenance, value_confidence.
+    contains claim_ref, value, valid_from, valid_until, valid_from_display,
+    valid_until_display, status ("Current"/"Superseded"), provenance,
+    value_confidence.
+
+    valid_from_display/valid_until_display are pre-rendered at the fact's
+    ACTUAL recorded precision (e.g. "2025-12" for a month-granular date,
+    "2023" for year). ALWAYS use these *_display strings verbatim when
+    reporting dates to the user — NEVER expand them into, or otherwise state,
+    a specific day the user/claim did not provide. These fields may be null
+    for entries whose granularity could not be determined (older data); in
+    that case fall back to reporting at month precision (YYYY-MM, derived by
+    truncating valid_from/valid_until) rather than guessing a day.
     """
 
     name: str = "query_history"
@@ -71,7 +88,10 @@ class QueryHistoryTool(BaseTool):
         "reconstruct history by hand from audit_trail or recall_subject, and do "
         "NOT narrate each claim's originally-stated dates. Returns JSON with "
         "subject, predicate, and an entries list (claim_ref, value, valid_from, "
-        "valid_until, status, provenance, value_confidence)."
+        "valid_until, valid_from_display, valid_until_display, status, "
+        "provenance, value_confidence). ALWAYS report dates using the "
+        "*_display strings verbatim (e.g. '2025-12') — NEVER expand a month- or "
+        "year-granular date into a fabricated specific day."
     )
     args_schema: Type[BaseModel] = QueryHistoryInput
 
@@ -103,6 +123,8 @@ class QueryHistoryTool(BaseTool):
                 "value": e.get("value"),
                 "valid_from": e.get("valid_from"),
                 "valid_until": e.get("valid_until"),
+                "valid_from_display": e.get("valid_from_display"),
+                "valid_until_display": e.get("valid_until_display"),
                 "status": e.get("status"),
                 "provenance": e.get("provenance"),
                 "value_confidence": e.get("value_confidence"),

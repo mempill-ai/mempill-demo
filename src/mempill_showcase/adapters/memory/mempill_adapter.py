@@ -15,8 +15,17 @@ Write path:
 Read path:
   - recall(): uses raw query_memory (no valid_at) → current belief.
   - query_at(): raw query_memory with valid_at and/or as_of_tx_time → bi-temporal.
-  - Both extract valid_from_display/valid_until_display from the raw response
-    (pre-rendered by the engine at the recorded granularity precision).
+  - query_history(): as of mempill 0.4.0 (engine PR #67) the HistoryEntry DTO
+    natively carries valid_from_display/valid_until_display and
+    valid_from_granularity/valid_until_granularity, pre-rendered by the engine
+    at the recorded precision (year -> "YYYY", month -> "YYYY-MM", day/instant
+    -> "YYYY-MM-DD"), including correct truncation of a superseded entry's
+    valid_until_display against its successor's granularity. This adapter
+    passes those fields through unchanged — no local rendering or caching
+    needed. (Prior to PR #67 this adapter worked around the gap with an
+    in-process claim_ref -> granularity cache; removed now that the engine
+    fields are always present and strictly more complete, since they also
+    cover claims written by a prior process against a persistent engine.)
 
 Oracle path (W7):
   - list_pending_adjudications(): wraps engine.list_pending_adjudications(agent_id=...)
@@ -395,9 +404,20 @@ class MempillAdapter:
         from audit_trail/recall_subject; this fold IS the authoritative answer to
         "history over time" questions.
 
+        Each entry natively carries valid_from_display/valid_until_display (plus
+        valid_from_granularity/valid_until_granularity) from the engine itself
+        (mempill 0.4.0, engine PR #67) — honest, granularity-aware renders (e.g.
+        "2025-12" for a month-granular fact, never a fabricated day), already
+        correctly truncated against a successor's granularity where applicable.
+        The engine OMITS *_until_display/*_until_granularity entirely (rather
+        than setting them to None) when valid_until is open-ended; this adapter
+        normalises that to an explicit None so callers/tests can rely on the
+        keys always being present.
+
         Returns a list of dicts, each containing:
           claim_ref, value, valid_from, valid_until, status ("Current"/"Superseded"),
-          provenance, value_confidence.
+          provenance, value_confidence, valid_from_display, valid_until_display,
+          valid_from_granularity, valid_until_granularity.
         """
         log.debug(
             "query_history agent=%s subject=%s predicate=%s", agent_id, subject, predicate
@@ -407,7 +427,12 @@ class MempillAdapter:
             "subject": subject,
             "predicate": predicate,
         })
-        entries: list[dict] = list(raw.get("entries") or [])
+        entries: list[dict] = []
+        for e in raw.get("entries") or []:
+            entry = dict(e)
+            entry.setdefault("valid_until_display", None)
+            entry.setdefault("valid_until_granularity", None)
+            entries.append(entry)
         log.debug(
             "query_history returned %d entries for %s/%s", len(entries), subject, predicate
         )

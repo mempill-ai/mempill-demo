@@ -1,7 +1,10 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "exec_assistant": "./src/mempill_showcase/frameworks/langgraph/studio_graph.py:graph"
+    "exec_assistant": "./src/mempill_showcase/frameworks/langgraph/studio_graph.py:graph",
+    "people_ops_agent": "./src/mempill_showcase/frameworks/langgraph/studio_router_graph.py:people_ops_graph",
+    "org_registry_agent": "./src/mempill_showcase/frameworks/langgraph/studio_router_graph.py:org_registry_graph",
+    "dual_agent_router": "./src/mempill_showcase/frameworks/langgraph/studio_router_graph.py:graph"
   },
   "env": ".env"
 }
