@@ -7,7 +7,7 @@ mempill_showcase.tools — LangChain BaseTool wrappers over the W1 memory core.
   RecallAsOfTool            — transaction-time as-of recall
   RememberFactTool          — free-form write tool: the agent's primary write path;
                               accepts any subject/predicate and uses succession
-                              encapsulation (recall-then-close pattern)
+                              encapsulation (end_fact idiom, TASK-33-W4-DEMO)
   GetContestedTool          — surface competing beliefs for a contested predicate
   RequestAdjudicationTool   — HITL: interrupt the graph, get human verdict, resolve
   AuditTrailTool            — chronological audit ledger

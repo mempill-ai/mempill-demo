@@ -9,10 +9,11 @@ predicate the LLM chooses and normalises it via soft rules only:
     subject:   strip → lowercase → spaces→hyphens  (e.g. "Alice Chen" → "alice-chen")
     predicate: strip → lowercase → spaces→hyphens  (e.g. "Favorite Color" → "favorite-color")
 
-The succession encapsulation (recall-then-close pattern) from MempillRememberTool is
-preserved exactly: if an open-ended incumbent exists for the same (subject, predicate)
-and the new valid_from is after the incumbent's, the tool closes the old window and
-reconciles — returning CommittedCheap. Genuine overlapping conflicts return Contested.
+The succession encapsulation (end_fact idiom, TASK-33-W4-DEMO) from MempillRememberTool
+is preserved exactly: if exactly one open-ended incumbent exists for the same
+(subject, predicate) and the new valid_from is after the incumbent's, the tool bounds
+the incumbent in place via adapter.end_fact() before writing the challenger — returning
+CommittedCheap. Genuine overlapping conflicts return Contested.
 
 MempillRememberTool (canonical-key guard) is left untouched in the tools/ directory;
 this file is a NEW tool. Both co-exist until the graph wave deletes the old one.
@@ -108,10 +109,11 @@ class RememberFactTool(BaseTool):
     spaces are replaced with hyphens before storage.
 
     Succession rule (preserved from MempillRememberTool):
-      If an open-ended incumbent exists for the same (subject, predicate), the new
-      claim is ALSO open-ended (no valid_until), and the new valid_from is AFTER the
-      incumbent's start, the tool closes the old window (recall-then-close pattern)
-      and reconciles — returning CommittedCheap. A BOUNDED challenger (valid_until
+      If exactly one open-ended incumbent exists for the same (subject, predicate),
+      the new claim is ALSO open-ended (no valid_until), and the new valid_from is
+      AFTER the incumbent's start, the tool bounds the incumbent in place via
+      adapter.end_fact() (end_fact idiom, TASK-33-W4-DEMO) before writing the
+      challenger — returning CommittedCheap. A BOUNDED challenger (valid_until
       present) against an open-ended incumbent is left alone here: it overlaps by
       the engine's own non-overlap rule and returns Contested, requiring HITL
       resolution — this is how competing bounded appointments (e.g. two people
@@ -178,7 +180,7 @@ class RememberFactTool(BaseTool):
             criticality="Medium",
         )
 
-        # ── Succession encapsulation (recall-then-close) ──────────────────────
+        # ── Succession encapsulation (end_fact idiom, TASK-33-W4-DEMO) ─────────
         # Only auto-close the incumbent when the CHALLENGER is itself open-ended
         # (a true "X replaces Y indefinitely" succession). A bounded challenger
         # (valid_until present) against an open-ended incumbent OVERLAPS by the
@@ -186,33 +188,45 @@ class RememberFactTool(BaseTool):
         # any finite start) — that is a genuine conflict, not a clean handoff,
         # and must be left for ingest_claim/reconcile to surface as Contested.
         close_step_performed = False
+        ambiguous_incumbent_note: Optional[str] = None
         if valid_from and not valid_until:
-            incumbent = self.adapter.recall(agent_id, subject, predicate)
-            if (
-                incumbent.status == "Resolved"
-                and incumbent.vt_end == "open"
-                and incumbent.vt_start
-                and incumbent.claim_ref
-            ):
-                inc_display = incumbent.vt_start_display or ""
-                if inc_display and is_later(valid_from, inc_display) and incumbent.value != value:
-                    log.debug(
-                        "RememberFactTool: closing open incumbent %s valid_from=%s at %s",
-                        incumbent.claim_ref, inc_display, valid_from,
-                    )
-                    close_claim = ClaimInput(
-                        subject=subject,
-                        predicate=predicate,
-                        value=incumbent.value,
-                        valid_from=inc_display,
-                        valid_until=valid_from,
-                        confidence=confidence,
-                        provenance=ProvenanceLabel.external_user_asserted(),
-                        cardinality="Functional",
-                        criticality="Medium",
-                    )
-                    self.adapter.write_claim(agent_id, close_claim)
-                    close_step_performed = True
+            resolution = self.adapter.resolve_live_claim_for_line(agent_id, subject, predicate)
+            live_status = resolution.get("status")
+
+            if live_status == "single":
+                incumbent = self.adapter.recall(agent_id, subject, predicate)
+                if (
+                    incumbent.status == "Resolved"
+                    and incumbent.vt_end == "open"
+                    and incumbent.vt_start
+                    and incumbent.claim_ref
+                ):
+                    inc_display = incumbent.vt_start_display or ""
+                    if inc_display and is_later(valid_from, inc_display) and incumbent.value != value:
+                        log.debug(
+                            "RememberFactTool: end_fact closing incumbent %s valid_from=%s at %s",
+                            incumbent.claim_ref, inc_display, valid_from,
+                        )
+                        try:
+                            self.adapter.end_fact(
+                                agent_id, subject, predicate, at=valid_from,
+                                provenance=ProvenanceLabel.external_user_asserted(),
+                                confidence=confidence,
+                            )
+                            close_step_performed = True
+                        except Exception as exc:
+                            log.debug("RememberFactTool: end_fact close-step skipped: %s", exc)
+            elif live_status == "ambiguous":
+                # The line is ALREADY Contested (>1 live claim) — never guess which
+                # claim to close. Write the challenger as another candidate and let
+                # the engine's Contested/HITL gate surface the ambiguity, as today.
+                ambiguous_incumbent_note = (
+                    f"{resolution.get('live_count')} live claims already exist for "
+                    f"{subject}/{predicate}; not auto-closing — write proceeds as a "
+                    "new candidate and the line remains Contested pending HITL."
+                )
+                log.debug("RememberFactTool: %s", ambiguous_incumbent_note)
+            # live_status == "empty": nothing to close; fall through to normal write.
 
         receipt = self.adapter.write_claim(agent_id, claim)
 
@@ -248,6 +262,8 @@ class RememberFactTool(BaseTool):
             "disposition": final_disposition,
             "is_contested": is_contested_final,
         }
+        if ambiguous_incumbent_note:
+            result["ambiguous_incumbent_note"] = ambiguous_incumbent_note
         log.debug("RememberFactTool result: %s", result)
         return json.dumps(result)
 
