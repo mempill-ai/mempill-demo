@@ -66,13 +66,10 @@ AGENT_ID = "jordan-park-001"
 # engine (open_oracle_in_memory + write_claim + submit_adjudication) with no
 # demo code involved — not fixable in the demo.
 _XFAIL_AFFIRM_BOUND_AT_TXTIME = (
-    "ENGINE-SIDE (TASK-33-W5-DEMO, mempill read-only, verified against PR #76 "
-    "sse__valid-at-bounds): after a second sequential Affirm (John over Joan), "
-    "query_history leaves Joan and John both status=Contested (expected "
-    "Superseded/Current) and truncates Diane's valid_until straight to John's "
-    "valid_from (2025-01-01T00:00:00Z), skipping Joan's (2024-09) as the "
-    "immediate successor. Original TASK-33-W4-DEMO tx-time-bound symptom is "
-    "fixed by #76; this is a distinct fold/adjudication-chaining regression."
+    "ENGINE-SIDE (TASK-33-W5-DEMO, mempill #76 aab20a2): Current fact (John) "
+    "retains stated valid_until (2026-12-01T00:00:00Z) instead of None; "
+    "Superseded display granularity (Diane) shows as day-granular (2024-09-01) "
+    "instead of honoring truncation-point successor's month granularity (2024-09)."
 )
 
 
