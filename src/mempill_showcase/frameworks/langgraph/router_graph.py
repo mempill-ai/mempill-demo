@@ -221,20 +221,18 @@ def make_route_query_node(model_name: Optional[str] = None):
         # ── Empty-after-normalization guard ──────────────────────────────────
         # No usable message survived normalization (e.g. all-junk input like a
         # bare int, [], [""], or a contentless dict). Skip the classifier call
-        # entirely and default-route (ambiguity policy) with a friendly
-        # assistant message, rather than sending an empty/junk state into the
-        # subgraph.
+        # entirely and short-circuit to END (terminal route "_no_route") with a
+        # friendly assistant message, rather than sending an empty/junk state
+        # into a subgraph.
         if not messages:
-            agent_id = _AGENT_ID_BY_ROUTE[_DEFAULT_ROUTE]
             log.warning(
                 "route_query: no usable messages after normalization — "
-                "defaulting to %r (ambiguous)",
-                _DEFAULT_ROUTE,
+                "terminating with friendly message"
             )
             return {
-                "route": _DEFAULT_ROUTE,
-                "route_rationale": "no usable messages after normalization — defaulted (ambiguous)",
-                "agent_id": agent_id,
+                "route": "_no_route",
+                "route_rationale": "no usable messages after normalization — terminated early",
+                "agent_id": None,
                 "messages": [AIMessage(content=_FRIENDLY_NO_MESSAGE_TEXT)],
             }
 
@@ -330,6 +328,7 @@ def build_router_graph(
         {
             "people_ops": "people_ops_subgraph",
             "org_registry": "org_registry_subgraph",
+            "_no_route": END,
         },
     )
     graph.add_edge("people_ops_subgraph", END)

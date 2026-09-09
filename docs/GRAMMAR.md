@@ -15,7 +15,7 @@ Slash commands must start with `/`.
 | `--scenario` | off | Auto-play the 3-act demonstration scenario then hand off to REPL |
 | `--selftest` | off | Run deterministic assertion suite and exit (no API key required) |
 | `--reset` | off | Delete the persistent per-agent DB file and exit |
-| `--verbose` | off | Enable verbose logging of engine calls (use `-v` for INFO, `-vv` for DEBUG) |
+| `--verbose` | off | Enable verbose logging of engine calls (use `--verbose` for INFO, `--verbose --verbose` for DEBUG); also honoured via `MEMPILL_VERBOSE=1` (INFO) or `MEMPILL_VERBOSE=2` (DEBUG) |
 
 **Example:**
 ```bash
