@@ -50,28 +50,6 @@ from mempill_showcase.tools.resolve_adjudication_tool import ResolveAdjudication
 
 AGENT_ID = "jordan-park-001"
 
-# TASK-33-W5-DEMO: re-verified against mempill PR #76 (sse__valid-at-bounds,
-# fixes A/B/C, built locally — wheel not yet published). The ORIGINAL diagnosis
-# below (TASK-33-W4-DEMO: incumbent bound at transaction/"now" time) no longer
-# reproduces under #76 — that symptom is gone. A DIFFERENT, still ENGINE-SIDE
-# symptom remains for the Diane -> Joan -> John (two sequential Affirms) fold:
-# after the second Affirm (John over Joan), adapter.query_history returns
-#   Diane: status=Superseded, valid_until=2025-01-01T00:00:00Z (John's valid_from)
-#   Joan:  status=Contested   (expected Superseded, valid_until truncated to 2025-01)
-#   John:  status=Contested   (expected Current, valid_until=None)
-# i.e. Diane's Superseded window is truncated straight through to the FINAL
-# successor's (John's) valid_from, skipping the immediate successor (Joan)
-# entirely, and both Joan and John are left Contested instead of Joan being
-# folded to Superseded and John to Current. Reproduced via the raw mempill
-# engine (open_oracle_in_memory + write_claim + submit_adjudication) with no
-# demo code involved — not fixable in the demo.
-_XFAIL_AFFIRM_BOUND_AT_TXTIME = (
-    "ENGINE-SIDE (TASK-33-W5-DEMO, mempill #76 aab20a2): Current fact (John) "
-    "retains stated valid_until (2026-12-01T00:00:00Z) instead of None; "
-    "Superseded display granularity (Diane) shows as day-granular (2024-09-01) "
-    "instead of honoring truncation-point successor's month granularity (2024-09)."
-)
-
 
 @pytest.fixture()
 def oracle_adapter() -> MempillAdapter:
@@ -120,14 +98,13 @@ def _seed_diane_joan_john(adapter: MempillAdapter) -> None:
     assert _write_ceo(adapter, "Diane", "2021-04") == "CommittedCheap"
     assert _write_ceo(adapter, "Joan", "2024-09", "2025-11") == "QueuedForAdjudication"
     _affirm_all_pending(adapter)  # Joan wins over Diane
-    assert _write_ceo(adapter, "John", "2025-01", "2026-12") == "QueuedForAdjudication"
+    assert _write_ceo(adapter, "John", "2025-01") == "QueuedForAdjudication"
     _affirm_all_pending(adapter)  # John wins over Joan
 
 
 # ── H1: adapter.query_history — correct truncated, non-overlapping fold ─────
 
 class TestAdapterQueryHistory:
-    @pytest.mark.xfail(reason=_XFAIL_AFFIRM_BOUND_AT_TXTIME, strict=False)
     def test_scripted_succession_truncates_correctly(self, oracle_adapter: MempillAdapter) -> None:
         _seed_diane_joan_john(oracle_adapter)
 
@@ -172,7 +149,6 @@ class TestAdapterQueryHistory:
 # ── H2/H3: QueryHistoryTool ───────────────────────────────────────────────────
 
 class TestQueryHistoryTool:
-    @pytest.mark.xfail(reason=_XFAIL_AFFIRM_BOUND_AT_TXTIME, strict=False)
     def test_run_returns_correct_truncated_chronology(self, oracle_adapter: MempillAdapter) -> None:
         _seed_diane_joan_john(oracle_adapter)
         tool = QueryHistoryTool(adapter=oracle_adapter)
@@ -336,7 +312,6 @@ class TestQueryHistoryHonestDisplay:
         assert "December 1" not in raw
         assert "2025-12-01" not in raw.replace(entry["valid_from"], "")  # only the raw field carries day form
 
-    @pytest.mark.xfail(reason=_XFAIL_AFFIRM_BOUND_AT_TXTIME, strict=False)
     def test_truncated_superseded_entry_display_uses_successor_granularity(
         self, oracle_adapter: MempillAdapter
     ) -> None:
