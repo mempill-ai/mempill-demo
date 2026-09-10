@@ -50,24 +50,6 @@ from mempill_showcase.tools.resolve_adjudication_tool import ResolveAdjudication
 
 AGENT_ID = "jordan-park-001"
 
-# TASK-33-W4-DEMO: known ENGINE-SIDE bug, PRE-EXISTING and unrelated to the D1
-# end_fact migration (submit_adjudication.rs::bound_claim, unchanged by mempill
-# PR #75). Affirming a pending adjudication bounds the LOSING (incumbent) claim's
-# ValidityAssertion at TRANSACTION time (`bound_at: tx_time`, i.e. "now" when the
-# human/oracle resolves it) rather than at the winning challenger's world-time
-# valid_from. query_history's compute_history_windows now honors that Bound (PR
-# #75 fix) for truncation, so a scripted Affirm-resolved succession's superseded
-# entry shows valid_until = the wall-clock resolution instant instead of the
-# challenger's stated start. Reproduced via the raw mempill engine (open_oracle_
-# in_memory + ingest_claim + submit_adjudication) with no demo code involved —
-# not fixable in the demo (AdjudicationResponse has no caller-supplied `at`).
-_XFAIL_AFFIRM_BOUND_AT_TXTIME = (
-    "ENGINE-SIDE (TASK-33-W4-DEMO, mempill read-only, pre-existing): "
-    "submit_adjudication's Affirm path bounds the incumbent at transaction time "
-    "(now), not the challenger's valid_from — query_history truncation (PR #75) "
-    "now surfaces that as valid_until=now() instead of the challenger's start."
-)
-
 
 @pytest.fixture()
 def oracle_adapter() -> MempillAdapter:
@@ -116,14 +98,13 @@ def _seed_diane_joan_john(adapter: MempillAdapter) -> None:
     assert _write_ceo(adapter, "Diane", "2021-04") == "CommittedCheap"
     assert _write_ceo(adapter, "Joan", "2024-09", "2025-11") == "QueuedForAdjudication"
     _affirm_all_pending(adapter)  # Joan wins over Diane
-    assert _write_ceo(adapter, "John", "2025-01", "2026-12") == "QueuedForAdjudication"
+    assert _write_ceo(adapter, "John", "2025-01") == "QueuedForAdjudication"
     _affirm_all_pending(adapter)  # John wins over Joan
 
 
 # ── H1: adapter.query_history — correct truncated, non-overlapping fold ─────
 
 class TestAdapterQueryHistory:
-    @pytest.mark.xfail(reason=_XFAIL_AFFIRM_BOUND_AT_TXTIME, strict=False)
     def test_scripted_succession_truncates_correctly(self, oracle_adapter: MempillAdapter) -> None:
         _seed_diane_joan_john(oracle_adapter)
 
@@ -168,7 +149,6 @@ class TestAdapterQueryHistory:
 # ── H2/H3: QueryHistoryTool ───────────────────────────────────────────────────
 
 class TestQueryHistoryTool:
-    @pytest.mark.xfail(reason=_XFAIL_AFFIRM_BOUND_AT_TXTIME, strict=False)
     def test_run_returns_correct_truncated_chronology(self, oracle_adapter: MempillAdapter) -> None:
         _seed_diane_joan_john(oracle_adapter)
         tool = QueryHistoryTool(adapter=oracle_adapter)
@@ -332,7 +312,6 @@ class TestQueryHistoryHonestDisplay:
         assert "December 1" not in raw
         assert "2025-12-01" not in raw.replace(entry["valid_from"], "")  # only the raw field carries day form
 
-    @pytest.mark.xfail(reason=_XFAIL_AFFIRM_BOUND_AT_TXTIME, strict=False)
     def test_truncated_superseded_entry_display_uses_successor_granularity(
         self, oracle_adapter: MempillAdapter
     ) -> None:
