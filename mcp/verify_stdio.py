@@ -9,7 +9,7 @@ Usage:
   uv run python mcp/verify_stdio.py           # prints [VERIFIED] on success
   uv run python mcp/verify_stdio.py --verify  # exits 0 on success, 1 on failure
 
-No MEMPILL_DB_PATH → in-memory engine (ephemeral, no files written).
+No MEMPILL_DB_DIR → in-memory engine (ephemeral, no files written).
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ async def verify() -> None:
         )
 
     # Build env: pass PATH + HOME so the subprocess can find system tools.
-    # No MEMPILL_DB_PATH → server opens an in-memory engine (ephemeral).
+    # No MEMPILL_DB_DIR → server opens an in-memory engine (ephemeral).
     server_env = {
         "MEMPILL_AGENT_ID": "verify-agent",
         "PATH": os.environ.get("PATH", ""),

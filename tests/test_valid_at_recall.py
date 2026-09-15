@@ -9,7 +9,9 @@ Tests verify:
   TV5  Integration: clean succession (no reconcile) — valid=2021 → Alice
   TV6  Integration: clean succession — valid=2025 → Bob
   TV7  Integration: clean succession — valid=2019 → NoBelief
-  TV8  Integration: after oracle Affirm (Bob wins) — valid=2021 as-of-NOW → Bob (Alice superseded)
+  TV8  Integration: after oracle Affirm (Bob wins) — valid=2021 as-of-NOW → Alice still
+       (her own valid-time window covers 2021 regardless of a later Affirm; fixed in
+       mempill #76 — previously the engine ignored valid_at once narrowed to one live claim)
   TV9  Integration: after oracle Affirm — valid=2021 tx=<before-adjudication> → Alice resurfaces
   TV10 Integration: current (plain) RECALL after succession → Bob
 
@@ -121,8 +123,12 @@ def test_tv7_clean_succession_no_belief():
     assert belief.status in ("NoBelief", "UNKNOWN")
 
 
-def test_tv8_after_reconcile_valid_at_now_sees_bob():
-    """TV8: after oracle Affirm, valid=2021 as-of-NOW → Bob (Alice Superseded)."""
+def test_tv8_after_reconcile_valid_at_2021_still_sees_alice():
+    """TV8: after oracle Affirm, valid=2021 as-of-NOW → Alice (her own valid-time
+    window covers 2021 regardless of a later Affirm bounding her forward window).
+    Fixed in mempill #76: the engine previously ignored the valid_at window once
+    disposition narrowing left exactly one live claim, unconditionally returning
+    Bob even for dates before his own valid_from (2023-03-15)."""
     engine = mempill.open_oracle_in_memory(HumanOracle())
     agent_id = "tv8-agent"
     store = MempillMemoryStore(engine, agent_id)
@@ -151,12 +157,13 @@ def test_tv8_after_reconcile_valid_at_now_sees_bob():
         "evidence_provenance": ProvenanceLabel.external_first_hand(),
     })
 
-    # valid=2021 as-of-NOW: Alice is Superseded, engine returns Bob
+    # valid=2021 as-of-NOW: Alice is Superseded (as a disposition), but her own
+    # valid-time window still covers 2021 — the point-in-time query must honor
+    # that window, not just "whichever claim is currently live."
     belief = store.recall_at("acme:ceo", "held_by", valid_at="2021-06-01T00:00:00Z")
-    # The engine resolves this via succession semantics — Bob supersedes Alice
-    # so even valid_at=2021 returns Bob (as-of-now, after adjudication)
-    assert belief.value == "Bob", (
-        f"TV8: expected Bob (Alice superseded), got {belief.value!r} status={belief.status}"
+    assert belief.value == "Alice", (
+        f"TV8: expected Alice (her window covers 2021 even though Bob later won "
+        f"the Affirm), got {belief.value!r} status={belief.status}"
     )
 
 

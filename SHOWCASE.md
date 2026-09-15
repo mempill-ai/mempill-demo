@@ -8,23 +8,23 @@
 
 ### mempill dependency
 
-mempill 0.3.0 is published on PyPI and installs normally via the `mempill>=0.3.0,<0.4` pin
-in `pyproject.toml` (includes `query_at` / `as_of_tx_time` / `valid_from_display` support).
+mempill 0.4.0 (per-agent file storage: `open_for_agent` / `open_oracle_for_agent`) is
+**not yet published on PyPI** — the `mempill>=0.4.0,<0.5` pin in `pyproject.toml` will fail to
+resolve via the default `scripts/setup.sh` until it is published.
+
+Until then, run `scripts/setup.sh --local-engine` — it builds and installs mempill from the
+sibling `../mempill` repo instead of PyPI.
 
 If you ever need to rebuild the venv from scratch, follow the project `README.md`
 setup instructions.
-
-To develop or test unreleased mempill engine changes, run `scripts/setup.sh --local-engine`
-instead of the default — it builds and installs mempill from the sibling `../mempill` repo
-rather than PyPI.
 
 ---
 
 ## Architecture Overview
 
-### Single free-form ReAct agent
+### Primary: Single free-form ReAct agent
 
-The showcase uses a single `create_react_agent` (LangGraph) with 7 memory tools
+The exec_assistant (legacy) uses a single `create_react_agent` (LangGraph) with 10 memory tools
 and a mempill bi-temporal memory backend. There is no multi-agent topology —
 one ReAct agent handles all question types directly via tool selection.
 
@@ -43,6 +43,9 @@ User question (free-form natural language)
  │    get_contested    — inspect conflicting facts │
  │    request_adjudication — HITL interrupt gate   │
  │    audit_trail      — compliance audit log      │
+ │    list_pending_adjudications — view conflicts  │
+ │    resolve_adjudication — human verdict gate    │
+ │    query_history    — search fact history       │
  │                                                 │
  │  Capabilities:                                  │
  │    • Bounded valid-time intervals (valid_from  │
@@ -81,6 +84,17 @@ the graph **pauses**. The human sends `Command(resume=verdict)` with one of:
 
 The oracle queue in mempill receives the verdict via `submit_adjudication()` and
 resolves the conflict. Post-resolution recall returns `Resolved` status.
+
+### Dual-agent router (mempill 0.4.0 showcase)
+
+The dual-agent router (`people_ops_agent` and `org_registry_agent` in LangGraph Studio)
+is an alternative topology that splits the executive-assistant workload along domain lines.
+A lightweight structured-output classifier routes each natural-language query to the appropriate
+agent: **people_ops_agent** handles facts about people (Alice Chen, Bob Liu, Jordan Park) and
+their roles/attributes; **org_registry_agent** handles organizational facts (Acme Corp's CEO
+seat and headquarters). Each agent maintains its own SQLite database (`agent_<id>.db` under
+`.mempill/`), demonstrating mempill 0.4.0's per-agent storage feature. Ambiguous queries
+default to people_ops_agent.
 
 ### Naive-vs-mempill contrast
 
@@ -191,14 +205,13 @@ without faking past dates.
 
 ### Try it in Studio — interactive ReAct agent demo
 
-LangGraph Studio lets you visualize and interactively run the free-form ReAct
-agent with a UI.
+LangGraph Studio lets you visualize and interactively run the showcase agents with a UI.
 
 **Default model:** `claude-haiku-4-5-20251001` (short alias: `claude-haiku-4-5`; overridable via `ANTHROPIC_MODEL` in `.env`).
 
 **Setup:**
 
-1. Add your Anthropic API key to `.env` at the repo root (required for the ReAct LLM):
+1. Add your Anthropic API key to `.env` at the repo root (required for the ReAct LLM and router classifier):
 
    ```dotenv
    ANTHROPIC_API_KEY=sk-ant-...
@@ -206,21 +219,57 @@ agent with a UI.
    # ANTHROPIC_MODEL=claude-haiku-4-5-20251001
    ```
 
-2. Start Studio:
+2. Start Studio (requires `langgraph-cli[inmem]` — an opt-in extra):
 
    ```bash
+   pip install 'langgraph-cli[inmem]'
    .venv/bin/langgraph dev
    ```
 
    Studio opens at `http://127.0.0.1:2024` and prints a link to the Studio UI at
    `https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024`.
 
-3. Select the **exec_assistant** graph in the Studio sidebar.
+3. Select one of four graphs from the Studio sidebar:
+
+   | Graph | Purpose |
+   |---|---|
+   | **exec_assistant** | Legacy single-agent entry point (jordan-park-001 agent, all facts in one DB) |
+   | **people_ops_agent** | Domain-scoped ReAct agent managing personnel facts (alice-chen, bob-liu, jordan-park) |
+   | **org_registry_agent** | Domain-scoped ReAct agent managing organizational facts (acme-corp) |
+   | **dual_agent_router** | Natural-language router that classifies queries and dispatches to people_ops or org_registry |
 
 **What happens at startup:**
 
-The graph module seeds 7 Day-0 facts for agent `jordan-park-001` automatically.
-The in-memory store persists across turns within a single `langgraph dev` session.
+Day-0 facts are seeded automatically at graph module-import time (when `langgraph dev` starts):
+- **exec_assistant:** 7 facts for agent `jordan-park-001` (legacy single agent with all domains)
+- **people_ops_agent:** 6 facts for agent `people-ops-001` (person subjects only)
+- **org_registry_agent:** 2 facts for agent `org-registry-001` (org subjects only: ceo + new hq_location)
+
+For the dual-agent graphs, the in-memory store persists across turns within a single `langgraph dev` session.
+To inspect per-agent databases on disk (persistent storage):
+
+```bash
+# After running dual_agent_router a few times, inspect the per-agent SQLite files:
+sqlite3 .mempill/agent_people-ops-001.db "select subject, predicate, value from claims;" 
+# Expected seed (6 rows):
+#   alice-chen|employer|Acme Corp / VP Engineering
+#   alice-chen|city|Austin TX
+#   alice-chen|dietary_restriction|vegetarian
+#   bob-liu|employer|Meridian Ventures / Partner
+#   bob-liu|travel_preference|window seat, no checked bags
+#   jordan-park|preferred_hotel|Marriott Bonvoy Gold
+
+sqlite3 .mempill/agent_org-registry-001.db "select subject, predicate, value from claims;"
+# Expected seed (2 rows):
+#   acme-corp|ceo|Diane Foster
+#   acme-corp|hq_location|Austin, TX
+
+# Inspect which agent wrote each claim:
+sqlite3 .mempill/agent_people-ops-001.db "select distinct agent_id from claims;"
+# Output: people-ops-001
+```
+
+This per-agent storage is mempill 0.4.0's headline: one SQLite file per agent, each isolated and auditable.
 
 **How to use the Input form:**
 
@@ -238,13 +287,13 @@ See `STUDIO_DEMO.md` for the full turn-by-turn script with exact inputs.
 .venv/bin/python -m pytest -m "not live" -q
 ```
 
-Runs all non-live tests (no API key required). Expected result: **304 passed**.
+Runs all non-live tests (no API key required). Expected result: **407 passed** (includes console + showcase + router tests).
 
 ```bash
 .venv/bin/python -m pytest -m live -q
 ```
 
-Runs live semantic E2E tests (requires `ANTHROPIC_API_KEY`). Expected: **12 passed**.
+Runs live semantic E2E tests (requires `ANTHROPIC_API_KEY`). Expected: **26 passed**.
 
 Live tests covered:
 

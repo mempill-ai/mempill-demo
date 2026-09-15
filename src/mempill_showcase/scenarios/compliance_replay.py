@@ -153,7 +153,7 @@ def run_compliance_replay(
 
     if run_full_scenario:
         # Build a FRESH in-memory adapter for the compliance scenario.
-        # The file-backed engine (MEMPILL_DB_PATH) is intentionally NOT used here:
+        # The file-backed engine (MEMPILL_DB_DIR) is intentionally NOT used here:
         # the compliance scenario needs a clean slate to capture the tx-time axis
         # (Austin→NYC succession) correctly. The file-backed engine is for the CLI
         # and LangGraph Studio paths, not for in-process scenario testing.

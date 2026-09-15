@@ -12,11 +12,26 @@ Write path:
   - Never re-ingests duplicates (de-dup is caller responsibility via ClaimInput tracking).
   - Never defaults valid_from to now.
 
+Succession (TASK-33-W4-DEMO):
+  - end_fact() / resolve_live_claim_for_line(): bound an incumbent's open-ended
+    window in place via engine.assert_validity(Bound), wrapped by mempill.end_fact().
+    Replaces the old "write a bounded duplicate copy" close step — see
+    DIAG_close_incumbent.md.
+
 Read path:
   - recall(): uses raw query_memory (no valid_at) → current belief.
   - query_at(): raw query_memory with valid_at and/or as_of_tx_time → bi-temporal.
-  - Both extract valid_from_display/valid_until_display from the raw response
-    (pre-rendered by the engine at the recorded granularity precision).
+  - query_history(): as of mempill 0.4.0 (engine PR #67) the HistoryEntry DTO
+    natively carries valid_from_display/valid_until_display and
+    valid_from_granularity/valid_until_granularity, pre-rendered by the engine
+    at the recorded precision (year -> "YYYY", month -> "YYYY-MM", day/instant
+    -> "YYYY-MM-DD"), including correct truncation of a superseded entry's
+    valid_until_display against its successor's granularity. This adapter
+    passes those fields through unchanged — no local rendering or caching
+    needed. (Prior to PR #67 this adapter worked around the gap with an
+    in-process claim_ref -> granularity cache; removed now that the engine
+    fields are always present and strictly more complete, since they also
+    cover claims written by a prior process against a persistent engine.)
 
 Oracle path (W7):
   - list_pending_adjudications(): wraps engine.list_pending_adjudications(agent_id=...)
@@ -45,6 +60,7 @@ from mempill_showcase.core.domain.models import (
     AuditEntry,
     BeliefView,
     ClaimInput,
+    EndFactResult,
     WriteReceipt,
     _prov_abbr,
 )
@@ -257,6 +273,91 @@ class MempillAdapter:
             contested_with=contested,
         )
 
+    # ── Succession — end_fact (TASK-33-W4-DEMO) ────────────────────────────────
+    #
+    # Replaces the old "write a bounded copy of the incumbent" close step (which
+    # wrote a NEW duplicate claim row with the same value and a valid_until — see
+    # DIAG_close_incumbent.md). That duplicate poisoned the line (two live claims
+    # with overlapping open/near-open windows) and only converged to a clean
+    # succession because the old engine's reconcile() had an implicit supersession
+    # side effect that has since been removed as an A6/I7 violation.
+    #
+    # The corrected idiom bounds the ACTUAL incumbent claim in place via
+    # engine.assert_validity() (never a duplicate row), through the
+    # mempill.end_fact() ergonomic wrapper. Once bounded, the incumbent is no
+    # longer "live", so a subsequent non-overlapping challenger write folds to a
+    # clean CommittedCheap succession with no reconcile() needed to paper over it.
+
+    def resolve_live_claim_for_line(self, agent_id: str, subject: str, predicate: str) -> dict:
+        """Resolve (subject, predicate) to the live claim(s) on that line — the SAME
+        canonical fold recall()/query_history() use (I8 single source of truth;
+        never a heuristic re-derivation). Backs end_fact(); callers that need to
+        know 0/1/>1 live claims BEFORE deciding whether to close an incumbent
+        (e.g. a succession-encapsulation write tool) should call this directly.
+
+        Returns a dict: {"status": "empty"|"single"|"ambiguous",
+        "claim_ref": str|None, "live_count": int|None}. "live_count" is populated
+        only for "ambiguous" (an already-Contested line — never guess which claim
+        to close in that case).
+        """
+        return self._engine.resolve_live_claim_for_line(agent_id, subject, predicate)
+
+    def end_fact(
+        self,
+        agent_id: str,
+        subject: str,
+        predicate: str,
+        at: str,
+        provenance: Optional[dict] = None,
+        confidence: float = 1.0,
+    ) -> EndFactResult:
+        """Bound the incumbent claim on (subject, predicate) at `at` — the corrected
+        succession idiom (TASK-33 D1): ends the ACTUAL incumbent claim in place via
+        engine.assert_validity(Bound); never writes a duplicate "closed copy" row.
+
+        Resolution never guesses which claim to close — delegates to
+        mempill.end_fact(), backed by engine.resolve_live_claim_for_line() (the
+        SAME canonical fold recall()/query_history() use):
+          0 live claims  -> mempill.NotFoundError (nothing to close)
+          1 live claim   -> bounded at `at`; returns EndFactResult
+          >1 live claims -> mempill.ValidationError (never guesses — caller should
+                             check resolve_live_claim_for_line() first and skip the
+                             close-step on an already-Contested/ambiguous line)
+
+        Args:
+            agent_id, subject, predicate: subject-line identity.
+            at: lenient date string (YYYY / YYYY-MM / YYYY-MM-DD / RFC3339) — the
+                instant the fact stops being true.
+            provenance: raw provenance dict for the bound (defaults to
+                External/UserAsserted — the same channel a user-asserted close
+                uses; must be External(*), any other channel raises
+                mempill.ValidationError).
+            confidence: confidence in this validity assertion (0.0-1.0).
+
+        Raises:
+            mempill.NotFoundError: no live claim on the line.
+            mempill.ValidationError: more than one live claim, or non-External
+                provenance.
+            mempill.UnparsableDateError: `at` cannot be normalised.
+        """
+        prov = provenance if provenance is not None else ProvenanceLabel.external_user_asserted()
+        receipt = mempill.end_fact(
+            self._engine, agent_id, subject, predicate, at,
+            provenance=prov, confidence=confidence,
+        )
+        log.debug(
+            "end_fact agent=%s subject=%s predicate=%s at=%s -> claim_ref=%s "
+            "disposition=%s no_op=%s",
+            agent_id, subject, predicate, at,
+            receipt.claim_ref, receipt.disposition, receipt.no_op,
+        )
+        return EndFactResult(
+            claim_ref=receipt.claim_ref,
+            disposition=receipt.disposition,
+            effective_at=receipt.effective_at,
+            no_op=receipt.no_op,
+        )
+
     # ── Read path — current belief ────────────────────────────────────────────
 
     def recall(self, agent_id: str, subject: str, predicate: str) -> BeliefView:
@@ -305,10 +406,17 @@ class MempillAdapter:
         subject_lines: list[list[str]],
         max_passes: int = 3,
     ) -> dict:
-        """Run the engine's reconcile loop for (subject, predicate) pairs.
+        """Run the engine's reconcile for (subject, predicate) pairs.
 
         Folds non-overlapping claim windows into CommittedCheap without oracle
-        involvement. Returns the raw engine response from the last pass.
+        involvement. Returns the raw engine response from the FIRST pass.
+
+        Engine reconcile is now idempotent: repeated passes are unnecessary and
+        would silently hide earlier Contested escalations. Single pass ensures
+        MANDATORY CONTESTED ESCALATION contract is visible to callers.
+
+        Note: max_passes param is deprecated (kept for backward compatibility).
+        Callers may wrap in their own loop if needed (e.g., hitl_node).
 
         Exposed so nodes and tools do NOT need to reach into adapter._engine.
         """
@@ -316,16 +424,12 @@ class MempillAdapter:
             "agent_id": agent_id,
             "subject_lines": subject_lines,
         }
-        last_resp: dict = {}
-        for _pass in range(max_passes):
-            last_resp = self._engine.reconcile(req)
-            if last_resp.get("oracle_escalations", 0) == 0:
-                break
+        resp = self._engine.reconcile(req)
         log.debug(
-            "reconcile agent=%s subject_lines=%s passes=%d result=%s",
-            agent_id, subject_lines, _pass + 1, last_resp,
+            "reconcile agent=%s subject_lines=%s result=%s",
+            agent_id, subject_lines, resp,
         )
-        return last_resp
+        return resp
 
     # ── Oracle / HITL methods (W7) ────────────────────────────────────────────
 
@@ -389,15 +493,29 @@ class MempillAdapter:
         """Return the engine's canonical, chronologically-folded history timeline.
 
         Delegates to engine.query_history({agent_id, subject, predicate}). Entries
-        are ordered oldest→newest and ALREADY truncated/non-overlapping — later
-        adjudications may have shortened an earlier entry's valid_until below what
-        that claim originally stated. Do not reinterpret or re-derive the timeline
-        from audit_trail/recall_subject; this fold IS the authoritative answer to
-        "history over time" questions.
+        are ordered oldest→newest; each entry's valid_until reflects the engine's
+        EFFECTIVE window for that claim (its own stated end, or an adjacent
+        entry's start where that comes first) — this is NOT proof that a later
+        adjudication shortened the claim, and overlapping entries may reflect an
+        unresolved conflict rather than a settled succession (consult
+        recall/recall_at for current Contested status). Do not reinterpret or
+        re-derive the timeline from audit_trail/recall_subject; this fold IS the
+        authoritative answer to "history over time" questions.
+
+        Each entry natively carries valid_from_display/valid_until_display (plus
+        valid_from_granularity/valid_until_granularity) from the engine itself
+        (mempill 0.4.0, engine PR #67) — honest, granularity-aware renders (e.g.
+        "2025-12" for a month-granular fact, never a fabricated day), already
+        correctly truncated against a successor's granularity where applicable.
+        The engine OMITS *_until_display/*_until_granularity entirely (rather
+        than setting them to None) when valid_until is open-ended; this adapter
+        normalises that to an explicit None so callers/tests can rely on the
+        keys always being present.
 
         Returns a list of dicts, each containing:
           claim_ref, value, valid_from, valid_until, status ("Current"/"Superseded"),
-          provenance, value_confidence.
+          provenance, value_confidence, valid_from_display, valid_until_display,
+          valid_from_granularity, valid_until_granularity.
         """
         log.debug(
             "query_history agent=%s subject=%s predicate=%s", agent_id, subject, predicate
@@ -407,7 +525,12 @@ class MempillAdapter:
             "subject": subject,
             "predicate": predicate,
         })
-        entries: list[dict] = list(raw.get("entries") or [])
+        entries: list[dict] = []
+        for e in raw.get("entries") or []:
+            entry = dict(e)
+            entry.setdefault("valid_until_display", None)
+            entry.setdefault("valid_until_granularity", None)
+            entries.append(entry)
         log.debug(
             "query_history returned %d entries for %s/%s", len(entries), subject, predicate
         )

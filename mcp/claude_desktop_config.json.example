@@ -9,7 +9,7 @@
       ],
       "env": {
         "MEMPILL_AGENT_ID": "my-agent",
-        "MEMPILL_DB_PATH": "/ABSOLUTE/PATH/TO/mempill-demo/demo.db"
+        "MEMPILL_DB_DIR": "/ABSOLUTE/PATH/TO/mempill-demo/.mempill"
       }
     }
   }

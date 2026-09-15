@@ -7,7 +7,8 @@ All fields have safe defaults so the demo runs without any configuration.
 Key env vars:
   MEMPILL_AGENT_ID         → agent/session owner ID (default: jordan-park-001)
   NAIVE_MODE=true          → use the NaiveAdapter instead of mempill (flip to watch it misbehave)
-  MEMPILL_DB_PATH          → optional path for a file-backed persistent engine
+  MEMPILL_DB_DIR           → optional base directory for a file-backed persistent engine
+                              (file derived as MEMPILL_DB_DIR/agent_{MEMPILL_AGENT_ID}.db)
   ANTHROPIC_API_KEY        → required for LLMSupervisor; absent → MockSupervisor (CI-safe)
   ANTHROPIC_MODEL          → model string for LLMSupervisor (default: claude-haiku-4-5)
   LANGSMITH_API_KEY        → enables LangSmith tracing (optional; absent → no-op)
@@ -48,11 +49,13 @@ class Settings(BaseSettings):
     Default: False → use MempillAdapter (bi-temporal, provenance, audit).
     """
 
-    mempill_db_path: Optional[str] = None
-    """Optional file path for a persistent file-backed mempill engine.
-    When set, the engine is opened via mempill.open_oracle(path, HumanOracle()).
+    mempill_db_dir: Optional[str] = None
+    """Optional base directory for a persistent file-backed mempill engine.
+    When set, the engine is opened via
+    mempill.open_oracle_for_agent(db_dir, agent_id, HumanOracle()); the actual
+    database file is derived as db_dir/agent_{mempill_agent_id}.db.
     When None (default), uses an ephemeral in-memory engine.
-    Env: MEMPILL_DB_PATH
+    Env: MEMPILL_DB_DIR
     """
 
     # ── LLM / API keys ────────────────────────────────────────────────────────

@@ -3,13 +3,16 @@ name = "mempill-demo"
 version = "0.1.0"
 description = "Runnable demonstration of mempill temporal-validity + console agent"
 requires-python = ">=3.12"
-# mempill 0.3.0 is published on PyPI and resolves normally as a dependency.
+# mempill 0.4.0 is NOT YET published on PyPI (deliberately unpublished pending this
+# migration's verification). Until it is published, install from a local wheel built
+# from the sibling mempill repo (scripts/setup.sh --local-engine). Do NOT run
+# `uv lock` / `uv sync` against this pin until 0.4.0 is live on PyPI.
 # mempill-mcp is NOT on PyPI (pure Python, unpublished); setup.sh path-installs it
 # from the sibling repo ../mempill/mempill-mcp/ for the optional MCP demo.
 dependencies = [
     "anthropic>=0.111,<1",
     "mcp>=1.9,<2",
-    "mempill>=0.3.0,<0.4",
+    "mempill>=0.4.0,<0.5",
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
     "rich>=13",

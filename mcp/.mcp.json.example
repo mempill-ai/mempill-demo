@@ -1,5 +1,5 @@
 {
-  "_comment": "Claude Code project MCP config for mempill. Copy to .mcp.json at mempill-demo repo root (not tracked by git — see .gitignore). Replace /ABSOLUTE/PATH/TO/mempill-demo with your actual path. Claude Code supports ${VAR:-default} env var expansion for the env block. If MEMPILL_DB_PATH is unset, the server uses an in-memory (ephemeral) engine. IMPORTANT: uses the demo venv Python that already has the mempill wheel built.",
+  "_comment": "Claude Code project MCP config for mempill. Copy to .mcp.json at mempill-demo repo root (not tracked by git — see .gitignore). Replace /ABSOLUTE/PATH/TO/mempill-demo with your actual path. Claude Code supports ${VAR:-default} env var expansion for the env block. If MEMPILL_DB_DIR is unset, the server uses an in-memory (ephemeral) engine; otherwise the DB file is derived as MEMPILL_DB_DIR/agent_{MEMPILL_AGENT_ID}.db. IMPORTANT: uses the demo venv Python that already has the mempill wheel built.",
   "mcpServers": {
     "mempill": {
       "type": "stdio",
@@ -10,7 +10,7 @@
       ],
       "env": {
         "MEMPILL_AGENT_ID": "${MEMPILL_AGENT_ID:-demo-agent}",
-        "MEMPILL_DB_PATH": "${MEMPILL_DB_PATH}"
+        "MEMPILL_DB_DIR": "${MEMPILL_DB_DIR}"
       }
     }
   }
