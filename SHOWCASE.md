@@ -9,11 +9,10 @@
 ### mempill dependency
 
 mempill 0.4.0 (per-agent file storage: `open_for_agent` / `open_oracle_for_agent`) is
-**not yet published on PyPI** — the `mempill>=0.4.0,<0.5` pin in `pyproject.toml` will fail to
-resolve via the default `scripts/setup.sh` until it is published.
-
-Until then, run `scripts/setup.sh --local-engine` — it builds and installs mempill from the
-sibling `../mempill` repo instead of PyPI.
+published on PyPI — the default `scripts/setup.sh` resolves the `mempill>=0.4.0,<0.5` pin
+against PyPI. Contributors testing unreleased mempill engine changes can instead run
+`scripts/setup.sh --local-engine`, which builds and installs mempill from the sibling
+`../mempill` repo.
 
 If you ever need to rebuild the venv from scratch, follow the project `README.md`
 setup instructions.
@@ -287,7 +286,7 @@ See `STUDIO_DEMO.md` for the full turn-by-turn script with exact inputs.
 .venv/bin/python -m pytest -m "not live" -q
 ```
 
-Runs all non-live tests (no API key required). Expected result: **407 passed** (includes console + showcase + router tests).
+Runs all non-live tests (no API key required). Expected result: **427 passed** (includes console + showcase + router tests).
 
 ```bash
 .venv/bin/python -m pytest -m live -q
@@ -375,4 +374,5 @@ Scripts are registered in `pyproject.toml [project.scripts]` and installed by:
 .venv/bin/uv pip install -e . --no-deps
 ```
 
-`--no-deps` is required to avoid pulling `mempill` from PyPI.
+`--no-deps` is required when using `--local-engine` to avoid overwriting the locally built
+mempill wheel with the PyPI release.
