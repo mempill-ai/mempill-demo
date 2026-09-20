@@ -5,6 +5,28 @@ Slash commands must start with `/`.
 
 ---
 
+## CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--db-dir DIR` | `.mempill` | Base directory for per-agent SQLite files (actual file: `<dir>/agent_<agent_id>.db`) |
+| `--agent AGENT_ID` | `console-user` | Agent identifier (determines which DB file is used) |
+| `--llm` | off | Enable LLM-backed natural language parsing (requires `ANTHROPIC_API_KEY`) |
+| `--scenario` | off | Auto-play the 3-act demonstration scenario then hand off to REPL |
+| `--selftest` | off | Run deterministic assertion suite and exit (no API key required) |
+| `--reset` | off | Delete the persistent per-agent DB file and exit |
+| `--verbose` | off | Enable verbose logging of engine calls (use `--verbose` for INFO, `--verbose --verbose` for DEBUG); also honoured via `MEMPILL_VERBOSE=1` (INFO) or `MEMPILL_VERBOSE=2` (DEBUG) |
+
+**Example:**
+```bash
+.venv/bin/python -m mempill_demo --db-dir /tmp/mp-verify --agent alice-01
+.venv/bin/python -m mempill_demo --scenario                 # run demo, then REPL
+.venv/bin/python -m mempill_demo --selftest                # run tests, exit
+.venv/bin/python -m mempill_demo --reset                   # delete DB, exit
+```
+
+---
+
 ## Write Commands
 
 ### INGEST
@@ -74,22 +96,30 @@ Then auto-queries to show `Belief unchanged (firewall held)`.
 
 ### RECALL
 ```
-RECALL <subject> <predicate>
+RECALL <subject> <predicate> [valid=<ISO>] [tx=<ISO>]
 ```
-Queries the current canonical belief. Applies agent rules R1-R5:
+Queries the current canonical belief (or historical belief at specified times). Applies agent rules R1-R5:
 - R1: Committed → show value + valid_time + conf
 - R2: Contested → surface BOTH values + suggest `/reconcile` (never guesses)
 - R3: Superseded → show current value + suggest `/history`
 - R5: No belief → "No memory … Use INGEST"
 
+| Modifier | Effect |
+|----------|--------|
+| `valid=<ISO>` | Point-in-time query (world-history axis); omit to query now |
+| `tx=<ISO>` | Transaction-time query (what-did-we-know axis); omit to query as-of-now |
+
 **SDK mapping:**
 ```python
-engine.query_memory({"agent_id": agent_id, "subject": subject, "predicate": predicate})
+engine.query_memory({"agent_id": agent_id, "subject": subject, "predicate": predicate,
+                     "point_in_time": valid_at, "as_of_tx_time": tx_time})
 ```
 
-**Example:**
+**Examples:**
 ```
 RECALL acme:ceo held_by
+RECALL acme:ceo held_by valid=2024-06
+RECALL acme:ceo held_by valid=2024-06 tx=2025-02-01
 ```
 
 ---
@@ -126,6 +156,34 @@ The engine promotes the highest-confidence non-contested claim and marks others 
 **SDK mapping:**
 ```python
 engine.reconcile({"agent_id": agent_id, "subject_lines": [(subject, predicate)]})
+```
+
+### /review
+Enters the human-in-the-loop adjudication UI for all `Queued`/`PendingReview` Contested claims.
+Prompts for each pending pair: enter `c` (challenger wins), `i` (incumbent wins), or `s`/empty (defer).
+
+**Example:**
+```
+/review
+[/review] 2 pending adjudication(s):
+
+  Incumbent: Alice | Challenger: Bob | Queued at 2025-02-15T10:30Z
+  → [c]hallenger, [i]ncumbent, or [s]kip? c
+  ✓ Affirmed challenger.
+
+  Incumbent: Acme HQ/Austin | Challenger: Acme HQ/Boston | Queued at 2025-02-16T14:22Z
+  → [c]hallenger, [i]ncumbent, or [s]kip? i
+  ✓ Affirmed incumbent.
+```
+
+### /sweep
+Expires all adjudications that have been queued longer than the oracle timeout (default 24h).
+Reverts queued claims back to `Contested` (no decision made).
+
+### /reset (CLI flag)
+Delete the persistent per-agent database and exit. Use `--reset` as a command-line flag:
+```bash
+.venv/bin/python -m mempill_demo --reset
 ```
 
 ### /help

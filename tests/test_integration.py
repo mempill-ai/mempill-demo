@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import sys
 import tempfile
-import pathlib
 
 import mempill
 from mempill import Disposition, ProvenanceLabel
@@ -366,11 +365,11 @@ def run() -> None:
     print("=" * 62)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = str(pathlib.Path(tmpdir) / "durability-test.db")
+        db_dir = tmpdir
         dur_agent = "durability-agent"
 
         # Phase A: open, ingest conflict, verify queued
-        eng_a = mempill.open_oracle(db_path, HumanOracle())
+        eng_a = mempill.open_oracle_for_agent(db_dir, dur_agent, HumanOracle())
         eng_a.ingest_claim({
             "agent_id": dur_agent, "subject": "acme:cfo", "predicate": "held_by", "value": "Grace",
             "provenance": ProvenanceLabel.external_first_hand(), "cardinality": "Functional",
@@ -398,8 +397,9 @@ def run() -> None:
         print(f"  handle before close: {handle_dur[:8]}...")
         del eng_a  # simulate restart
 
-        # Phase B: reopen, verify pending still present (defer survived restart)
-        eng_b = mempill.open_oracle(db_path, HumanOracle())
+        # Phase B: reopen (same base_dir + same agent_id → same derived file),
+        # verify pending still present (defer survived restart)
+        eng_b = mempill.open_oracle_for_agent(db_dir, dur_agent, HumanOracle())
         pending_b = eng_b.list_pending_adjudications(agent_id=dur_agent)
         print(f"\nT12 Phase B (after reopen): pending={len(pending_b)}")
         _assert(

@@ -27,8 +27,10 @@ that reference it do not break during the transition period.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 from typing_extensions import TypedDict
+
+from mempill_showcase.frameworks.langgraph.router_state import _safe_add_messages
 
 
 class IntentLabel:
@@ -54,7 +56,17 @@ class ExecAssistantState(TypedDict, total=False):
     agent_id: str
 
     # ── LangGraph ReAct built-in: message list ────────────────────────────────
-    messages: list[Any]
+    # Annotated[..., _safe_add_messages] (TASK-33 item 3): mirrors
+    # RouterState.messages' hardened accumulation reducer (router_state.py) —
+    # merge/dedup-by-id across turns instead of last-write-wins, without
+    # crashing on non-coercible junk items. NOTE: create_react_agent
+    # (frameworks/langgraph/graph.py:build_graph) builds its own internal
+    # agent graph with LangGraph's own built-in add_messages-based state
+    # schema — it does NOT consume ExecAssistantState as a state_schema
+    # today, so this annotation is currently inert for that path and exists
+    # for (a) hitl_node.py's type hint and (b) any future caller that DOES
+    # compile a graph against ExecAssistantState directly.
+    messages: Annotated[list[Any], _safe_add_messages]
 
     # ── HITL (populated after interrupt/resume inside request_adjudication) ───
     hitl_verdict: Optional[str]           # "Affirm" | "Deny" | "Abstain"

@@ -3,13 +3,12 @@ name = "mempill-demo"
 version = "0.1.0"
 description = "Runnable demonstration of mempill temporal-validity + console agent"
 requires-python = ">=3.12"
-# mempill 0.3.0 is published on PyPI and resolves normally as a dependency.
-# mempill-mcp is NOT on PyPI (pure Python, unpublished); setup.sh path-installs it
-# from the sibling repo ../mempill/mempill-mcp/ for the optional MCP demo.
+# mempill-mcp is not on PyPI (pure Python); setup.sh path-installs it from the
+# sibling repo ../mempill/mempill-mcp/ for the optional MCP demo.
 dependencies = [
     "anthropic>=0.111,<1",
     "mcp>=1.9,<2",
-    "mempill>=0.3.0,<0.4",
+    "mempill>=0.4.0,<0.5",
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
     "rich>=13",
@@ -48,7 +47,8 @@ showcase = [
 ]
 # studio: LangGraph Studio support — `pip install "langgraph-cli[inmem]"` then `langgraph dev`
 studio = [
-    "langgraph-cli[inmem]>=0.4,<1",
+    "langgraph-cli[inmem]>=0.4.31,<1",
+    "langgraph-api>=0.11,<1",
 ]
 
 [tool.hatch.build.targets.wheel]
