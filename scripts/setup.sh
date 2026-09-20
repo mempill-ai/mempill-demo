@@ -3,17 +3,13 @@
 #
 # This script creates a Python 3.12 venv and installs all showcase dependencies
 # (LangGraph, langchain-core, mempill). mempill 0.4.0 (per-agent file storage via
-# open_for_agent/open_oracle_for_agent) is NOT YET published on PyPI — it is
-# deliberately unpublished until this migration is fully verified. Until it is
-# published, --local-engine is REQUIRED (default PyPI mode will fail to resolve
-# mempill>=0.4.0,<0.5).
+# open_for_agent/open_oracle_for_agent) is published on PyPI.
 #
 # Usage:
 #   scripts/setup.sh                # default: install mempill from PyPI (mempill>=0.4.0,<0.5)
-#                                    # NOTE: will fail until mempill 0.4.0 is published.
-#   scripts/setup.sh --local-engine # install mempill from a LOCAL source build in ../mempill
-#                                    # instead — REQUIRED today; use this when developing/testing
-#                                    # unreleased mempill engine changes before they're published.
+#   scripts/setup.sh --local-engine # developer mode: install mempill from a LOCAL source
+#                                    # build in ../mempill instead — use this when developing
+#                                    # or testing unreleased mempill engine changes.
 #
 # Prerequisites:
 #   - uv  (https://docs.astral.sh/uv/)

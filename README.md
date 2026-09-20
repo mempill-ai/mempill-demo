@@ -10,15 +10,17 @@ last-write-wins adapter (`NaiveAdapter`) for contrast and a full compliance audi
 
 ## Quickstart — mempill_showcase
 
-**Python 3.12 required.** mempill 0.4.0 is not yet published on PyPI, so setup requires
-`--local-engine` (builds mempill from a sibling `../mempill` checkout) — see
-[mempill dependency](#mempill-dependency) below for details.
+**Python 3.12 required.**
 
 ```bash
 git clone <this-repo> mempill-demo
 cd mempill-demo
-bash scripts/setup.sh --local-engine   # creates .venv, builds + installs mempill from ../mempill + LangGraph/pytest
+bash scripts/setup.sh   # creates .venv, installs mempill from PyPI + LangGraph/pytest
 ```
+
+Contributors testing unreleased mempill engine changes can instead run
+`bash scripts/setup.sh --local-engine`, which builds and installs mempill from a sibling
+`../mempill` checkout — see [mempill dependency](#mempill-dependency) below for details.
 
 Run the 6-beat executive-assistant scenario (B-01..B-06) via the free-form ReAct agent:
 
@@ -28,11 +30,11 @@ Run the 6-beat executive-assistant scenario (B-01..B-06) via the free-form ReAct
 .venv/bin/mempill-showcase-audit    # compliance audit: tx-time replay + full provenance ledger
 ```
 
-Run the test suite (407 deterministic + 26 live tests):
+Run the test suite (427 deterministic + 26 live tests):
 
 ```bash
 .venv/bin/python -m pytest -m "not live" -q
-# Expected: 407 passed
+# Expected: 427 passed
 ```
 
 See [SHOWCASE.md](SHOWCASE.md) for the full architecture, 6-beat scenario walkthrough,
@@ -155,7 +157,7 @@ mempill-demo/
     mempill_showcase/    ← PRIMARY: reference app (LangGraph ReAct agent + mempill bi-temporal memory)
     mempill_demo/        ← simpler console REPL (3-act mempill demo)
   tests/                 ← root-level tests for mempill_demo + edge cases
-  scripts/setup.sh       ← creates .venv, installs prerelease mempill wheel
+  scripts/setup.sh       ← creates .venv, installs mempill from PyPI (or --local-engine)
   examples/temporal_validity.py  ← standalone 3-act demo
   mcp/                   ← MCP stdio client + config examples
   SHOWCASE.md            ← full showcase architecture and walkthrough
@@ -167,8 +169,7 @@ mempill-demo/
 ## mempill dependency
 
 mempill 0.4.0 (per-agent file storage via `open_for_agent` / `open_oracle_for_agent`) is
-**not yet published on PyPI** — it is deliberately unpublished until this migration is fully
-verified. Until it is published, `scripts/setup.sh --local-engine` is **required**: it builds
-and installs mempill from the sibling `../mempill` repo instead of PyPI. The default
-`scripts/setup.sh` (no flag) resolves the `mempill>=0.4.0,<0.5` pin in `pyproject.toml` against
-PyPI and will fail until 0.4.0 is published — do not use it yet.
+published on PyPI. The default `scripts/setup.sh` (no flag) resolves the `mempill>=0.4.0,<0.5`
+pin in `pyproject.toml` against PyPI. Pass `--local-engine` instead to build and install
+mempill from a sibling `../mempill` repo — useful when developing or testing unreleased
+mempill engine changes before they're published.
