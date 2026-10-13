@@ -2,15 +2,14 @@
 # scripts/setup.sh — idempotent setup for mempill-demo on Python 3.12
 #
 # This script creates a Python 3.12 venv and installs all showcase dependencies
-# (LangGraph, langchain-core, mempill) via PyPI. mempill 0.3.0 (query_subject,
-# valid_at, granularity) is published on PyPI and resolves as a normal
-# dependency — no local wheel build required.
+# (LangGraph, langchain-core, mempill). mempill 0.4.0 (per-agent file storage via
+# open_for_agent/open_oracle_for_agent) is published on PyPI.
 #
 # Usage:
-#   scripts/setup.sh                # default: install mempill from PyPI (mempill>=0.3.0,<0.4)
-#   scripts/setup.sh --local-engine # install mempill from a LOCAL source build in ../mempill
-#                                    # instead — use this when developing/testing unreleased
-#                                    # mempill engine changes before they're published to PyPI.
+#   scripts/setup.sh                # default: install mempill from PyPI (mempill>=0.4.0,<0.5)
+#   scripts/setup.sh --local-engine # developer mode: install mempill from a LOCAL source
+#                                    # build in ../mempill instead — use this when developing
+#                                    # or testing unreleased mempill engine changes.
 #
 # Prerequisites:
 #   - uv  (https://docs.astral.sh/uv/)
@@ -98,7 +97,7 @@ else
     uv pip install \
         "anthropic>=0.111,<1" \
         "mcp>=1.9,<2" \
-        "mempill>=0.3.0,<0.4" \
+        "mempill>=0.4.0,<0.5" \
         "python-dotenv>=1.0" \
         "rich>=13"
 fi
@@ -153,7 +152,7 @@ if [ "$LOCAL_ENGINE" = "true" ]; then
     uv pip install --force-reinstall "$WHEEL"
     echo "      Installed mempill from local build: $(basename "$WHEEL")"
 else
-    echo "      Installed mempill from PyPI (0.3.0+)"
+    echo "      Installed mempill from PyPI (0.4.0+)"
 fi
 
 # ── Install mempill-mcp (optional, pure Python, editable) ───────────────────
@@ -173,8 +172,8 @@ echo ""
 echo "Verify with:"
 echo "  .venv/bin/python -c \"import mempill, langgraph, langchain_core; print('imports OK')\""
 echo ""
-echo "Run the showcase test suite (no API key required):"
-echo "  .venv/bin/python -m pytest src/mempill_showcase/tests/ -v -m 'not live'"
+echo "Run the test suite (no API key required):"
+echo "  .venv/bin/python -m pytest -m 'not live' -q"
 echo ""
 echo "Run the demo:"
 echo "  .venv/bin/python examples/temporal_validity.py"
@@ -184,8 +183,8 @@ echo "  .venv/bin/python -m mempill_demo --scenario    # 3-act demo then REPL"
 echo "  .venv/bin/python -m mempill_demo --selftest    # CI assertion suite (no API key)"
 echo "  .venv/bin/python -m mempill_demo               # plain REPL"
 echo ""
-echo "Run the LangGraph conversational agent (requires ANTHROPIC_API_KEY in .env):"
-echo "  .venv/bin/python -m mempill_langgraph"
+echo "Run the LangGraph Studio graphs (requires ANTHROPIC_API_KEY in .env):"
+echo "  .venv/bin/langgraph dev"
 echo ""
 if [ "$MCP_INSTALLED" = "true" ]; then
     echo "Run the MCP verification:"

@@ -38,7 +38,6 @@ from mempill_showcase.tools.mempill_remember_tool import MempillRememberTool
 from mempill_showcase.tools.rag_read_tool import RAGReadTool
 from mempill_showcase.tools.rag_write_tool import InMemoryRAGStore, RAGWriteTool
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
@@ -180,6 +179,7 @@ class TestRememberToolSuccession:
 
     def test_bitemoral_query_at_returns_austin_within_window(self, remember_tool, recall_tool):
         """query_at(valid_at=2024-06-01) returns Austin TX — proves succession bounding.
+        Fixed in mempill #76 (valid_at window filtering after end_fact Bound).
 
         Austin's valid window: 2023-06 to 2025-02 (bounded by the recall-then-close pattern).
         Querying at any date inside [2023-06, 2025-02) returns Austin.

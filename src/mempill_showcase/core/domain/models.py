@@ -25,6 +25,19 @@ class WriteReceipt:
         return self.disposition in ("Contested", "Conflict", "QueuedForAdjudication")
 
 
+# ── end_fact result (TASK-33-W4-DEMO: end_fact idiom) ──────────────────────────
+
+@dataclass
+class EndFactResult:
+    """Result returned by MemoryStore.end_fact() — bounds the incumbent claim's
+    open-ended valid-time window in place (the row itself is never touched, only
+    a validity assertion is appended)."""
+    claim_ref: str
+    disposition: str          # "Superseded" on a normal bound; unchanged on a no-op repeat.
+    effective_at: str         # RFC3339 — the instant the closed fact's window now ends at.
+    no_op: bool                # True when this call repeated an identical bound (I6 idempotent).
+
+
 # ── Recall / query result ─────────────────────────────────────────────────────
 
 @dataclass

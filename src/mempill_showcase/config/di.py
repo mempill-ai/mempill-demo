@@ -5,7 +5,7 @@ Builds the engine + chosen adapter (mempill or naive) based on settings.
 All mempill imports are deferred to this module and the mempill_adapter.
 
 Public API:
-  build_mempill_adapter(in_memory, oracle_backed, db_path)
+  build_mempill_adapter(in_memory, oracle_backed, db_dir, agent_id)
     Build a MempillAdapter wrapping a real mempill engine.
 
   build_naive_adapter()
@@ -35,7 +35,8 @@ Environment variables:
   LANGSMITH_API_KEY  — enables LangSmith tracing (optional; absent = no-op).
   LANGSMITH_TRACING  — set to "true" to force-enable tracing.
   LANGSMITH_PROJECT  — LangSmith project name (default: "mempill-showcase").
-  MEMPILL_DB_PATH    — optional persistent SQLite engine path.
+  MEMPILL_DB_DIR     — optional persistent SQLite engine base directory
+                        (file derived as MEMPILL_DB_DIR/agent_{MEMPILL_AGENT_ID}.db).
 """
 from __future__ import annotations
 
@@ -51,14 +52,15 @@ _SENTINEL = object()
 
 
 def _adapter_from_settings(settings=None):
-    """Return a MempillAdapter configured from settings (db_path, oracle_backed)."""
+    """Return a MempillAdapter configured from settings (db_dir, agent_id, oracle_backed)."""
     if settings is None:
         from mempill_showcase.config.settings import get_settings
         settings = get_settings()
     return build_mempill_adapter(
         in_memory=True,
         oracle_backed=True,
-        db_path=settings.mempill_db_path or None,
+        db_dir=settings.mempill_db_dir or None,
+        agent_id=settings.mempill_agent_id,
     )
 
 
@@ -70,31 +72,35 @@ class AdapterMode(str, Enum):
 def build_mempill_adapter(
     in_memory: bool = True,
     oracle_backed: bool = True,
-    db_path: Optional[str] = None,
+    db_dir: Optional[str] = None,
+    agent_id: str = "jordan-park-001",
 ):
     """Build a MempillAdapter wrapping a real mempill engine.
 
     Args:
         in_memory:     True → ephemeral in-memory engine (tests and demos).
-                       Ignored when db_path is supplied.
+                       Ignored when db_dir is supplied.
         oracle_backed: True (default) → open_oracle_in_memory(HumanOracle()) so that
                        genuine conflicting Functional writes return QueuedForAdjudication
                        and queue for human adjudication via list_pending_adjudications /
                        submit_adjudication.
                        False → open_in_memory() (non-oracle).
-                       Always True when db_path is supplied.
-        db_path:       Optional filesystem path for a persistent SQLite-backed engine.
-                       When set, opens via mempill.open_oracle(path, HumanOracle()).
+                       Always True when db_dir is supplied.
+        db_dir:        Optional base directory for a persistent SQLite-backed engine.
+                       The actual file is derived as db_dir/agent_{agent_id}.db.
+                       When set, opens via mempill.open_oracle_for_agent(db_dir, agent_id, HumanOracle()).
+        agent_id:      Agent ID used to derive the per-agent DB file when db_dir is
+                       supplied. Defaults to the showcase's default agent identity.
     """
     import mempill
     from mempill_showcase.adapters.memory.mempill_adapter import MempillAdapter
     from mempill_showcase.core.ports.oracle import HumanOracle
 
-    if db_path:
+    if db_dir:
         import pathlib
-        pathlib.Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path(db_dir).mkdir(parents=True, exist_ok=True)
         oracle = HumanOracle()
-        engine = mempill.open_oracle(str(db_path), oracle)
+        engine = mempill.open_oracle_for_agent(str(db_dir), agent_id, oracle)
         return MempillAdapter(engine)
 
     if oracle_backed:
@@ -250,6 +256,67 @@ def build_app_from_settings(settings=None):
     else:
         adapter = _adapter_from_settings(settings)
         return build_app(adapter=adapter, model_name=settings.anthropic_model)
+
+
+# ── Dual-agent router support (TASK-31) ──────────────────────────────────────
+
+def build_agent_instance(
+    agent_id: str,
+    responsibility: str,
+    known_entities: str,
+    db_dir: Optional[str] = None,
+    model_name: Optional[str] = None,
+    oracle_backed: bool = True,
+):
+    """Build one dual-agent-router agent instance: (adapter, compiled_subgraph).
+
+    Thin composition wrapper for TASK-31's dual-agent router — builds a
+    MempillAdapter scoped to *agent_id*, its 10 tools, and a compiled ReAct
+    subgraph whose system prompt carries the per-instance *responsibility*
+    preamble and *known_entities* line (via build_system_prompt/build_graph).
+
+    Existing build_mempill_adapter/build_agent_tools/build_graph/
+    build_graph_from_adapter functions are untouched — this is purely additive.
+
+    Args:
+        agent_id:       Per-instance agent_id (e.g. "people-ops-001").
+        responsibility: Per-instance responsibility preamble text.
+        known_entities: Per-instance KNOWN ENTITIES line text.
+        db_dir:         Optional base directory for a persistent SQLite-backed
+                         engine (file derived as db_dir/agent_{agent_id}.db).
+                         None → ephemeral in-memory engine.
+        model_name:      Anthropic model string. Defaults to ANTHROPIC_MODEL
+                         env var or "claude-haiku-4-5" (build_graph's default).
+        oracle_backed:  True (default) → HumanOracle-backed engine so
+                         contested writes queue for adjudication.
+
+    Returns:
+        (adapter, compiled_subgraph) — MempillAdapter + compiled ReAct app.
+        The subgraph is compiled with checkpointer=None (Studio/router path —
+        the parent router graph's checkpointer governs persistence, per
+        SPIKE_RESULTS.md Smoke 1: subgraph checkpointer=None is correctly
+        inherited from the parent).
+    """
+    adapter = build_mempill_adapter(
+        in_memory=(db_dir is None),
+        oracle_backed=oracle_backed,
+        db_dir=db_dir,
+        agent_id=agent_id,
+    )
+    tools = build_agent_tools(adapter)
+
+    from mempill_showcase.frameworks.langgraph.graph import build_graph
+
+    subgraph = build_graph(
+        adapter=adapter,
+        tools=tools,
+        checkpointer=None,
+        model_name=model_name,
+        agent_id=agent_id,
+        responsibility=responsibility,
+        known_entities=known_entities,
+    )
+    return adapter, subgraph
 
 
 # ── Legacy build_langgraph (backward-compat) ─────────────────────────────────

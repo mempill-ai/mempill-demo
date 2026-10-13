@@ -431,23 +431,27 @@ def run_scenario(
 
 # ── CLI entry ─────────────────────────────────────────────────────────────────
 
-def _reset_db(db_path: str | None, console: object) -> None:
-    """Delete db_path and any SQLite sidecar files (-wal, -shm) if db_path is set.
+def _reset_db(db_dir: str | None, agent_id: str, console: object) -> None:
+    """Delete the per-agent DB file (and SQLite sidecars) under db_dir, if set.
+
+    The database file is derived the same way mempill.open_oracle_for_agent does:
+    db_dir/agent_{agent_id}.db.
 
     Guards:
-      - Only deletes db_path itself and the two well-known SQLite sidecar suffixes.
-      - Never deletes a path outside the configured db_path's parent directory.
-      - When db_path is None (in-memory store), logs a no-op message.
+      - Only deletes the derived db file itself and the two well-known SQLite
+        sidecar suffixes.
+      - Never deletes anything outside db_dir.
+      - When db_dir is None (in-memory store), logs a no-op message.
     """
     import pathlib
 
     _print = getattr(console, "print", print)
 
-    if not db_path:
+    if not db_dir:
         _print("[dim]--reset-db: in-memory store — nothing to delete.[/dim]")
         return
 
-    base = pathlib.Path(db_path).resolve()
+    base = (pathlib.Path(db_dir) / f"agent_{agent_id}.db").resolve()
     for suffix in ("", "-wal", "-shm"):
         target = pathlib.Path(str(base) + suffix)
         if target.exists():
@@ -479,7 +483,7 @@ def main() -> None:
         action="store_true",
         default=False,
         help=(
-            "Delete the file-backed DB (MEMPILL_DB_PATH) before running so the "
+            "Delete the file-backed DB (MEMPILL_DB_DIR) before running so the "
             "demo starts from a clean seed. For an in-memory store this is a no-op."
         ),
     )
@@ -500,7 +504,7 @@ def main() -> None:
     _settings = get_settings()
 
     if args.reset_db:
-        _reset_db(_settings.mempill_db_path, console)
+        _reset_db(_settings.mempill_db_dir, _settings.mempill_agent_id, console)
 
     console.print()
     console.print(Panel(

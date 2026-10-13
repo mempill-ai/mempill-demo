@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 @dataclass
 class AppConfig:
-    db_path: str = ".mempill/console.db"
+    db_dir: str = ".mempill"
     agent_id: str = "console-user"
     llm_mode: bool = False
     scenario: bool = False
