@@ -102,7 +102,6 @@ async def verify() -> None:
                     "provenance": "External:UserAsserted",
                     "cardinality": "Functional",
                     "confidence_value": 0.95,
-                    "confidence_valid_time": 0.9,
                     "criticality": "Low",
                     "valid_time": {
                         "start": "2020-01-01T00:00:00Z",
